@@ -313,44 +313,44 @@ jobs:
           print("All workflow-managed gateway targets are explicit and container-reachable.")
           PY
 
-      - name: Log in to GHCR (password via stdin)
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
-
-      - name: Build and push immutable image
-        id: immutable
-        run: |
-          set -euo pipefail
-          TAG="${IMAGE}:${GITHUB_SHA}"
-          docker build -t "$TAG" .
-          push_output="$(docker push "$TAG")"
-          printf '%s\n' "$push_output"
-          digest="$(printf '%s\n' "$push_output" | sed -n 's/^.*digest: \(sha256:[0-9a-f]\{64\}\).*$/\1/p' | tail -1)"
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          echo "image=${IMAGE}@$digest" >> "$GITHUB_OUTPUT"
-
       - name: Install cloudflared + write deploy key
+        env:
+          SSH_HOST: ${{ inputs.server_hostname }}
+          SSH_USER: ${{ inputs.server_user }}
+          SSH_PRIVATE_KEY: ${{ secrets.JEEB_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.JEEB_SSH_KNOWN_HOSTS }}
         run: |
           set -euo pipefail
+          : "${SSH_HOST:?server_hostname is required}"
+          : "${SSH_USER:?server_user is required}"
+          : "${SSH_PRIVATE_KEY:?JEEB_SSH_PRIVATE_KEY is required}"
+          : "${SSH_KNOWN_HOSTS:?JEEB_SSH_KNOWN_HOSTS is required}"
           wget -q https://github.com/cloudflare/cloudflared/releases/download/2026.8.2/cloudflared-linux-amd64.deb
           printf '%s  %s\n' \
             'c805c7c8102190c04dfc16e3b4cc4acc9007d5b19b3afbcd608ea6fed7645a43' \
             cloudflared-linux-amd64.deb | sha256sum --check --strict
           sudo dpkg -i cloudflared-linux-amd64.deb || sudo apt-get install -f -y
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
-          KEY_MATERIAL="${{ secrets.JEEB_SSH_PRIVATE_KEY }}"
-          if printf '%s' "$KEY_MATERIAL" | grep -q '^-----BEGIN'; then
-            printf '%s\n' "$KEY_MATERIAL" > ~/.ssh/id_ed25519
+          if printf '%s' "$SSH_PRIVATE_KEY" | grep -q '^-----BEGIN'; then
+            printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
           else
-            printf '%s' "$KEY_MATERIAL" | base64 -d > ~/.ssh/id_ed25519
+            printf '%s' "$SSH_PRIVATE_KEY" | base64 -d > ~/.ssh/id_ed25519
           fi
           chmod 600 ~/.ssh/id_ed25519
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          ssh-keygen -F "$SSH_HOST" -f ~/.ssh/known_hosts >/dev/null || {
+            echo '::error::JEEB_SSH_KNOWN_HOSTS does not pin the requested server_hostname' >&2
+            exit 1
+          }
           cat > ~/.ssh/config <<EOF
           Host jeeb
-            HostName ${{ inputs.server_hostname }}
-            User ${{ inputs.server_user }}
+            HostName $SSH_HOST
+            User $SSH_USER
             IdentityFile ~/.ssh/id_ed25519
             ProxyCommand cloudflared access ssh --hostname %h
-            StrictHostKeyChecking accept-new
+            UserKnownHostsFile ~/.ssh/known_hosts
+            StrictHostKeyChecking yes
           EOF
           chmod 600 ~/.ssh/config
 
@@ -368,6 +368,21 @@ jobs:
             echo '::error::The staging gateway can be changed only by jeeb-staging-deploy.yml bootstrap/activation phases' >&2
             exit 1
           fi
+
+      - name: Log in to GHCR (password via stdin)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin
+
+      - name: Build and push immutable image
+        id: immutable
+        run: |
+          set -euo pipefail
+          TAG="${IMAGE}:${GITHUB_SHA}"
+          docker build -t "$TAG" .
+          push_output="$(docker push "$TAG")"
+          printf '%s\n' "$push_output"
+          digest="$(printf '%s\n' "$push_output" | sed -n 's/^.*digest: \(sha256:[0-9a-f]\{64\}\).*$/\1/p' | tail -1)"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "image=${IMAGE}@$digest" >> "$GITHUB_OUTPUT"
 
       - name: Remote GHCR login (token via stdin pipe)
         run: printf '%s' "${{ secrets.GITHUB_TOKEN }}" | ssh jeeb "docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin"

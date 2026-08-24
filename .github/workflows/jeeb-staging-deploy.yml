@@ -8,7 +8,7 @@ permissions:
   packages: write
 
 concurrency:
-  group: jeeb-staging-${{ github.event.repository.name }}
+  group: jeeb-staging-gateway-mutation
   cancel-in-progress: false
 
 env:
@@ -99,7 +99,10 @@ jobs:
               '  IdentityFile ~/.ssh/id_ed25519' \
               '  ProxyCommand cloudflared access ssh --hostname %h' \
               '  UserKnownHostsFile ~/.ssh/known_hosts' \
-              '  StrictHostKeyChecking yes'
+              '  StrictHostKeyChecking yes' \
+              '  ConnectTimeout 20' \
+              '  ServerAliveInterval 10' \
+              '  ServerAliveCountMax 2'
           } > "$HOME/.ssh/config"
           chmod 600 "$HOME/.ssh/config"
 
@@ -219,9 +222,16 @@ jobs:
             final_spec="$secret_stage/final-service-spec.json"
             final_version="$secret_stage/final-service-version"
             final_id="$secret_stage/final-service-id"
+            terminal_spec="$secret_stage/terminal-service-spec.json"
+            terminal_version="$secret_stage/terminal-service-version"
+            terminal_id="$secret_stage/terminal-service-id"
+            # shellcheck source=staging-gateway-mutation-lock.sh
+            source scripts/staging-gateway-mutation-lock.sh
+            staging_gateway_lock_init jeeb-staging "$secret_stage"
             capture_remote_spec() {
               local destination=$1 version_destination=$2 id_destination=$3
               local attempt before after before_id after_id snapshot identity
+              staging_gateway_lock_assert || return 1
               for attempt in 1 2 3; do
                 : "$attempt"
                 snapshot=$(mktemp "$secret_stage/.service-spec.XXXXXX")
@@ -245,7 +255,8 @@ jobs:
                   after_id=''; after=''
                   read -r after_id after <<< "$identity" || true
                   if [ "$before_id" = "$after_id" ] && [ "$before" = "$after" ] \
-                    && jq -e 'type == "object"' "$snapshot" >/dev/null; then
+                    && jq -e 'type == "object"' "$snapshot" >/dev/null \
+                    && staging_gateway_lock_assert; then
                     mv "$snapshot" "$destination"
                     chmod 600 "$destination"
                     (umask 077; printf '%s\n' "$before" > "$version_destination")
@@ -262,6 +273,23 @@ jobs:
                 && cmp -s "$final_spec" "$candidate_spec" \
                 && cmp -s "$final_version" "$candidate_version" \
                 && cmp -s "$final_id" "$candidate_id"
+            }
+            verify_candidate_readiness() {
+              ssh jeeb-staging bash -s -- "$published" "$health" <<'READINESS'
+                set -euo pipefail
+                published=$1
+                health=$2
+                candidate_ready=false
+                for attempt in $(seq 1 40); do
+                  if curl -fsS --max-time 5 \
+                    "http://127.0.0.1:${published}${health}" >/dev/null; then
+                    candidate_ready=true
+                    break
+                  fi
+                  sleep 4
+                done
+                [ "$candidate_ready" = true ]
+          READINESS
             }
             recover_exact_incumbent() {
               local recovery_ok=true
@@ -303,19 +331,28 @@ jobs:
                 # Docker's rollback CLI performs an unsafe fresh inspect before its
                 # update. Call the Engine API with the exact candidate Version.Index
                 # instead, so a third-state race is rejected atomically with 409.
+                staging_gateway_lock_assert || return 1
                 # shellcheck disable=SC2029
-                cas_status=$(ssh jeeb-staging "set -euo pipefail
-                  service_id='$candidate_service_id'
-                  expected_version='$candidate_index'
-                  api_version=\$(docker version --format '{{.Server.APIVersion}}')
-                  [[ \"\$service_id\" =~ ^[a-z0-9]+\$ ]]
-                  [[ \"\$api_version\" =~ ^[0-9]+\\.[0-9]+\$ ]]
-                  curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
-                    --unix-socket /var/run/docker.sock \
-                    --request POST --header 'Content-Type: application/json' \
-                    --data-binary @- \
-                    \"http://localhost/v\${api_version}/services/\${service_id}/update?version=\${expected_version}&rollback=previous&registryAuthFrom=previous-spec\"" \
-                    < "$candidate_spec") || cas_status=''
+                cas_status=$(
+                  {
+                    printf '%s\n' "$(<"$STAGING_GATEWAY_LOCK_OWNER_FILE")"
+                    cat "$candidate_spec"
+                  } | ssh jeeb-staging "set -euo pipefail
+                    lock_owner_file=\"\$HOME/.jeeb-deploy/locks/jeeb-staging-gateway.owner\"
+                    IFS= read -r expected_lock_owner
+                    [[ \"\$expected_lock_owner\" =~ ^[0-9a-f]{64}\$ ]]
+                    [ \"\$(cat \"\$lock_owner_file\" 2>/dev/null)\" = \"\$expected_lock_owner\" ]
+                    service_id='$candidate_service_id'
+                    expected_version='$candidate_index'
+                    api_version=\$(docker version --format '{{.Server.APIVersion}}')
+                    [[ \"\$service_id\" =~ ^[a-z0-9]+\$ ]]
+                    [[ \"\$api_version\" =~ ^[0-9]+\\.[0-9]+\$ ]]
+                    curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+                      --unix-socket /var/run/docker.sock \
+                      --request POST --header 'Content-Type: application/json' \
+                      --data-binary @- \
+                      \"http://localhost/v\${api_version}/services/\${service_id}/update?version=\${expected_version}&rollback=previous&registryAuthFrom=previous-spec\""
+                ) || cas_status=''
                 case "$cas_status" in
                   200) ;;
                   409)
@@ -408,6 +445,14 @@ jobs:
               if [ "$recovery_ok" = true ]; then
                 bash scripts/probe-staging-public-gateway-contract.sh \
                   || recovery_ok=false
+              fi
+              if [ "$recovery_ok" = true ]; then
+                if ! capture_remote_spec "$terminal_spec" "$terminal_version" "$terminal_id" \
+                  || ! cmp -s "$terminal_id" "$incumbent_id" \
+                  || ! cmp -s "$terminal_spec" "$incumbent_spec"; then
+                  echo 'RED: recovered service drifted after runtime/public verification' >&2
+                  recovery_ok=false
+                fi
               fi
               if [ "$recovery_ok" = true ]; then
                 echo "Verified ${recovery_mode} recovery to the exact incumbent Spec" >&2
@@ -547,6 +592,7 @@ jobs:
             }
             finish_deploy() {
               local status=$?
+              local lock_cleanup_ok=true
               trap - EXIT
               set +e
               if [ "$status" -ne 0 ] && [ "$rollback_armed" = true ]; then
@@ -555,15 +601,25 @@ jobs:
                   status=97
                 fi
               fi
-              rm -rf "$secret_stage"
               for created in "$jwt_secret_name" "$umjwt_secret_name" "$guardian_secret_name" \
                 "$probe_secret_name" "$membership_secret_name" "$firebase_secret_name" "$state_secret_name" \
                 "$notification_secret_name" "$settlement_secret_name" "$bundler_secret_name" \
                 "$job_secret_name"; do
                 # The generated secret name is intentionally expanded by the runner.
                 # shellcheck disable=SC2029
-                [ -z "$created" ] || ssh jeeb-staging "docker secret rm '$created' >/dev/null 2>&1 || true"
+                if [ -n "$created" ] && [ "$STAGING_GATEWAY_LOCK_HELD" = true ]; then
+                  if staging_gateway_lock_assert; then
+                    ssh jeeb-staging "docker secret rm '$created' >/dev/null 2>&1 || true"
+                  else
+                    lock_cleanup_ok=false
+                  fi
+                fi
               done
+              if [ "$STAGING_GATEWAY_LOCK_HELD" = true ]; then
+                staging_gateway_lock_release || lock_cleanup_ok=false
+              fi
+              [ "$lock_cleanup_ok" = true ] || status=98
+              rm -rf "$secret_stage"
               exit "$status"
             }
             trap finish_deploy EXIT
@@ -588,6 +644,7 @@ jobs:
             fi
             chmod 600 "$firebase_file"
             (umask 077; printf '%s' "$JEEB_STAGING_WSS_PROBE_MINT_KEY" > "$probe_key_file")
+            staging_gateway_lock_acquire
             stream_secret "$state_secret_name" "$JEEB_STATE_SERVICE_TOKEN"
             stream_secret "$notification_secret_name" "$NOTIFICATION_SERVICE_TOKEN"
             stream_secret "$settlement_secret_name" "$SETTLEMENT_SERVICE_TOKEN"
@@ -624,9 +681,14 @@ jobs:
           fi
           EXPECTED_PREVIOUS_IMAGE=$previous_image
           : "$EXPECTED_PREVIOUS_IMAGE"
+          staging_gateway_lock_assert
+          # Forwarded through the generated private remote script below.
+          # shellcheck disable=SC2034
+          STAGING_GATEWAY_LOCK_OWNER=$(<"$STAGING_GATEWAY_LOCK_OWNER_FILE")
           rollback_armed=true
           {
             for variable in IMAGE REMOTE_DOCKER_CONFIG REPOSITORY EXPECTED_PREVIOUS_IMAGE \
+              STAGING_GATEWAY_LOCK_OWNER \
               state_secret_name notification_secret_name settlement_secret_name \
               bundler_secret_name job_secret_name jwt_secret_name umjwt_secret_name \
               guardian_secret_name probe_secret_name membership_secret_name firebase_secret_name; do
@@ -635,6 +697,12 @@ jobs:
             cat <<'REMOTE'
           set -euo pipefail
           export DOCKER_CONFIG="$HOME/$REMOTE_DOCKER_CONFIG"
+          lock_owner_file="$HOME/.jeeb-deploy/locks/jeeb-staging-gateway.owner"
+          [[ "$STAGING_GATEWAY_LOCK_OWNER" =~ ^[0-9a-f]{64}$ ]]
+          [ "$(cat "$lock_owner_file" 2>/dev/null)" = "$STAGING_GATEWAY_LOCK_OWNER" ] || {
+            echo 'RED: staging gateway mutation lock was lost before update' >&2
+            exit 1
+          }
           network=jeeb-staging-net
           retired_gateway_env=(
             UnifiedPaymentGateway__BaseUrl
@@ -876,25 +944,6 @@ jobs:
             "${network_update_args[@]}" \
             "${secret_update_args[@]}" "${env_remove_args[@]}" \
             "${update_env[@]}" "${common[@]}" "$service"
-          [ "$(docker service inspect "$service" \
-            --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')" = "$IMAGE" ] || {
-            echo 'Deployed service spec does not match the build-produced digest' >&2
-            exit 1
-          }
-          ports=$(docker service inspect -f '{{range .Endpoint.Spec.Ports}}{{.PublishedPort}}:{{.TargetPort}}:{{.PublishMode}}{{end}}' "$service")
-          [ "$ports" = "${published}:${target}:host" ] || { echo "Unexpected ports: $ports" >&2; exit 1; }
-          healthy=false
-          for attempt in $(seq 1 40); do
-            if curl -fsS --max-time 5 "http://127.0.0.1:${published}${health}" >/dev/null; then
-              healthy=true
-              break
-            fi
-            sleep 4
-          done
-          if [ "$healthy" != true ]; then
-            docker service ps --no-trunc "$service" | head -n 8 || true
-            exit 1
-          fi
           REMOTE
           } | ssh jeeb-staging bash -se
           capture_remote_spec "$candidate_spec" "$candidate_version" "$candidate_id" || {
@@ -906,6 +955,14 @@ jobs:
             exit 1
           }
           [ "$(jq -er '.TaskTemplate.ContainerSpec.Image' "$candidate_spec")" = "$IMAGE" ]
+          jq -e --argjson published "$published" '
+            .EndpointSpec.Ports as $ports
+            | ($ports | length) == 1
+              and $ports[0].PublishedPort == $published
+              and $ports[0].TargetPort == 8080
+              and $ports[0].PublishMode == "host"
+          ' "$candidate_spec" >/dev/null
+          verify_candidate_readiness
           verify_bootstrap_flags
           ssh jeeb-staging bash -s -- jeeb-staging-jeeb-gateway "$IMAGE" \
             < scripts/verify-swarm-service-image.sh

@@ -20,7 +20,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: jeeb-staging-state-auth-smoke
+  group: jeeb-staging-gateway-mutation
   cancel-in-progress: false
 
 jobs:
@@ -89,7 +89,10 @@ jobs:
               '  IdentityFile ~/.ssh/id_ed25519' \
               '  ProxyCommand cloudflared access ssh --hostname %h' \
               '  UserKnownHostsFile ~/.ssh/known_hosts' \
-              '  StrictHostKeyChecking yes'
+              '  StrictHostKeyChecking yes' \
+              '  ConnectTimeout 20' \
+              '  ServerAliveInterval 10' \
+              '  ServerAliveCountMax 2'
           } > "$HOME/.ssh/config"
           chmod 600 "$HOME/.ssh/config"
 
@@ -182,6 +185,23 @@ jobs:
           }
 
           remote_probe before_restart
+          lock_stage=$(mktemp -d)
+          chmod 700 "$lock_stage"
+          # shellcheck source=staging-gateway-mutation-lock.sh
+          source scripts/staging-gateway-mutation-lock.sh
+          staging_gateway_lock_init jeeb-staging "$lock_stage"
+          finish_restart_probe() {
+            status=$?
+            trap - EXIT
+            set +e
+            if [ "$STAGING_GATEWAY_LOCK_HELD" = true ]; then
+              staging_gateway_lock_release || status=98
+            fi
+            rm -rf -- "$lock_stage"
+            exit "$status"
+          }
+          trap finish_restart_probe EXIT
+          staging_gateway_lock_acquire
           task_image_evidence() {
             ssh jeeb-staging 'set -eu
               container=$(docker ps -q \
@@ -204,8 +224,14 @@ jobs:
           [ -n "$before_task_image_id" ]
           before_task=$(ssh jeeb-staging \
             "docker service ps --filter desired-state=running --format '{{.ID}}' jeeb-staging-jeeb-gateway | head -n 1")
-          ssh jeeb-staging \
-            'docker service update --force --update-failure-action pause --detach=false --replicas 1 jeeb-staging-jeeb-gateway >/dev/null'
+          staging_gateway_lock_assert
+          printf '%s\n' "$(<"$STAGING_GATEWAY_LOCK_OWNER_FILE")" | ssh jeeb-staging \
+            'set -euo pipefail
+             IFS= read -r expected_lock_owner
+             [[ "$expected_lock_owner" =~ ^[0-9a-f]{64}$ ]]
+             lock_owner_file="$HOME/.jeeb-deploy/locks/jeeb-staging-gateway.owner"
+             [ "$(cat "$lock_owner_file" 2>/dev/null)" = "$expected_lock_owner" ]
+             docker service update --force --update-failure-action pause --detach=false --replicas 1 jeeb-staging-jeeb-gateway >/dev/null'
           after_image=$(ssh jeeb-staging \
             "docker service inspect --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' jeeb-staging-jeeb-gateway")
           after_task=$(ssh jeeb-staging \
@@ -223,6 +249,9 @@ jobs:
           printf 'runtime_image=%s\nrestart_task_changed=yes\nservice_replicas=1/1\n' \
             "$after_image" \
             >> evidence/state-auth-smoke.txt
+          staging_gateway_lock_release
+          rm -rf -- "$lock_stage"
+          trap - EXIT
 
       - name: Upload redacted evidence
         if: always()

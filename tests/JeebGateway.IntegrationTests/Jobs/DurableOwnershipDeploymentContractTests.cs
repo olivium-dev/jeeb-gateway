@@ -219,16 +219,23 @@ public sealed class DurableOwnershipDeploymentContractTests
         CountOccurrences(workflow, canonicalGuard).Should().Be(1);
         workflow.Should().Contain("*[!a-zA-Z0-9_.-]*)");
         workflow.Should().Contain("canonical_service=$(ssh jeeb");
+        workflow.Should().Contain("SSH_KNOWN_HOSTS: ${{ secrets.JEEB_SSH_KNOWN_HOSTS }}");
+        workflow.Should().Contain("UserKnownHostsFile ~/.ssh/known_hosts");
+        workflow.Should().Contain("StrictHostKeyChecking yes");
+        workflow.Should().NotContain("StrictHostKeyChecking accept-new");
 
         var firstExternalMutation = workflow.IndexOf("docker login", StringComparison.Ordinal);
+        var sshSetup = workflow.IndexOf("Install cloudflared + write deploy key", StringComparison.Ordinal);
+        var canonicalGuardIndex = workflow.IndexOf(canonicalGuard, StringComparison.Ordinal);
+        var build = workflow.IndexOf("docker build", StringComparison.Ordinal);
         workflow.IndexOf(serviceGuard, StringComparison.Ordinal)
             .Should().BeLessThan(firstExternalMutation);
         workflow.IndexOf(hostGuard, StringComparison.Ordinal)
             .Should().BeLessThan(firstExternalMutation);
-        workflow.IndexOf(canonicalGuard, StringComparison.Ordinal)
-            .Should().BeLessThan(
-                workflow.IndexOf("Remote GHCR login", StringComparison.Ordinal),
-                "Swarm IDs and aliases must be rejected before any remote mutation");
+        sshSetup.Should().BeLessThan(canonicalGuardIndex);
+        canonicalGuardIndex.Should().BeLessThan(firstExternalMutation,
+            "Swarm IDs and aliases must be rejected before local registry mutation");
+        firstExternalMutation.Should().BeLessThan(build);
     }
 
     [Fact]
@@ -271,6 +278,14 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().Contain("smoke_workflow_commit=%s");
         workflow.Should().Contain("runtime_image=%s");
         workflow.Should().NotContain("docker service " + "rollback");
+        workflow.Should().Contain("group: jeeb-staging-gateway-mutation");
+        workflow.Should().Contain("source scripts/staging-gateway-mutation-lock.sh");
+        workflow.Should().Contain("staging_gateway_lock_acquire");
+        workflow.Should().Contain("staging_gateway_lock_assert");
+        workflow.Should().Contain("staging_gateway_lock_release");
+        workflow.IndexOf("staging_gateway_lock_assert", StringComparison.Ordinal)
+            .Should().BeLessThan(
+                workflow.IndexOf("docker service update --force", StringComparison.Ordinal));
     }
 
     [Theory]
@@ -366,6 +381,14 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().Contain("cmp -s \"$final_spec\" \"$candidate_spec\"");
         workflow.Should().Contain("cmp -s \"$final_version\" \"$candidate_version\"");
         workflow.Should().Contain("cmp -s \"$final_id\" \"$candidate_id\"");
+        workflow.Should().Contain("cmp -s \"$terminal_id\" \"$incumbent_id\"");
+        workflow.Should().Contain("cmp -s \"$terminal_spec\" \"$incumbent_spec\"");
+        workflow.Should().Contain("RED: recovered service drifted after runtime/public verification");
+        workflow.Should().Contain("group: jeeb-staging-gateway-mutation");
+        workflow.Should().Contain("source scripts/staging-gateway-mutation-lock.sh");
+        workflow.Should().Contain("staging_gateway_lock_acquire");
+        workflow.Should().Contain("staging_gateway_lock_assert");
+        workflow.Should().Contain("staging_gateway_lock_release");
         CountOccurrences(workflow, "scripts/verify-swarm-service-image.sh").Should().Be(2,
             "forward and recovery paths must each run the checked-in exact verifier");
 
@@ -376,6 +399,14 @@ public sealed class DurableOwnershipDeploymentContractTests
         var candidate = workflow.IndexOf(
             "capture_remote_spec \"$candidate_spec\" \"$candidate_version\" \"$candidate_id\"",
             arm,
+            StringComparison.Ordinal);
+        var update = workflow.IndexOf(
+            "docker service update --detach=false",
+            arm,
+            StringComparison.Ordinal);
+        var readiness = workflow.IndexOf(
+            "verify_candidate_readiness",
+            candidate,
             StringComparison.Ordinal);
         var flags = workflow.IndexOf("verify_bootstrap_flags", candidate, StringComparison.Ordinal);
         var imageVerifier = workflow.IndexOf(
@@ -398,8 +429,10 @@ public sealed class DurableOwnershipDeploymentContractTests
 
         preUpdate.Should().BeLessThan(arm);
         workflow.Should().Contain("rollback_armed=true\n          {");
-        arm.Should().BeLessThan(candidate);
-        candidate.Should().BeLessThan(flags);
+        arm.Should().BeLessThan(update);
+        update.Should().BeLessThan(candidate);
+        candidate.Should().BeLessThan(readiness);
+        readiness.Should().BeLessThan(flags);
         flags.Should().BeLessThan(imageVerifier);
         imageVerifier.Should().BeLessThan(publicProbe);
         publicProbe.Should().BeLessThan(descriptor);

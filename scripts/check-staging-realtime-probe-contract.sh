@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 
 workflow_path = Path(".github/workflows/jeeb-staging-deploy.yml")
+state_auth_workflow_path = Path(".github/workflows/jeeb-staging-state-auth-smoke.yml")
 program_path = Path("src/JeebGateway/Program.cs")
 auth_path = Path("src/JeebGateway/Operations/RealtimeProbe/RealtimeProbeAuthentication.cs")
 replay_path = Path("src/JeebGateway/Operations/RealtimeProbe/RealtimeProbeReplayStore.cs")
@@ -22,6 +23,7 @@ contract_path = Path(
 
 documents = {
     "workflow": workflow_path.read_text(),
+    "state-auth workflow": state_auth_workflow_path.read_text(),
     "program": program_path.read_text(),
     "authenticator": auth_path.read_text(),
     "replay store": replay_path.read_text(),
@@ -104,6 +106,14 @@ def validate_bootstrap_workflow(text):
         'cmp -s "$final_spec" "$candidate_spec"',
         'cmp -s "$final_version" "$candidate_version"',
         'cmp -s "$final_id" "$candidate_id"',
+        'cmp -s "$terminal_id" "$incumbent_id"',
+        'cmp -s "$terminal_spec" "$incumbent_spec"',
+        "RED: recovered service drifted after runtime/public verification",
+        "source scripts/staging-gateway-mutation-lock.sh",
+        "staging_gateway_lock_init jeeb-staging \"$secret_stage\"",
+        "staging_gateway_lock_acquire",
+        "staging_gateway_lock_assert",
+        "staging_gateway_lock_release",
         'tolower($1) == tolower(expected)',
         'matches == 1 && exact_false == 1',
         'capture_remote_spec "$recovery_spec" "$recovery_version" "$recovery_id"',
@@ -154,6 +164,10 @@ def validate_bootstrap_workflow(text):
         'capture_remote_spec "$restored_spec" "$restored_version" "$restored_id"'
     ) != 2:
         raise ValueError("recovery must separately reconcile ambiguous and accepted CAS outcomes")
+    if recovery.count(
+        'capture_remote_spec "$terminal_spec" "$terminal_version" "$terminal_id"'
+    ) != 1:
+        raise ValueError("recovery must end with one exact terminal incumbent Spec capture")
     unknown_branch = recovery.index(
         "RED: service Spec is neither exact incumbent nor exact candidate"
     )
@@ -167,6 +181,8 @@ def validate_bootstrap_workflow(text):
     candidate = text.index(
         'capture_remote_spec "$candidate_spec" "$candidate_version"', arm
     )
+    update = text.index("docker service update --detach=false", arm)
+    readiness = text.index("verify_candidate_readiness", candidate)
     false_flags = text.index("verify_bootstrap_flags", candidate)
     verifier = text.index("scripts/verify-swarm-service-image.sh", false_flags)
     public_probe = text.index(
@@ -185,12 +201,34 @@ def validate_bootstrap_workflow(text):
         raise ValueError("staging bootstrap must have exactly one post-arm disarm")
     if "rollback_armed=true\n          {" not in text:
         raise ValueError("recovery is not armed immediately before candidate mutation")
-    if not pre_update < arm < candidate < false_flags < verifier < public_probe < descriptor_probe < final_candidate < disarms[0]:
+    if not pre_update < arm < update < candidate < readiness < false_flags < verifier < public_probe < descriptor_probe < final_candidate < disarms[0]:
         raise ValueError("staging bootstrap gates are not all inside the armed interval")
+
+
+def validate_shared_staging_lock(deploy_text, state_auth_text):
+    concurrency_key = "group: jeeb-staging-gateway-mutation"
+    lock_source = "source scripts/staging-gateway-mutation-lock.sh"
+    lock_owner_path = ".jeeb-deploy/locks/jeeb-staging-gateway.owner"
+    for name, text in (("deploy", deploy_text), ("state-auth", state_auth_text)):
+        for marker in (concurrency_key, lock_source, lock_owner_path,
+                       "staging_gateway_lock_acquire",
+                       "staging_gateway_lock_assert",
+                       "staging_gateway_lock_release"):
+            if marker not in text:
+                raise ValueError(f"{name} staging mutator lacks shared lock marker: {marker}")
+    mutation = state_auth_text.index(
+        "docker service update --force --update-failure-action pause"
+    )
+    owner_check = state_auth_text.index(
+        '[ "$(cat "$lock_owner_file" 2>/dev/null)" = "$expected_lock_owner" ]'
+    )
+    if owner_check > mutation:
+        raise ValueError("state-auth mutator does not prove shared lock ownership before mutation")
 
 
 workflow = documents["workflow"]
 validate_bootstrap_workflow(workflow)
+validate_shared_staging_lock(workflow, documents["state-auth workflow"])
 
 negative_controls = (
     (
@@ -260,12 +298,13 @@ negative_controls = (
     (
         "recovery armed before final identity recheck",
         workflow.replace(
-            '          EXPECTED_PREVIOUS_IMAGE=$previous_image\n'
-            '          : "$EXPECTED_PREVIOUS_IMAGE"\n'
-            "          rollback_armed=true",
-            "          rollback_armed=true\n"
-            "          EXPECTED_PREVIOUS_IMAGE=$previous_image\n"
-            '          : "$EXPECTED_PREVIOUS_IMAGE"',
+            "          rollback_armed=true\n          {",
+            "          {",
+            1,
+        ).replace(
+            '          if ! capture_remote_spec "$pre_update_spec" "$pre_update_version" "$pre_update_id"',
+            '          rollback_armed=true\n'
+            '          if ! capture_remote_spec "$pre_update_spec" "$pre_update_version" "$pre_update_id"',
             1,
         ),
     ),
@@ -302,6 +341,27 @@ negative_controls = (
         workflow.replace(
             "matches == 1 && exact_false == 1",
             "exact_false >= 1",
+            1,
+        ),
+    ),
+    (
+        "candidate capture moved after readiness",
+        workflow.replace(
+            "          verify_candidate_readiness\n",
+            "          verify_candidate_readiness\n"
+            "          capture_remote_spec \"$candidate_spec\" \"$candidate_version\" \"$candidate_id\"\n",
+            1,
+        ).replace(
+            "          capture_remote_spec \"$candidate_spec\" \"$candidate_version\" \"$candidate_id\" || {\n",
+            "          : || {\n",
+            1,
+        ),
+    ),
+    (
+        "terminal recovery Spec gate removed",
+        workflow.replace(
+            'capture_remote_spec "$terminal_spec" "$terminal_version" "$terminal_id"',
+            ":",
             1,
         ),
     ),
@@ -488,6 +548,12 @@ run_recovery_case() (
   final_spec="$secret_stage/final-service-spec.json"
   final_version="$secret_stage/final-service-version"
   final_id="$secret_stage/final-service-id"
+  terminal_spec="$secret_stage/terminal-service-spec.json"
+  terminal_version="$secret_stage/terminal-service-version"
+  terminal_id="$secret_stage/terminal-service-id"
+  STAGING_GATEWAY_LOCK_OWNER_FILE="$secret_stage/staging-gateway-lock.owner"
+  printf '%064d\n' 1 > "$STAGING_GATEWAY_LOCK_OWNER_FILE"
+  chmod 600 "$STAGING_GATEWAY_LOCK_OWNER_FILE"
 
   incumbent_fixture="$secret_stage/incumbent.json"
   candidate_fixture="$secret_stage/candidate.json"
@@ -501,14 +567,32 @@ run_recovery_case() (
   fi
   printf '{"TaskTemplate":{"ContainerSpec":{"Image":"%s","Env":["Chat=false","Realtime=false","Secret=v2"]}}}\n' \
     "$candidate_image" > "$candidate_fixture"
-  if [ "$scenario" = final_candidate_drift ]; then
+  case "$scenario" in
+    final_candidate_drift)
+      drift_image=$candidate_image
+      ;;
+    post_verifier_drift)
+      drift_image=$previous_image
+      ;;
+    *)
+      drift_image=$third_image
+      ;;
+  esac
+  if [ "$scenario" = final_candidate_drift ] || [ "$scenario" = post_verifier_drift ]; then
     printf '{"TaskTemplate":{"ContainerSpec":{"Image":"%s","Env":["Chat=false","Realtime=false","Secret=concurrent-drift"]}}}\n' \
-      "$candidate_image" > "$third_fixture"
+      "$drift_image" > "$third_fixture"
   else
     printf '{"TaskTemplate":{"ContainerSpec":{"Image":"%s","Env":["Chat=true","Realtime=true","Secret=third"]}}}\n' \
-      "$third_image" > "$third_fixture"
+      "$drift_image" > "$third_fixture"
   fi
   chmod 600 "$incumbent_fixture" "$candidate_fixture" "$third_fixture"
+  if [ "$scenario" = post_verifier_drift ]; then
+    [ "$(jq -er '.TaskTemplate.ContainerSpec.Image' "$third_fixture")" = "$previous_image" ]
+    if cmp -s "$third_fixture" "$incumbent_fixture"; then
+      echo 'FAIL: post-verifier drift fixture did not change the incumbent full Spec' >&2
+      exit 1
+    fi
+  fi
   cp "$incumbent_fixture" "$incumbent_spec"
   cp "$candidate_fixture" "$candidate_spec"
   printf '%s\n' 100 > "$incumbent_version"
@@ -529,11 +613,13 @@ run_recovery_case() (
   snapshot_count_file="$secret_stage/snapshot-count"
   verifier_count_file="$secret_stage/verifier-count"
   public_count_file="$secret_stage/public-count"
+  readiness_count_file="$secret_stage/readiness-count"
   printf '%s\n' 0 > "$cas_count_file"
   printf '%s\n' 0 > "$mutation_count_file"
   printf '%s\n' 0 > "$snapshot_count_file"
   printf '%s\n' 0 > "$verifier_count_file"
   printf '%s\n' 0 > "$public_count_file"
+  printf '%s\n' 0 > "$readiness_count_file"
   case "$scenario" in
     auto_rollback) printf '%s\n' incumbent > "$active_kind_file" ;;
     third_state|final_candidate_drift) printf '%s\n' third > "$active_kind_file" ;;
@@ -550,16 +636,19 @@ run_recovery_case() (
     *) printf '%s\n' 300 > "$active_version_file" ;;
   esac
 
+  # shellcheck disable=SC2329  # Called indirectly by the extracted workflow helpers.
   increment_file() {
     local counter_file=$1 value
     value=$(<"$counter_file")
     printf '%s\n' "$((value + 1))" > "$counter_file"
   }
+  # shellcheck disable=SC2329  # Called indirectly by the extracted workflow helpers.
   set_active() {
     printf '%s\n' "$1" > "$active_kind_file"
     printf '%s\n' "$2" > "$active_id_file"
     printf '%s\n' "$3" > "$active_version_file"
   }
+  # shellcheck disable=SC2329  # Called indirectly by the fake SSH boundary.
   active_fixture() {
     case "$(<"$active_kind_file")" in
       incumbent) printf '%s\n' "$incumbent_fixture" ;;
@@ -568,6 +657,7 @@ run_recovery_case() (
       *) return 1 ;;
     esac
   }
+  # shellcheck disable=SC2329  # Called indirectly by the extracted workflow helpers.
   ssh() {
     [ "$1" = jeeb-staging ]
     shift
@@ -589,6 +679,8 @@ run_recovery_case() (
     fi
     if [[ "$remote_command" == *"update?version="* ]]; then
       body_file="$secret_stage/cas-body.json"
+      IFS= read -r supplied_lock_owner
+      [ "$supplied_lock_owner" = "$(<"$STAGING_GATEWAY_LOCK_OWNER_FILE")" ]
       cat > "$body_file"
       chmod 600 "$body_file"
       cmp -s "$body_file" "$candidate_spec"
@@ -619,14 +711,24 @@ run_recovery_case() (
       cat >/dev/null
       if [ "${4:-}" = "$service" ] && [ "${5:-}" = "$previous_image" ]; then
         increment_file "$verifier_count_file"
+      elif [ "${4:-}" = "$published" ] && [ "${5:-}" = "$health" ]; then
+        increment_file "$readiness_count_file"
+        if [ "$scenario" = readiness_failure ] \
+          && [ "$(<"$readiness_count_file")" -eq 1 ]; then
+          return 1
+        fi
       fi
       return 0
     fi
     return 99
   }
+  # shellcheck disable=SC2329  # Called indirectly by the extracted workflow helpers.
   bash() {
     if [ "${1:-}" = scripts/probe-staging-public-gateway-contract.sh ]; then
       increment_file "$public_count_file"
+      if [ "$scenario" = post_verifier_drift ]; then
+        set_active third serviceaaaaaaaa 202
+      fi
       return 0
     fi
     command bash "$@"
@@ -634,6 +736,10 @@ run_recovery_case() (
 
   # Source and execute the actual workflow helpers; fakes replace only external
   # SSH/Engine/public boundaries and can never produce a live deployment PASS.
+  # shellcheck disable=SC2329  # Called indirectly by the extracted workflow helpers.
+  staging_gateway_lock_assert() {
+    [ "$scenario" != lock_loss ]
+  }
   # shellcheck disable=SC1090
   source "$recovery_functions"
   if [ "$scenario" = final_candidate_drift ]; then
@@ -652,6 +758,23 @@ run_recovery_case() (
     [ "$(<"$public_count_file")" -eq 0 ]
     exit 0
   fi
+  if [ "$scenario" = readiness_failure ]; then
+    set +e
+    verify_candidate_readiness >/dev/null 2>&1
+    readiness_status=$?
+    recover_exact_incumbent >/dev/null 2>&1
+    actual_status=$?
+    set -e
+    [ "$readiness_status" -ne 0 ]
+    [ "$actual_status" -eq "$expected_status" ]
+    [ "$(<"$cas_count_file")" -eq "$expected_cas" ]
+    [ "$(<"$mutation_count_file")" -eq "$expected_mutations" ]
+    [ "$(<"$active_kind_file")" = "$expected_active" ]
+    [ "$(<"$readiness_count_file")" -eq 2 ]
+    [ "$(<"$verifier_count_file")" -eq 1 ]
+    [ "$(<"$public_count_file")" -eq 1 ]
+    exit 0
+  fi
   set +e
   recover_exact_incumbent >/dev/null 2>&1
   actual_status=$?
@@ -664,8 +787,13 @@ run_recovery_case() (
     [ "$(<"$verifier_count_file")" -eq 1 ]
     [ "$(<"$public_count_file")" -eq 1 ]
   else
-    [ "$(<"$verifier_count_file")" -eq 0 ]
-    [ "$(<"$public_count_file")" -eq 0 ]
+    if [ "$scenario" = post_verifier_drift ]; then
+      [ "$(<"$verifier_count_file")" -eq 1 ]
+      [ "$(<"$public_count_file")" -eq 1 ]
+    else
+      [ "$(<"$verifier_count_file")" -eq 0 ]
+      [ "$(<"$public_count_file")" -eq 0 ]
+    fi
   fi
 )
 
@@ -681,5 +809,8 @@ run_recovery_case ambiguous_after_commit 0 1 1 incumbent
 run_recovery_case rollback_failure 1 1 0 candidate
 run_recovery_case service_id_replacement 1 0 0 candidate
 run_recovery_case final_candidate_drift 1 0 0 third
+run_recovery_case readiness_failure 0 1 1 incumbent
+run_recovery_case post_verifier_drift 1 1 1 third
 
-echo "Actual recovery helper SSH/Engine adversarial harness PASSED"
+echo "Actual recovery helper SSH/Engine adversarial harness PASSED (14 cases)"
+bash scripts/test-staging-gateway-mutation-lock.sh

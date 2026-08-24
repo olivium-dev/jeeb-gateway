@@ -454,6 +454,9 @@ def validate_direct_rollout(text):
         "*[!a-zA-Z0-9_.-]*)",
         'canonical_service=$(ssh jeeb',
         '[ "$canonical_service" = jeeb-staging-jeeb-gateway ]',
+        "SSH_KNOWN_HOSTS: ${{ secrets.JEEB_SSH_KNOWN_HOSTS }}",
+        "UserKnownHostsFile ~/.ssh/known_hosts",
+        "StrictHostKeyChecking yes",
     )
     missing = [token for token in required if token not in text]
     forbidden = [
@@ -475,9 +478,13 @@ def validate_direct_rollout(text):
     if not staging_guard < first_external_mutation or not host_guard < first_external_mutation:
         raise ValueError("staging target guards must run before any external mutation")
     canonical_guard = text.index('[ "$canonical_service" = jeeb-staging-jeeb-gateway ]')
+    ssh_setup = text.index("Install cloudflared + write deploy key")
+    first_build = text.index("docker build")
     first_remote_mutation = text.index("Remote GHCR login")
-    if not canonical_guard < first_remote_mutation:
-        raise ValueError("canonical staging service guard must precede remote mutation")
+    if not ssh_setup < canonical_guard < first_external_mutation < first_build < first_remote_mutation:
+        raise ValueError(
+            "pinned SSH and canonical staging alias guard must precede registry/build/push mutation"
+        )
 
 
 def validate_staging_rollout(text):
@@ -494,6 +501,14 @@ def validate_staging_rollout(text):
         "docker service inspect '$service' --format '{{.ID}} {{.Version.Index}}'",
         "probe_staging_realtime_descriptor",
         "verify_bootstrap_flags",
+        "group: jeeb-staging-gateway-mutation",
+        "source scripts/staging-gateway-mutation-lock.sh",
+        "staging_gateway_lock_acquire",
+        "staging_gateway_lock_assert",
+        "staging_gateway_lock_release",
+        'capture_remote_spec "$terminal_spec" "$terminal_version" "$terminal_id"',
+        'cmp -s "$terminal_spec" "$incumbent_spec"',
+        "verify_candidate_readiness",
     )
     missing = [token for token in required if token not in text]
     if missing or text.count(probe_command) != 2:
@@ -505,6 +520,35 @@ def validate_staging_rollout(text):
     disarmed = text.index("rollback_armed=false", armed)
     if not armed < forward_public < disarmed:
         raise ValueError("public gates are not inside the armed recovery interval")
+    update = text.index("docker service update --detach=false", armed)
+    candidate = text.index(
+        'capture_remote_spec "$candidate_spec" "$candidate_version" "$candidate_id"',
+        update,
+    )
+    readiness = text.index("verify_candidate_readiness", candidate)
+    if not update < candidate < readiness < forward_public:
+        raise ValueError("candidate full Spec must be captured before fallible readiness/public gates")
+
+
+def validate_shared_staging_mutator_lock(deploy_text, smoke_text):
+    markers = (
+        "group: jeeb-staging-gateway-mutation",
+        "source scripts/staging-gateway-mutation-lock.sh",
+        ".jeeb-deploy/locks/jeeb-staging-gateway.owner",
+        "staging_gateway_lock_acquire",
+        "staging_gateway_lock_assert",
+        "staging_gateway_lock_release",
+    )
+    for name, text in (("deploy", deploy_text), ("state-auth", smoke_text)):
+        missing = [marker for marker in markers if marker not in text]
+        if missing:
+            raise ValueError(f"{name} staging mutator lacks shared lock: {missing}")
+    owner_check = smoke_text.index(
+        '[ "$(cat "$lock_owner_file" 2>/dev/null)" = "$expected_lock_owner" ]'
+    )
+    mutation = smoke_text.index("docker service update --force")
+    if not owner_check < mutation:
+        raise ValueError("state-auth mutation can run before shared-lock ownership proof")
 
 
 def validate_unit_ci(text):
@@ -514,6 +558,7 @@ def validate_unit_ci(text):
 
 validate_direct_rollout(direct)
 validate_staging_rollout(staging_authority)
+validate_shared_staging_mutator_lock(staging_authority, smoke)
 validate_unit_ci(ci_workflow)
 
 negative_controls = (
@@ -578,6 +623,20 @@ negative_controls = (
         ),
     ),
     (
+        "direct canonical staging alias guard moved after local registry login",
+        validate_direct_rollout,
+        direct.replace(
+            '[ "$canonical_service" = jeeb-staging-jeeb-gateway ]',
+            ":",
+            1,
+        ).replace(
+            "docker login ${{ env.REGISTRY }}",
+            "docker login ${{ env.REGISTRY }}\n"
+            + '[ "$canonical_service" = jeeb-staging-jeeb-gateway ]',
+            1,
+        ),
+    ),
+    (
         "direct service-name input validation removed",
         validate_direct_rollout,
         direct.replace("*[!a-zA-Z0-9_.-]*)", "*)", 1),
@@ -599,6 +658,29 @@ negative_controls = (
         ),
     ),
     (
+        "staging terminal incumbent Spec recheck removed",
+        validate_staging_rollout,
+        staging_authority.replace(
+            'capture_remote_spec "$terminal_spec" "$terminal_version" "$terminal_id"',
+            ":",
+            1,
+        ),
+    ),
+    (
+        "staging candidate capture moved after readiness",
+        validate_staging_rollout,
+        staging_authority.replace(
+            '          capture_remote_spec "$candidate_spec" "$candidate_version" "$candidate_id" || {',
+            "          : || {",
+            1,
+        ).replace(
+            "          verify_candidate_readiness",
+            '          capture_remote_spec "$candidate_spec" "$candidate_version" "$candidate_id"\n'
+            "          verify_candidate_readiness",
+            1,
+        ),
+    ),
+    (
         "optional UMJWT target cleanup removed",
         validate_staging_rollout,
         staging_authority.replace("remove_secret_target jeeb_gateway_umjwt", ":", 1),
@@ -615,6 +697,28 @@ for description, validator, mutated in negative_controls:
     except ValueError:
         continue
     raise SystemExit(f"FAIL: deployment policy negative control survived: {description}")
+
+for description, mutated_deploy, mutated_smoke in (
+    (
+        "staging deploy concurrency key drifted",
+        staging_authority.replace(
+            "group: jeeb-staging-gateway-mutation",
+            "group: jeeb-staging-gateway-deploy",
+            1,
+        ),
+        smoke,
+    ),
+    (
+        "state-auth shared lock removed",
+        staging_authority,
+        smoke.replace("staging_gateway_lock_acquire", ":", 1),
+    ),
+):
+    try:
+        validate_shared_staging_mutator_lock(mutated_deploy, mutated_smoke)
+    except ValueError:
+        continue
+    raise SystemExit(f"FAIL: shared staging lock negative control survived: {description}")
 
 program = Path("src/JeebGateway/Program.cs").read_text()
 for guard in (
