@@ -23,13 +23,13 @@ update_state=
 for ((attempt = 1; attempt <= 30; attempt++)); do
   update_state=$(docker service inspect "$service_id" --format '{{if .UpdateStatus}}{{.UpdateStatus.State}}{{else}}initial{{end}}')
   case "$update_state" in
-    initial|completed|rollback_completed) break ;;
-    updating|rollback_started) sleep 4 ;;
+    initial|completed) break ;;
+    updating) sleep 4 ;;
     *) fail "service update state is $update_state" ;;
   esac
 done
 case "$update_state" in
-  initial|completed|rollback_completed) ;;
+  initial|completed) ;;
   *) fail "service update did not complete before the verification timeout" ;;
 esac
 

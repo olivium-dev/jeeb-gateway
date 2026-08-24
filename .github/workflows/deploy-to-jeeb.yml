@@ -1,18 +1,18 @@
-# Deploy to Jeeb — verified host-mode Docker Swarm deploy over the Cloudflare tunnel.
+# Deploy to Jeeb — owner-blocked forward-only promotion workflow.
 #
 # Follows the olivium per-service deploy-to-<server>.yml pattern (workflow_dispatch
 # + cloudflared SSH + ghcr image + docker service), hardened per the locked deploy
 # policy (olivium-deployment/README.md):
-#   * controlled deploy: update an existing digest-pinned service with automatic
-#     rollback plus exact-incumbent manual recovery; never delete or create a service
+#   * controlled deploy: update an existing digest-pinned service only; never delete,
+#     create, or automatically restore an earlier service revision
 #   * update order = stop-first: the published port uses mode=host on a
 #     single-node swarm, so start-first deadlocks ("host-mode port already in use
 #     on 1 node") because the old task still holds the host port. stop-first frees
 #     the port first (brief blip), which is correct for host-mode single node.
 #   * key-only SSH from a secret (fail-closed; no password in YAML, unlike legacy)
 #   * registry creds via GitHub secrets, never inlined (no demo-password literals)
-#   * HTTP health gate before disarming recovery; every failure restores and verifies
-#     the exact incumbent digest
+#   * failed updates pause visibly for inspection; the owner block below prevents all
+#     build, push, SSH, provider, secret, and Swarm mutations until forward promotion is approved
 #
 # This service is the stateless Jeeb gateway: a JWT BFF that aggregates owner
 # services via configured HTTP boundaries. It receives no database credential
@@ -221,6 +221,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Owner block - forward-only promotion pending
+        run: |
+          echo '::error::Forward-only promotion pending owner-approved failure handling; no image, SSH, provider, secret, or Swarm mutation was attempted.' >&2
+          exit 1
+
       - name: Reject the staging bootstrap target
         env:
           REQUESTED_SERVICE: ${{ inputs.service_name }}
@@ -379,7 +384,7 @@ jobs:
       - name: Remote GHCR login (token via stdin pipe)
         run: printf '%s' "${{ secrets.GITHUB_TOKEN }}" | ssh jeeb "docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin"
 
-      - name: Verified host-mode deploy with exact recovery
+      - name: Verified host-mode deploy
         env:
           IMAGE_PATH: ${{ steps.immutable.outputs.image }}
           STATE_SERVICE_TOKEN: ${{ secrets.JEEB_STATE_SERVICE_TOKEN }}
@@ -433,7 +438,7 @@ jobs:
           # Idempotent: env-add overwrites if present; `docker service update --env-rm` is a
           # no-op when the var is already absent, so an explicit false run never errors.
           # Applied on the same update command as Security__TokenMint__* => one stop-first,
-          # rollback-on-failure rollout, never a separate out-of-band update.
+          # pause-on-failure rollout, never a separate out-of-band update.
           case "${{ inputs.dev_endpoints }}" in
             true)
               DEV_FLAG_ARG="--env-add Features__DevEndpoints__Enabled=true"
@@ -551,45 +556,6 @@ jobs:
             echo 'Direct gateway service must retain the approved host-mode port' >&2
             exit 1
           }
-          previous_image=\$(docker service inspect "\$SVC" \
-            --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')
-          [[ "\$previous_image" =~ @sha256:[0-9a-f]{64}$ ]] || {
-            echo 'Incumbent service image is not digest-pinned; recovery target is unsafe' >&2
-            exit 1
-          }
-          rollback_armed=false
-          rollback_on_failure() {
-            local status=\$? current_image recovery_mode=automatic recovery_ok=true recovery_ready=false
-            trap - EXIT
-            set +e
-            if [ "\$status" -ne 0 ] && [ "\$rollback_armed" = true ]; then
-              current_image=\$(docker service inspect "\$SVC" \
-                --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' 2>/dev/null)
-              if [ "\$current_image" != "\$previous_image" ]; then
-                recovery_mode=manual
-                docker service rollback --detach=false "\$SVC" || recovery_ok=false
-              fi
-              [ "\$(docker service inspect "\$SVC" \
-                --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' 2>/dev/null)" = "\$previous_image" ] \
-                || recovery_ok=false
-              for attempt in \$(seq 1 30); do
-                if curl -fsS --max-time 5 "http://127.0.0.1:\${EXT}\${HEALTH}" >/dev/null; then
-                  recovery_ready=true
-                  break
-                fi
-                sleep 4
-              done
-              [ "\$recovery_ready" = true ] || recovery_ok=false
-              if [ "\$recovery_ok" = true ]; then
-                echo "Verified \${recovery_mode} recovery to \${previous_image##*@}" >&2
-              else
-                echo 'Exact-incumbent recovery verification failed' >&2
-                status=97
-              fi
-            fi
-            exit "\$status"
-          }
-          trap rollback_on_failure EXIT
           state_secret_args=()
           add_rotated_secret() {
             target="\$1"; source="\$2"
@@ -612,13 +578,8 @@ jobs:
             --update-order stop-first
             --update-parallelism 1
             --update-monitor 20s
-            --update-failure-action rollback
-            --rollback-order stop-first
-            --rollback-parallelism 1
-            --rollback-monitor 20s
-            --rollback-failure-action pause
+            --update-failure-action pause
           )
-          rollback_armed=true
           docker service update --detach=false --replicas 1 --image "\$REQUESTED_IMAGE" --with-registry-auth \
               "\${rollout[@]}" \
               "\${retired_env_args[@]}" \
@@ -685,5 +646,4 @@ jobs:
             exit 1
           fi
           printf '%s' '$VERIFY_SWARM_SERVICE_IMAGE' | base64 -d | bash -s -- "\$SVC" "\$REQUESTED_IMAGE"
-          rollback_armed=false
           EOF

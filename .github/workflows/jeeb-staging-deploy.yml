@@ -23,6 +23,11 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
+      - name: Owner block - forward-only promotion pending
+        run: |
+          echo '::error::Forward-only promotion pending owner-approved failure handling; no image, SSH, provider, secret, or Swarm mutation was attempted.' >&2
+          exit 1
+
       - name: Require immutable default-branch source
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
@@ -160,8 +165,6 @@ jobs:
           service=jeeb-staging-jeeb-gateway
           published=10000
           health=/health/ready
-          previous_image=''
-          rollback_armed=false
           if [ "$REPOSITORY" = jeeb-gateway ]; then
             : "${JEEB_STATE_SERVICE_TOKEN:?JEEB_STATE_SERVICE_TOKEN is required}"
             : "${NOTIFICATION_SERVICE_TOKEN:?NOTIFICATION_SERVICE_TOKEN is required}"
@@ -208,24 +211,12 @@ jobs:
             candidate_spec="$secret_stage/candidate-service-spec.json"
             candidate_version="$secret_stage/candidate-service-version"
             candidate_id="$secret_stage/candidate-service-id"
-            recovery_spec="$secret_stage/recovery-service-spec.json"
-            recovery_version="$secret_stage/recovery-service-version"
-            recovery_id="$secret_stage/recovery-service-id"
-            confirm_spec="$secret_stage/confirm-service-spec.json"
-            confirm_version="$secret_stage/confirm-service-version"
-            confirm_id="$secret_stage/confirm-service-id"
-            restored_spec="$secret_stage/restored-service-spec.json"
-            restored_version="$secret_stage/restored-service-version"
-            restored_id="$secret_stage/restored-service-id"
             pre_update_spec="$secret_stage/pre-update-service-spec.json"
             pre_update_version="$secret_stage/pre-update-service-version"
             pre_update_id="$secret_stage/pre-update-service-id"
             final_spec="$secret_stage/final-service-spec.json"
             final_version="$secret_stage/final-service-version"
             final_id="$secret_stage/final-service-id"
-            terminal_spec="$secret_stage/terminal-service-spec.json"
-            terminal_version="$secret_stage/terminal-service-version"
-            terminal_id="$secret_stage/terminal-service-id"
             # shellcheck source=staging-gateway-mutation-lock.sh
             source scripts/staging-gateway-mutation-lock.sh
             staging_gateway_lock_init jeeb-staging "$secret_stage"
@@ -269,7 +260,7 @@ jobs:
               done
               return 1
             }
-            verify_exact_candidate_before_disarm() {
+            verify_exact_candidate_after_checks() {
               capture_remote_spec "$final_spec" "$final_version" "$final_id" \
                 && cmp -s "$final_spec" "$candidate_spec" \
                 && cmp -s "$final_version" "$candidate_version" \
@@ -291,174 +282,6 @@ jobs:
                 done
                 [ "$candidate_ready" = true ]
           READINESS
-            }
-            recover_exact_incumbent() {
-              local recovery_ok=true
-              local recovery_mode current_image incumbent_hash restored_hash
-              local candidate_index confirm_index candidate_service_id confirm_service_id
-              local incumbent_service_id recovery_service_id restored_service_id
-              local cas_status restored_exact=false reconcile_cas=false
-              incumbent_service_id=$(<"$incumbent_id")
-              if ! capture_remote_spec "$recovery_spec" "$recovery_version" "$recovery_id"; then
-                echo 'RED: authoritative service Spec unavailable; recovery made no mutation' >&2
-                return 1
-              fi
-              recovery_service_id=$(<"$recovery_id")
-              if [ "$recovery_service_id" = "$incumbent_service_id" ] \
-                && cmp -s "$recovery_spec" "$incumbent_spec"; then
-                recovery_mode=automatic
-              elif [ -s "$candidate_spec" ] && [ -s "$candidate_id" ]; then
-                candidate_service_id=$(<"$candidate_id")
-                if [ "$recovery_service_id" != "$candidate_service_id" ] \
-                  || ! cmp -s "$recovery_spec" "$candidate_spec"; then
-                  echo 'RED: service identity/Spec is neither exact incumbent nor exact candidate; recovery made no mutation' >&2
-                  return 1
-                fi
-                if ! capture_remote_spec "$confirm_spec" "$confirm_version" "$confirm_id" \
-                  || ! cmp -s "$confirm_spec" "$candidate_spec"; then
-                  echo 'RED: service Spec drifted before rollback; recovery made no mutation' >&2
-                  return 1
-                fi
-                candidate_index=$(<"$candidate_version")
-                confirm_index=$(<"$confirm_version")
-                confirm_service_id=$(<"$confirm_id")
-                if [ "$candidate_index" != "$confirm_index" ] \
-                  || [ "$candidate_service_id" != "$confirm_service_id" ] \
-                  || ! [[ "$candidate_index" =~ ^[0-9]+$ ]]; then
-                  echo 'RED: service identity/Version.Index drifted before rollback; recovery made no mutation' >&2
-                  return 1
-                fi
-                recovery_mode=manual
-                # Docker's rollback CLI performs an unsafe fresh inspect before its
-                # update. Call the Engine API with the exact candidate Version.Index
-                # instead, so a third-state race is rejected atomically with 409.
-                staging_gateway_lock_assert || return 1
-                # shellcheck disable=SC2029
-                cas_status=$(
-                  {
-                    printf '%s\n' "$(<"$STAGING_GATEWAY_LOCK_OWNER_FILE")"
-                    cat "$candidate_spec"
-                  } | ssh jeeb-staging "set -euo pipefail
-                    lock_owner_file=\"\$HOME/.jeeb-deploy/locks/jeeb-staging-gateway.owner\"
-                    IFS= read -r expected_lock_owner
-                    [[ \"\$expected_lock_owner\" =~ ^[0-9a-f]{64}\$ ]]
-                    [ \"\$(cat \"\$lock_owner_file\" 2>/dev/null)\" = \"\$expected_lock_owner\" ]
-                    service_id='$candidate_service_id'
-                    expected_version='$candidate_index'
-                    api_version=\$(docker version --format '{{.Server.APIVersion}}')
-                    [[ \"\$service_id\" =~ ^[a-z0-9]+\$ ]]
-                    [[ \"\$api_version\" =~ ^[0-9]+\\.[0-9]+\$ ]]
-                    curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
-                      --unix-socket /var/run/docker.sock \
-                      --request POST --header 'Content-Type: application/json' \
-                      --data-binary @- \
-                      \"http://localhost/v\${api_version}/services/\${service_id}/update?version=\${expected_version}&rollback=previous&registryAuthFrom=previous-spec\""
-                ) || cas_status=''
-                case "$cas_status" in
-                  200) ;;
-                  409)
-                    reconcile_cas=true
-                    ;;
-                  *)
-                    reconcile_cas=true
-                    ;;
-                esac
-              else
-                echo 'RED: service Spec is neither exact incumbent nor exact candidate; recovery made no mutation' >&2
-                return 1
-              fi
-              if [ "$reconcile_cas" = true ]; then
-                if ! capture_remote_spec "$restored_spec" "$restored_version" "$restored_id"; then
-                  echo 'RED: rollback CAS outcome is ambiguous and authoritative state is unavailable; no retry was attempted' >&2
-                  return 1
-                fi
-                restored_service_id=$(<"$restored_id")
-                if [ "$restored_service_id" = "$incumbent_service_id" ] \
-                  && cmp -s "$restored_spec" "$incumbent_spec"; then
-                  recovery_mode=ambiguous-reconciled
-                  restored_exact=true
-                else
-                  echo 'RED: rollback CAS outcome did not reconcile to the exact incumbent; no retry was attempted' >&2
-                  return 1
-                fi
-              fi
-              if [ "$recovery_ok" = true ]; then
-                for recovery_attempt in $(seq 1 40); do
-                  : "$recovery_attempt"
-                  if [ "$restored_exact" = true ]; then
-                    break
-                  fi
-                  if ! capture_remote_spec "$restored_spec" "$restored_version" "$restored_id"; then
-                    recovery_ok=false
-                    break
-                  fi
-                  restored_service_id=$(<"$restored_id")
-                  if [ "$restored_service_id" = "$incumbent_service_id" ] \
-                    && cmp -s "$restored_spec" "$incumbent_spec"; then
-                    restored_exact=true
-                    break
-                  fi
-                  if [ "$recovery_mode" != manual ] \
-                    || [ "$restored_service_id" != "$candidate_service_id" ] \
-                    || ! cmp -s "$restored_spec" "$candidate_spec"; then
-                    recovery_ok=false
-                    break
-                  fi
-                  sleep 4
-                done
-                [ "$restored_exact" = true ] || recovery_ok=false
-              fi
-              if [ "$recovery_ok" = true ]; then
-                incumbent_hash=$(sha256sum "$incumbent_spec" | awk '{print $1}')
-                restored_hash=$(sha256sum "$restored_spec" | awk '{print $1}')
-                [ "$incumbent_hash" = "$restored_hash" ] \
-                  && cmp -s "$restored_spec" "$incumbent_spec" \
-                  || recovery_ok=false
-              fi
-              if [ "$recovery_ok" = true ]; then
-                current_image=$(jq -er '.TaskTemplate.ContainerSpec.Image' "$restored_spec") \
-                  || recovery_ok=false
-                [ "$current_image" = "$previous_image" ] || recovery_ok=false
-              fi
-              if [ "$recovery_ok" = true ]; then
-                ssh jeeb-staging bash -s -- "$service" "$previous_image" \
-                  < scripts/verify-swarm-service-image.sh \
-                  || recovery_ok=false
-              fi
-              if [ "$recovery_ok" = true ]; then
-                ssh jeeb-staging bash -s -- "$published" "$health" <<'RECOVERY' \
-                  || recovery_ok=false
-                set -euo pipefail
-                published=$1
-                health=$2
-                rollback_ready=false
-                for attempt in $(seq 1 40); do
-                  if curl -fsS --max-time 5 \
-                    "http://127.0.0.1:${published}${health}" >/dev/null; then
-                    rollback_ready=true
-                    break
-                  fi
-                  sleep 4
-                done
-                [ "$rollback_ready" = true ]
-          RECOVERY
-              fi
-              if [ "$recovery_ok" = true ]; then
-                bash scripts/probe-staging-public-gateway-contract.sh \
-                  || recovery_ok=false
-              fi
-              if [ "$recovery_ok" = true ]; then
-                if ! capture_remote_spec "$terminal_spec" "$terminal_version" "$terminal_id" \
-                  || ! cmp -s "$terminal_id" "$incumbent_id" \
-                  || ! cmp -s "$terminal_spec" "$incumbent_spec"; then
-                  echo 'RED: recovered service drifted after runtime/public verification' >&2
-                  recovery_ok=false
-                fi
-              fi
-              if [ "$recovery_ok" = true ]; then
-                echo "Verified ${recovery_mode} recovery to the exact incumbent Spec" >&2
-              fi
-              [ "$recovery_ok" = true ]
             }
             verify_bootstrap_flags() {
               ssh jeeb-staging bash -s -- "$service" <<'FLAGS'
@@ -596,12 +419,6 @@ jobs:
               local lock_cleanup_ok=true
               trap - EXIT
               set +e
-              if [ "$status" -ne 0 ] && [ "$rollback_armed" = true ]; then
-                if ! recover_exact_incumbent; then
-                  echo 'Exact-incumbent recovery verification failed' >&2
-                  status=97
-                fi
-              fi
               for created in "$jwt_secret_name" "$umjwt_secret_name" "$guardian_secret_name" \
                 "$probe_secret_name" "$membership_secret_name" "$firebase_secret_name" "$state_secret_name" \
                 "$notification_secret_name" "$settlement_secret_name" "$bundler_secret_name" \
@@ -667,9 +484,9 @@ jobs:
               echo 'Incumbent service Spec could not be captured at a stable Version.Index' >&2
               exit 1
             }
-            previous_image=$(jq -er '.TaskTemplate.ContainerSpec.Image' "$incumbent_spec")
-            [[ "$previous_image" =~ @sha256:[0-9a-f]{64}$ ]] || {
-              echo 'Incumbent service image is not digest-pinned; recovery target is unsafe' >&2
+            incumbent_image=$(jq -er '.TaskTemplate.ContainerSpec.Image' "$incumbent_spec")
+            [[ "$incumbent_image" =~ @sha256:[0-9a-f]{64}$ ]] || {
+              echo 'Incumbent service image is not digest-pinned' >&2
               exit 1
             }
           fi
@@ -680,15 +497,14 @@ jobs:
             echo 'RED: incumbent service Spec drifted before update; deploy made no mutation' >&2
             exit 1
           fi
-          EXPECTED_PREVIOUS_IMAGE=$previous_image
-          : "$EXPECTED_PREVIOUS_IMAGE"
+          EXPECTED_INCUMBENT_IMAGE=$incumbent_image
+          : "$EXPECTED_INCUMBENT_IMAGE"
           staging_gateway_lock_assert
           # Forwarded through the generated private remote script below.
           # shellcheck disable=SC2034
           STAGING_GATEWAY_LOCK_OWNER=$(<"$STAGING_GATEWAY_LOCK_OWNER_FILE")
-          rollback_armed=true
           {
-            for variable in IMAGE REMOTE_DOCKER_CONFIG REPOSITORY EXPECTED_PREVIOUS_IMAGE \
+            for variable in IMAGE REMOTE_DOCKER_CONFIG REPOSITORY EXPECTED_INCUMBENT_IMAGE \
               STAGING_GATEWAY_LOCK_OWNER \
               state_secret_name notification_secret_name settlement_secret_name \
               bundler_secret_name job_secret_name jwt_secret_name umjwt_secret_name \
@@ -902,14 +718,10 @@ jobs:
             --limit-cpu 0.75 --limit-memory 768M --reserve-cpu 0.10 --reserve-memory 64M
             --log-driver json-file --log-opt max-size=10m --log-opt max-file=3
             --update-order stop-first --update-parallelism 1 --update-monitor 20s
-            --update-failure-action rollback
-            --rollback-order stop-first
-            --rollback-parallelism 1
-            --rollback-monitor 20s
-            --rollback-failure-action pause
+            --update-failure-action pause
           )
           docker service inspect "$service" >/dev/null 2>&1 || {
-            echo 'Selective gateway deploy requires the incumbent service and rollback target' >&2
+            echo 'Selective gateway deploy requires an incumbent service' >&2
             exit 1
           }
           [ "$(docker service inspect "$service" --format '{{.Spec.Mode.Replicated.Replicas}}')" = 1 ] || {
@@ -924,8 +736,8 @@ jobs:
           }
           current_image=$(docker service inspect "$service" \
             --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')
-          [ "$current_image" = "$EXPECTED_PREVIOUS_IMAGE" ] || {
-            echo 'Incumbent service changed after the exact recovery digest was captured' >&2
+          [ "$current_image" = "$EXPECTED_INCUMBENT_IMAGE" ] || {
+            echo 'Incumbent service changed after the authoritative snapshot was captured' >&2
             exit 1
           }
           if ! docker service inspect "$service" \
@@ -969,11 +781,10 @@ jobs:
             < scripts/verify-swarm-service-image.sh
           bash scripts/probe-staging-public-gateway-contract.sh
           probe_staging_realtime_descriptor
-          verify_exact_candidate_before_disarm
-          rollback_armed=false
+          verify_exact_candidate_after_checks
 
       - name: Clean up isolated remote Docker credentials
-        if: always()
+        if: ${{ success() }}
         run: |
           set -euo pipefail
           # The run-scoped credential path is intentionally expanded by the runner.
