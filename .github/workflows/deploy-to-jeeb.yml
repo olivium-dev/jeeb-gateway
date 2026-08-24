@@ -219,12 +219,12 @@ jobs:
       REGISTRY: ghcr.io
       IMAGE: ghcr.io/olivium-dev/jeeb-gateway
     steps:
-      - uses: actions/checkout@v4
-
       - name: Owner block - forward-only promotion pending
         run: |
           echo '::error::Forward-only promotion pending owner-approved failure handling; no image, SSH, provider, secret, or Swarm mutation was attempted.' >&2
           exit 1
+
+      - uses: actions/checkout@v4
 
       - name: Reject the staging bootstrap target
         env:

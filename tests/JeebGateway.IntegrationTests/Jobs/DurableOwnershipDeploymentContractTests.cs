@@ -358,6 +358,12 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().Contain("scripts/verify-swarm-service-image.sh");
         workflow.Should().Contain("Owner block - forward-only promotion pending");
         workflow.Should().Contain("::error::Forward-only promotion pending owner-approved failure handling");
+        workflow.IndexOf("Owner block - forward-only promotion pending", StringComparison.Ordinal)
+            .Should().BeLessThan(workflow.IndexOf("actions/checkout@", StringComparison.Ordinal));
+        workflow.Should().NotContain("continue-on-error:");
+        workflow.Should().NotContain("if: ${{ always() }}");
+        workflow.Should().NotContain("if: ${{ failure() }}");
+        workflow.Should().NotContain("if: ${{ cancelled() }}");
         workflow.Should().Contain("--update-order stop-first");
         workflow.Should().Contain("--update-failure-action pause");
         workflow.Should().NotContain(automaticRollback);
