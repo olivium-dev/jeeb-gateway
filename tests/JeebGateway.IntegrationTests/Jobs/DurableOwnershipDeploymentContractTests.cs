@@ -5,13 +5,30 @@ namespace JeebGateway.IntegrationTests.Jobs;
 
 public sealed class DurableOwnershipDeploymentContractTests
 {
-    private static readonly string[] ProductionMountedCredentialTargets =
+    private static readonly (string Target, string Invocation)[] ProductionMountedCredentials =
     [
-        "jeeb_state_service_token",
-        "bundler_cms_bearer_token",
-        "private_artifact_store_bearer_token",
-        "data_export_token_signing_key",
-        "jeeb_gateway_job_token"
+        ("jeeb_state_service_token", "add_rotated_secret jeeb_state_service_token \"\\$STATE_SECRET\""),
+        ("delivery_service_token", "add_rotated_secret delivery_service_token \"\\$DELIVERY_SECRET\""),
+        ("notification_service_token", "add_rotated_secret notification_service_token \"\\$NOTIFICATION_SECRET\""),
+        ("bundler_cms_bearer_token", "add_rotated_secret bundler_cms_bearer_token \"\\$BUNDLER_SECRET\""),
+        ("private_artifact_store_bearer_token", "add_rotated_secret private_artifact_store_bearer_token \"\\$ARTIFACT_SECRET\""),
+        ("data_export_token_signing_key", "add_rotated_secret data_export_token_signing_key \"\\$EXPORT_SECRET\""),
+        ("jeeb_gateway_job_token", "add_rotated_secret jeeb_gateway_job_token \"\\$JOB_SECRET\"")
+    ];
+
+    private static readonly (string Target, string Invocation)[] StagingMountedCredentials =
+    [
+        ("jeeb_state_service_token", "add_rotated_secret \"$state_secret_name\" jeeb_state_service_token"),
+        ("notification_service_token", "add_rotated_secret \"$notification_secret_name\" notification_service_token"),
+        ("settlement_service_token", "add_rotated_secret \"$settlement_secret_name\" settlement_service_token"),
+        ("bundler_cms_bearer_token", "add_rotated_secret \"$bundler_secret_name\" bundler_cms_bearer_token"),
+        ("jeeb_gateway_job_token", "add_rotated_secret \"$job_secret_name\" jeeb_gateway_job_token"),
+        ("jeeb_gateway_jwt", "add_rotated_secret \"$jwt_secret_name\" jeeb_gateway_jwt"),
+        ("jeeb_gateway_umjwt", "add_rotated_secret \"$umjwt_secret_name\" jeeb_gateway_umjwt"),
+        ("realtime_guardian_secret", "add_rotated_secret \"$guardian_secret_name\" realtime_guardian_secret"),
+        ("staging_wss_probe_mint_key", "add_rotated_secret \"$probe_secret_name\" staging_wss_probe_mint_key"),
+        ("realtime_membership_ticket_key", "add_rotated_secret \"$membership_secret_name\" realtime_membership_ticket_key"),
+        ("firebase_admin_json", "add_rotated_secret \"$firebase_secret_name\" firebase_admin_json")
     ];
 
     [Theory]
@@ -22,24 +39,28 @@ public sealed class DurableOwnershipDeploymentContractTests
     {
         var workflow = Workflow(workflowName);
 
-        var targets = workflowName == "jeeb-staging-deploy.yml"
-            ? new[]
-            {
-                "jeeb_state_service_token",
-                "settlement_service_token",
-                "bundler_cms_bearer_token",
-                "jeeb_gateway_job_token"
-            }
-            : ProductionMountedCredentialTargets;
+        var credentials = workflowName == "jeeb-staging-deploy.yml"
+            ? StagingMountedCredentials
+            : ProductionMountedCredentials;
 
-        foreach (var target in targets)
+        foreach (var (target, invocation) in credentials)
+        {
             workflow.Should().Contain(target);
+            CountOccurrences(workflow, invocation).Should().Be(1,
+                $"{target} must be mounted exactly once through add_rotated_secret");
+        }
+        CountOccurrences(workflow, "add_rotated_secret ").Should().Be(credentials.Length,
+            "every versioned secret mount must have an explicitly reviewed helper invocation");
 
+        var helper = ShellFunction(workflow, "add_rotated_secret");
+        CountOccurrences(helper, "--secret-add").Should().Be(1);
+        CountOccurrences(workflow, "--secret-add").Should().Be(1,
+            "raw secret mounts outside add_rotated_secret must be rejected");
         if (workflowName == "jeeb-staging-deploy.yml")
-            workflow.Should().Contain(
+            helper.Should().Contain(
                 "target=$target_name,uid=65532,gid=65532,mode=0400");
         else
-            workflow.Should().Contain(
+            helper.Should().Contain(
                 "source=\\$source,target=\\$target,uid=65532,gid=65532,mode=0400");
 
         workflow.Should().NotContain("mode=0444");
@@ -255,11 +276,17 @@ public sealed class DurableOwnershipDeploymentContractTests
         else
         {
             const string runtimeVerifier = "base64 -d | bash -s -- \"\\$SVC\" \"\\$REQUESTED_IMAGE\"";
-            workflow.Should().Contain(runtimeVerifier);
-            workflow.IndexOf("rollback_armed=true", StringComparison.Ordinal).Should()
-                .BeLessThan(workflow.IndexOf(runtimeVerifier, StringComparison.Ordinal));
-            workflow.IndexOf(runtimeVerifier, StringComparison.Ordinal).Should()
-                .BeLessThan(workflow.LastIndexOf("rollback_armed=false", StringComparison.Ordinal));
+            var arm = workflow.IndexOf("rollback_armed=true", StringComparison.Ordinal);
+            var runtimeVerifierIndex = workflow.IndexOf(runtimeVerifier, StringComparison.Ordinal);
+            arm.Should().BeGreaterThanOrEqualTo(0);
+            CountOccurrences(workflow, runtimeVerifier).Should().Be(1);
+            var firstDisarmAfterArm = workflow.IndexOf(
+                "rollback_armed=false",
+                arm + "rollback_armed=true".Length,
+                StringComparison.Ordinal);
+            arm.Should().BeLessThan(runtimeVerifierIndex);
+            runtimeVerifierIndex.Should().BeLessThan(firstDisarmAfterArm,
+                "runtime identity verification must finish before the first recovery disarm");
             workflow.Should().Contain("--update-order stop-first");
             workflow.Should().Contain("--update-failure-action " + "rollback");
             workflow.Should().Contain("--" + "rollback-order stop-first");
@@ -268,6 +295,26 @@ public sealed class DurableOwnershipDeploymentContractTests
             workflow.Should().NotContain("--update-order start-first");
         }
     }
+
+    private static string ShellFunction(string workflow, string name)
+    {
+        var marker = $"{name}() {{";
+        var start = workflow.IndexOf(marker, StringComparison.Ordinal);
+        if (start < 0)
+            throw new InvalidOperationException($"Missing shell helper: {name}");
+
+        var lineStart = workflow.LastIndexOf('\n', start) + 1;
+        var indentation = workflow[lineStart..start];
+        var endMarker = $"\n{indentation}}}";
+        var end = workflow.IndexOf(endMarker, start + marker.Length, StringComparison.Ordinal);
+        if (end < 0)
+            throw new InvalidOperationException($"Unterminated shell helper: {name}");
+
+        return workflow[start..(end + endMarker.Length)];
+    }
+
+    private static int CountOccurrences(string value, string candidate) =>
+        value.Split(candidate, StringSplitOptions.None).Length - 1;
 
     private static string Workflow(string name) => File.ReadAllText(Path.Combine(
         FindRepositoryRoot(), ".github", "workflows", name));
