@@ -14,7 +14,7 @@ concurrency:
 env:
   IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
   IMAGE_TAG: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:${{ github.sha }}
-  REMOTE_DOCKER_CONFIG: /tmp/jeeb-ghcr-${{ github.run_id }}-${{ github.run_attempt }}
+  REMOTE_DOCKER_CONFIG: .jeeb-deploy/ghcr-${{ github.run_id }}-${{ github.run_attempt }}
 
 jobs:
   deploy:
@@ -22,6 +22,18 @@ jobs:
     environment: staging
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Require immutable default-branch source
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          : "${DEFAULT_BRANCH:?repository default branch is required}"
+          [ "$GITHUB_REF" = "refs/heads/${DEFAULT_BRANCH}" ] || {
+            echo '::error::Staging deploys may run only from the repository default branch' >&2
+            exit 1
+          }
+          [ "$GITHUB_SHA" = "$(git rev-parse HEAD)" ]
 
       - name: Log in to GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -101,30 +113,22 @@ jobs:
 
       - name: Log remote Docker in to GHCR
         run: |
-          ssh jeeb-staging "install -d -m 700 '$REMOTE_DOCKER_CONFIG'"
+          ssh jeeb-staging \
+            "install -d -m 700 \"\$HOME/.jeeb-deploy\" \"\$HOME/$REMOTE_DOCKER_CONFIG\""
           printf '%s' "${{ secrets.GITHUB_TOKEN }}" \
-            | ssh jeeb-staging "DOCKER_CONFIG='$REMOTE_DOCKER_CONFIG' docker login ghcr.io -u '${{ github.actor }}' --password-stdin"
+            | ssh jeeb-staging \
+                "DOCKER_CONFIG=\"\$HOME/$REMOTE_DOCKER_CONFIG\" docker login ghcr.io -u '${{ github.actor }}' --password-stdin >/dev/null"
 
       - name: Deploy Swarm service
         env:
           IMAGE: ${{ steps.immutable.outputs.image }}
           REPOSITORY: ${{ github.event.repository.name }}
-          JEEB_DATABASE_URL: ${{ secrets.JEEB_DATABASE_URL }}
-          JEEB_DB_USERNAME: ${{ secrets.JEEB_DB_USERNAME }}
-          JEEB_DB_PASSWORD: ${{ secrets.JEEB_DB_PASSWORD }}
-          JEEB_DB_HOST: ${{ secrets.JEEB_DB_HOST }}
-          JEEB_DB_PORT: ${{ secrets.JEEB_DB_PORT }}
-          JEEB_RTC_DATABASE_URL: ${{ secrets.JEEB_RTC_DATABASE_URL }}
-          JEEB_RTC_SECRET_KEY_BASE: ${{ secrets.JEEB_RTC_SECRET_KEY_BASE }}
           JEEB_RTC_GUARDIAN_SECRET_KEY: ${{ secrets.JEEB_RTC_GUARDIAN_SECRET_KEY }}
-          JEEB_REDIS_URL: ${{ secrets.JEEB_REDIS_URL }}
-          JEEB_SECRET_KEY_BASE: ${{ secrets.JEEB_SECRET_KEY_BASE }}
-          JEEB_INTERNAL_SERVICE_TOKEN: ${{ secrets.JEEB_INTERNAL_SERVICE_TOKEN }}
-          HEARTBEAT_REDIS_URL: ${{ secrets.HEARTBEAT_REDIS_URL }}
-          HEARTBEAT_SERVICE_AUTH_KEY: ${{ secrets.HEARTBEAT_SERVICE_AUTH_KEY }}
-          HEARTBEAT_JWKS_URL: ${{ secrets.HEARTBEAT_JWKS_URL }}
+          JEEB_STAGING_WSS_PROBE_MINT_KEY: ${{ secrets.JEEB_STAGING_WSS_PROBE_MINT_KEY }}
           JWT_SIGNING_KEY: ${{ secrets.JEEB_JWT_SIGNING_KEY }}
           UMJWT_SIGNING_KEY: ${{ secrets.UMJWT_SIGNING_KEY }}
+          JEEB_RTC_MEMBERSHIP_TICKET_KEY: ${{ secrets.JEEB_RTC_MEMBERSHIP_TICKET_KEY }}
+          JEEB_FIREBASE_JSON: ${{ secrets.JEEB_FIREBASE_JSON }}
           JEEB_STATE_SERVICE_TOKEN: ${{ secrets.JEEB_STATE_SERVICE_TOKEN }}
           NOTIFICATION_SERVICE_TOKEN: ${{ secrets.NOTIFICATION_SERVICE_TOKEN }}
           SETTLEMENT_SERVICE_TOKEN: ${{ secrets.SETTLEMENT_SERVICE_TOKEN }}
@@ -132,58 +136,150 @@ jobs:
           JEEB_GATEWAY_JOB_TOKEN: ${{ secrets.JEEB_GATEWAY_JOB_TOKEN }}
         run: |
           set -euo pipefail
-          delivery_database_url=''
+          [ "$REPOSITORY" = jeeb-gateway ] || {
+            echo '::error::This vendored workflow deploys only jeeb-gateway' >&2
+            exit 1
+          }
           state_secret_name=''
           notification_secret_name=''
           settlement_secret_name=''
           bundler_secret_name=''
           job_secret_name=''
-          if [ "$REPOSITORY" = delivery-service ]; then
-            : "${JEEB_DB_USERNAME:?JEEB_DB_USERNAME is required}"
-            : "${JEEB_DB_PASSWORD:?JEEB_DB_PASSWORD is required}"
-            : "${JEEB_DB_HOST:?JEEB_DB_HOST is required}"
-            : "${JEEB_DB_PORT:?JEEB_DB_PORT is required}"
-            db_user=$(jq -rn --arg value "$JEEB_DB_USERNAME" '$value | @uri')
-            db_password=$(jq -rn --arg value "$JEEB_DB_PASSWORD" '$value | @uri')
-            delivery_database_url="postgresql://${db_user}:${db_password}@${JEEB_DB_HOST}:${JEEB_DB_PORT}/delivery"
-          fi
+          jwt_secret_name=''
+          umjwt_secret_name=''
+          guardian_secret_name=''
+          probe_secret_name=''
+          membership_secret_name=''
+          firebase_secret_name=''
           if [ "$REPOSITORY" = jeeb-gateway ]; then
             : "${JEEB_STATE_SERVICE_TOKEN:?JEEB_STATE_SERVICE_TOKEN is required}"
             : "${NOTIFICATION_SERVICE_TOKEN:?NOTIFICATION_SERVICE_TOKEN is required}"
             : "${SETTLEMENT_SERVICE_TOKEN:?SETTLEMENT_SERVICE_TOKEN is required}"
             : "${BUNDLER_CMS_BEARER_TOKEN:?BUNDLER_CMS_BEARER_TOKEN is required}"
             : "${JEEB_GATEWAY_JOB_TOKEN:?JEEB_GATEWAY_JOB_TOKEN is required}"
+            : "${JWT_SIGNING_KEY:?JEEB_JWT_SIGNING_KEY is required}"
+            : "${JEEB_RTC_GUARDIAN_SECRET_KEY:?JEEB_RTC_GUARDIAN_SECRET_KEY is required}"
+            : "${JEEB_STAGING_WSS_PROBE_MINT_KEY:?JEEB_STAGING_WSS_PROBE_MINT_KEY is required}"
+            : "${JEEB_RTC_MEMBERSHIP_TICKET_KEY:?JEEB_RTC_MEMBERSHIP_TICKET_KEY is required}"
+            : "${JEEB_FIREBASE_JSON:?JEEB_FIREBASE_JSON is required}"
+            [ "${#JWT_SIGNING_KEY}" -ge 32 ]
+            [ -z "$UMJWT_SIGNING_KEY" ] || [ "${#UMJWT_SIGNING_KEY}" -ge 32 ]
+            [ "${#JEEB_RTC_GUARDIAN_SECRET_KEY}" -ge 64 ]
+            [ "${#JEEB_RTC_MEMBERSHIP_TICKET_KEY}" -ge 32 ]
+            [ "$(printf '%s' "$JEEB_STAGING_WSS_PROBE_MINT_KEY" | LC_ALL=C wc -c)" -ge 32 ]
+            [ "$JEEB_RTC_MEMBERSHIP_TICKET_KEY" != "$JEEB_RTC_GUARDIAN_SECRET_KEY" ]
+            [ "$JEEB_RTC_MEMBERSHIP_TICKET_KEY" != "$JWT_SIGNING_KEY" ]
+            [ "$JEEB_STAGING_WSS_PROBE_MINT_KEY" != "$JWT_SIGNING_KEY" ]
+            [ "$JEEB_STAGING_WSS_PROBE_MINT_KEY" != "$JEEB_RTC_GUARDIAN_SECRET_KEY" ]
+            [ "$JEEB_STAGING_WSS_PROBE_MINT_KEY" != "$JEEB_RTC_MEMBERSHIP_TICKET_KEY" ]
+            [ -z "$UMJWT_SIGNING_KEY" ] || \
+              [ "$JEEB_STAGING_WSS_PROBE_MINT_KEY" != "$UMJWT_SIGNING_KEY" ]
             state_secret_name="jeeb_staging_gateway_state_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
             notification_secret_name="jeeb_staging_gateway_notification_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
             settlement_secret_name="jeeb_staging_gateway_settlement_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
             bundler_secret_name="jeeb_staging_gateway_bundler_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
             job_secret_name="jeeb_staging_gateway_job_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+            jwt_secret_name="jeeb_staging_gateway_jwt_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+            guardian_secret_name="jeeb_staging_gateway_guardian_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+            probe_secret_name="jeeb_staging_gateway_wss_probe_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+            membership_secret_name="jeeb_staging_gateway_membership_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+            firebase_secret_name="jeeb_staging_gateway_firebase_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+            [ -z "$UMJWT_SIGNING_KEY" ] || \
+              umjwt_secret_name="jeeb_staging_gateway_umjwt_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+            secret_stage=$(mktemp -d)
+            chmod 700 "$secret_stage"
+            firebase_file="$secret_stage/firebase-admin.json"
+            cleanup_created_secrets() {
+              rm -rf "$secret_stage"
+              for created in "$jwt_secret_name" "$umjwt_secret_name" "$guardian_secret_name" \
+                "$probe_secret_name" "$membership_secret_name" "$firebase_secret_name" "$state_secret_name" \
+                "$notification_secret_name" "$settlement_secret_name" "$bundler_secret_name" \
+                "$job_secret_name"; do
+                [ -z "$created" ] || ssh jeeb-staging "docker secret rm '$created' >/dev/null 2>&1 || true"
+              done
+            }
+            trap cleanup_created_secrets EXIT
             stream_secret() {
               printf '%s' "$2" | ssh jeeb-staging "docker secret create '$1' - >/dev/null"
             }
+            stream_secret_file() {
+              ssh jeeb-staging "docker secret create '$1' - >/dev/null" < "$2"
+            }
+            if printf '%s' "$JEEB_FIREBASE_JSON" \
+              | jq -e '.type == "service_account" and .project_id == "jeeb-5a293"' >/dev/null; then
+              printf '%s' "$JEEB_FIREBASE_JSON" > "$firebase_file"
+            elif printf '%s' "$JEEB_FIREBASE_JSON" | base64 --decode \
+              | jq -e '.type == "service_account" and .project_id == "jeeb-5a293"' > "$firebase_file"; then
+              :
+            else
+              echo '::error::JEEB_FIREBASE_JSON is not a jeeb-5a293 service-account document' >&2
+              exit 1
+            fi
+            chmod 600 "$firebase_file"
             stream_secret "$state_secret_name" "$JEEB_STATE_SERVICE_TOKEN"
             stream_secret "$notification_secret_name" "$NOTIFICATION_SERVICE_TOKEN"
             stream_secret "$settlement_secret_name" "$SETTLEMENT_SERVICE_TOKEN"
             stream_secret "$bundler_secret_name" "$BUNDLER_CMS_BEARER_TOKEN"
             stream_secret "$job_secret_name" "$JEEB_GATEWAY_JOB_TOKEN"
+            stream_secret "$jwt_secret_name" "$JWT_SIGNING_KEY"
+            [ -z "$umjwt_secret_name" ] || stream_secret "$umjwt_secret_name" "$UMJWT_SIGNING_KEY"
+            stream_secret "$guardian_secret_name" "$JEEB_RTC_GUARDIAN_SECRET_KEY"
+            stream_secret "$probe_secret_name" "$JEEB_STAGING_WSS_PROBE_MINT_KEY"
+            stream_secret "$membership_secret_name" "$JEEB_RTC_MEMBERSHIP_TICKET_KEY"
+            stream_secret_file "$firebase_secret_name" "$firebase_file"
             unset JEEB_STATE_SERVICE_TOKEN NOTIFICATION_SERVICE_TOKEN SETTLEMENT_SERVICE_TOKEN \
               BUNDLER_CMS_BEARER_TOKEN \
-              JEEB_GATEWAY_JOB_TOKEN
+              JEEB_GATEWAY_JOB_TOKEN JWT_SIGNING_KEY UMJWT_SIGNING_KEY \
+              JEEB_RTC_GUARDIAN_SECRET_KEY JEEB_STAGING_WSS_PROBE_MINT_KEY \
+              JEEB_RTC_MEMBERSHIP_TICKET_KEY \
+              JEEB_FIREBASE_JSON
           fi
           {
-            for variable in IMAGE REMOTE_DOCKER_CONFIG REPOSITORY JEEB_DATABASE_URL JEEB_DB_PASSWORD \
-              JEEB_RTC_DATABASE_URL JEEB_RTC_SECRET_KEY_BASE \
-              JEEB_RTC_GUARDIAN_SECRET_KEY JEEB_REDIS_URL \
-              JEEB_SECRET_KEY_BASE JEEB_INTERNAL_SERVICE_TOKEN \
-              HEARTBEAT_REDIS_URL HEARTBEAT_SERVICE_AUTH_KEY HEARTBEAT_JWKS_URL \
-              delivery_database_url state_secret_name notification_secret_name settlement_secret_name \
-              bundler_secret_name job_secret_name JWT_SIGNING_KEY UMJWT_SIGNING_KEY; do
+            for variable in IMAGE REMOTE_DOCKER_CONFIG REPOSITORY \
+              state_secret_name notification_secret_name settlement_secret_name \
+              bundler_secret_name job_secret_name jwt_secret_name umjwt_secret_name \
+              guardian_secret_name probe_secret_name membership_secret_name firebase_secret_name; do
               printf '%s=%q\n' "$variable" "${!variable}"
             done
             cat <<'REMOTE'
           set -euo pipefail
-          export DOCKER_CONFIG="$REMOTE_DOCKER_CONFIG"
-          trap 'rm -rf "$DOCKER_CONFIG"' EXIT
+          export DOCKER_CONFIG="$HOME/$REMOTE_DOCKER_CONFIG"
+          previous_image=''
+          was_update=false
+          rollback_armed=false
+          rollback_on_failure() {
+            local status=$? current_image rollback_ok=true rollback_ready=false
+            trap - EXIT
+            set +e
+            if [ "$status" -ne 0 ] && [ "$was_update" = true ] && [ "$rollback_armed" = true ]; then
+              current_image=$(docker service inspect "$service" \
+                --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' 2>/dev/null)
+              if [ "$current_image" != "$previous_image" ]; then
+                docker service rollback --detach=false "$service" || rollback_ok=false
+              fi
+              [ "$(docker service inspect "$service" \
+                --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}' 2>/dev/null)" = "$previous_image" ] \
+                || rollback_ok=false
+              for attempt in $(seq 1 40); do
+                if curl -fsS --max-time 5 "http://127.0.0.1:${published}${health}" >/dev/null; then
+                  rollback_ready=true
+                  break
+                fi
+                sleep 4
+              done
+              [ "$rollback_ready" = true ] || rollback_ok=false
+              if [ "$rollback_ok" = true ]; then
+                echo "Verified automatic rollback to ${previous_image##*@}" >&2
+              else
+                echo 'Rollback verification failed' >&2
+                status=97
+              fi
+            fi
+            rm -f -- "$DOCKER_CONFIG/config.json"
+            rmdir -- "$DOCKER_CONFIG" 2>/dev/null || true
+            exit "$status"
+          }
+          trap rollback_on_failure EXIT
           network=jeeb-staging-net
           retired_gateway_env=(
             UnifiedPaymentGateway__BaseUrl
@@ -196,14 +292,11 @@ jobs:
             OPENAI_API_KEY
             OLIVIUM_OPEN_AI_KEY
           )
-          mount_args=()
           network_update_args=()
           secret_update_args=()
-          secret_create_args=()
           update_env=()
-          create_env=()
           env_remove_args=()
-          add_env() { update_env+=(--env-add "$1=$2"); create_env+=(--env "$1=$2"); }
+          add_env() { update_env+=(--env-add "$1=$2"); }
           docker network create --driver overlay --attachable "$network" 2>/dev/null || true
           [ "$(docker network inspect -f '{{.Driver}}' "$network")" = overlay ]
           network_id=$(docker network inspect --format '{{.Id}}' "$network")
@@ -220,20 +313,27 @@ jobs:
           case "$REPOSITORY" in
             jeeb-gateway)
               service=jeeb-staging-jeeb-gateway; published=10000; target=8080; health=/health/ready
-              : "${JWT_SIGNING_KEY:?JEEB_JWT_SIGNING_KEY is required}"
+              : "${jwt_secret_name:?file-backed gateway JWT secret is required}"
+              : "${guardian_secret_name:?file-backed realtime Guardian secret is required}"
+              : "${probe_secret_name:?file-backed staging WSS probe secret is required}"
+              : "${membership_secret_name:?file-backed membership-ticket secret is required}"
+              : "${firebase_secret_name:?file-backed Firebase service account is required}"
               add_env ASPNETCORE_ENVIRONMENT Staging
               add_env ASPNETCORE_URLS http://+:8080
-              add_env Jwt__SigningKey "$JWT_SIGNING_KEY"
-              add_env Jwt__Issuer https://jeeb-staging.fds-1.com
-              add_env Jwt__Audience jeeb-mobile
+              add_env Jwt__SigningKeyFile /run/secrets/jeeb_gateway_jwt
+              add_env Jwt__Issuer jeeb-gateway
+              add_env Jwt__Audience jeeb-clients
               add_env Gateway__PublicBaseUrl https://app.jeeb.fds-1.com
-              [ -z "$UMJWT_SIGNING_KEY" ] || add_env UmJwt__SigningKey "$UMJWT_SIGNING_KEY"
+              if [ -n "$umjwt_secret_name" ]; then
+                add_env UmJwt__SigningKeyFile /run/secrets/jeeb_gateway_umjwt
+              else
+                add_env UmJwt__SigningKeyFile ''
+              fi
               add_env UmJwt__Issuer user-management
               add_env UmJwt__Audience user-management
               add_env AdminOidc__Enabled false
-              # Staging intentionally mirrors the dev/demo Super-Login+ behavior.
-              add_env SuperLogin__OpenMode true
-              add_env DemoUsers__Enabled true
+              add_env SuperLogin__OpenMode false
+              add_env DemoUsers__Enabled false
               # Host-mode published ports traverse docker_gwbridge. Trust only
               # its exact gateway address, never the whole bridge or app overlay.
               add_env ForwardedHeaders__KnownProxies__0 "$published_port_proxy_ip"
@@ -258,6 +358,12 @@ jobs:
               # processing, and durable execution before any artifact-owner call.
               add_env Users__DataExport__Enabled false
               add_env InternalJobAuth__TokenFile /run/secrets/jeeb_gateway_job_token
+              add_env Firebase__Chat__ServiceAccountKeyPath /run/secrets/firebase_admin_json
+              add_env Firebase__Chat__ProjectId jeeb-5a293
+              add_env Services__Realtime__GuardianSecretFile /run/secrets/realtime_guardian_secret
+              add_env Services__Realtime__MembershipTicketSigningKeyFile /run/secrets/realtime_membership_ticket_key
+              add_env Services__Realtime__PublicSocketUrl wss://app.jeeb.fds-1.com/socket/websocket
+              add_env Operations__RealtimeProbe__MintKeyFile /run/secrets/staging_wss_probe_mint_key
               add_rotated_secret() {
                 local source=$1 target_name=$2
                 while IFS= read -r old_secret; do
@@ -269,8 +375,7 @@ jobs:
                     | awk -v target="$target_name" '$2 == target { print $1 }' \
                     || true
                 )
-                secret_update_args+=(--secret-add "source=$source,target=$target_name,mode=0444")
-                secret_create_args+=(--secret "source=$source,target=$target_name,mode=0444")
+                secret_update_args+=(--secret-add "source=$source,target=$target_name,uid=65532,gid=65532,mode=0400")
               }
               remove_secret_target() {
                 local target_name=$1
@@ -289,12 +394,20 @@ jobs:
               add_rotated_secret "$settlement_secret_name" settlement_service_token
               add_rotated_secret "$bundler_secret_name" bundler_cms_bearer_token
               add_rotated_secret "$job_secret_name" jeeb_gateway_job_token
+              add_rotated_secret "$jwt_secret_name" jeeb_gateway_jwt
+              [ -z "$umjwt_secret_name" ] || \
+                add_rotated_secret "$umjwt_secret_name" jeeb_gateway_umjwt
+              add_rotated_secret "$guardian_secret_name" realtime_guardian_secret
+              add_rotated_secret "$probe_secret_name" staging_wss_probe_mint_key
+              add_rotated_secret "$membership_secret_name" realtime_membership_ticket_key
+              add_rotated_secret "$firebase_secret_name" firebase_admin_json
               remove_secret_target delivery_service_token
               remove_secret_target private_artifact_store_bearer_token
               remove_secret_target data_export_token_signing_key
               for stale_env in DELIVERY_SERVICE_TOKEN_FILE PRIVATE_ARTIFACT_STORE_BASE_URL \
                 PRIVATE_ARTIFACT_STORE_BEARER_TOKEN_FILE DATA_EXPORT_TOKEN_SIGNING_KEY_FILE \
-                Services__Settlement__ApiToken \
+                Services__Settlement__ApiToken Jwt__SigningKey UmJwt__SigningKey \
+                Services__Realtime__GuardianSecret Operations__RealtimeProbe__MintKey \
                 "${retired_gateway_env[@]}"; do
                 if docker service inspect "$service" \
                   --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' \
@@ -310,11 +423,17 @@ jobs:
               # Voice bytes always cross the owning service boundary; the gateway
               # has no local provider path or credential fallback.
               add_env FeatureFlags__UseUpstream__Voice true
-              # These upstreams are reachable, but their dormant gateway surfaces are not
-              # part of this staging cutover. Keep the kill switches explicitly off while
-              # wiring the real typed clients so a future enablement cannot inherit a stale
-              # alias or localhost fallback.
-              add_env FeatureFlags__UseUpstream__Otp false
+              add_env FeatureFlags__UseUpstream__Delivery true
+              add_env FeatureFlags__UseUpstream__Offer true
+              add_env FeatureFlags__UseUpstream__Chat true
+              add_env FeatureFlags__UseUpstream__Otp true
+              add_env FeatureFlags__UseUpstream__Realtime true
+              add_env FeatureFlags__UseUpstream__ContractSigning true
+              add_env FeatureFlags__UseUpstream__FormBuilder true
+              add_env FeatureFlags__UseUpstream__Cdn true
+              add_env FeatureFlags__UseUpstream__Kyc true
+              add_env FeatureFlags__Kyc__AutoApprove true
+              add_env Auth__Otp__ApplicationId 0d51afe1-499f-4a29-a55a-36d2dd223b05
               add_env FeatureFlags__UseUpstream__Compliment false
               # The existing gateway deploy is native and uses host loopback.
               # This staging gateway is containerized, so retain the same fleet
@@ -328,6 +447,7 @@ jobs:
               add_env Services__Realtime__BaseUrl http://192.168.2.20:10069
               add_env Services__ContractSigning__BaseUrl http://192.168.2.20:10071
               add_env Services__FormBuilder__BaseUrl http://192.168.2.20:10070
+              add_env Services__Kyc__BaseUrl http://192.168.2.20:10074
               add_env Services__HeartBeat__BaseUrl http://192.168.2.20:10075
               add_env Services__Ban__BaseUrl http://192.168.2.20:10065
               add_env RemoteUserPreferencesServiceApi__BaseUrl http://192.168.2.20:10067/
@@ -345,121 +465,64 @@ jobs:
               add_env ServiceNotificationClient__BaseUrl http://jeeb-staging-notification:8000/
               add_env PushNotificationServiceApi__BaseUrl http://192.168.2.20:10040
               ;;
-            delivery-service)
-              service=jeeb-staging-delivery-service; published=10055; target=8080; health=/health
-              : "${delivery_database_url:?database configuration is required}"
-              add_env DATABASE_URL "$delivery_database_url"
-              add_env DB_PASSWORD "$JEEB_DB_PASSWORD"
-              add_env PORT "$target"
-              add_env SKIP_DB_INIT true
-              ;;
-            realtime-comunication-service)
-              service=jeeb-staging-realtime-comunication-service; published=10069; target=4000; health=/health
-              : "${JEEB_RTC_DATABASE_URL:?JEEB_RTC_DATABASE_URL is required}"
-              : "${JEEB_RTC_SECRET_KEY_BASE:?JEEB_RTC_SECRET_KEY_BASE is required}"
-              : "${JEEB_RTC_GUARDIAN_SECRET_KEY:?JEEB_RTC_GUARDIAN_SECRET_KEY is required}"
-              add_env DATABASE_URL "$JEEB_RTC_DATABASE_URL"
-              add_env SECRET_KEY_BASE "$JEEB_RTC_SECRET_KEY_BASE"
-              add_env GUARDIAN_SECRET_KEY "$JEEB_RTC_GUARDIAN_SECRET_KEY"
-              add_env REDIS_URL redis://192.168.2.20:6379
-              add_env PHX_HOST 192.168.2.20
-              add_env PHX_SERVER true
-              add_env PORT "$target"
-              ;;
-            cdn-service)
-              service=jeeb-staging-cdn-service; published=10072; target=8080; health=/health/ready
-              install -d -m 750 /opt/jeeb-staging-cdn/uploads
-              mount_args=(--mount type=bind,source=/opt/jeeb-staging-cdn/uploads,target=/app/uploads)
-              ;;
-            voice-transcription-service)
-              service=jeeb-staging-voice-transcription-service; published=10062; target=8080; health=/healthz
-              : "${JEEB_REDIS_URL:?JEEB_REDIS_URL is required}"
-              add_env REDIS_URL "$JEEB_REDIS_URL"
-              add_env APP_ENV production
-              add_env WHISPER_FAKE_TRANSCRIBE 1
-              ;;
-            contract-signing-service)
-              service=jeeb-staging-contract-signing-service; published=10071; target=8000; health=/health
-              : "${JEEB_DATABASE_URL:?JEEB_DATABASE_URL is required}"
-              add_env DATABASE_URL "$JEEB_DATABASE_URL"
-              add_env PORT "$target"
-              ;;
-            form-builder-service)
-              service=jeeb-staging-form-builder-service; published=10070; target=8000; health=/openapi.json
-              : "${JEEB_DATABASE_URL:?JEEB_DATABASE_URL is required}"
-              add_env DATABASE_URL "$JEEB_DATABASE_URL"
-              add_env TEMPLATE_JSON_FILES jeeb_kyc_form_builder.json
-              add_env ROOT_PATH /formbuilder
-              add_env API_BASE_URL http://192.168.2.20:10000
-              add_env GATEWAY_URL_OVERRIDE http://192.168.2.20:10000
-              ;;
-            compliment-service)
-              service=jeeb-staging-compliment-service; published=10036; target=6070; health=/health
-              : "${JEEB_DATABASE_URL:?JEEB_DATABASE_URL is required}"
-              case "$JEEB_DATABASE_URL" in *@192.168.2.20:*) ;; *) echo 'DATABASE_URL must target staging datastore 192.168.2.20' >&2; exit 1;; esac
-              add_env DATABASE_URL "$JEEB_DATABASE_URL"
-              add_env ENVIRONMENT production
-              add_env STRICT_DB_INIT true
-              ;;
-            offer-service)
-              service=jeeb-staging-offer-service; published=10063; target=4040; health=/health
-              : "${JEEB_DATABASE_URL:?JEEB_DATABASE_URL is required}"
-              : "${JEEB_SECRET_KEY_BASE:?JEEB_SECRET_KEY_BASE is required}"
-              : "${JEEB_INTERNAL_SERVICE_TOKEN:?JEEB_INTERNAL_SERVICE_TOKEN is required}"
-              add_env DATABASE_URL "$JEEB_DATABASE_URL"
-              add_env SECRET_KEY_BASE "$JEEB_SECRET_KEY_BASE"
-              add_env CHAT_SERVICE_URL http://192.168.2.20:10028
-              add_env NOTIFICATION_SERVICE_URL http://192.168.2.20:10026
-              add_env INTERNAL_SERVICE_TOKEN "$JEEB_INTERNAL_SERVICE_TOKEN"
-              add_env FORCE_EXPIRE_SEAM_ENABLED true
-              add_env PHX_SERVER true
-              add_env APP_ENV production
-              ;;
-            heart-beat)
-              service=jeeb-staging-heart-beat; published=10075; target=8080; health=/health/ready
-              : "${HEARTBEAT_REDIS_URL:?HEARTBEAT_REDIS_URL is required}"
-              : "${HEARTBEAT_SERVICE_AUTH_KEY:?HEARTBEAT_SERVICE_AUTH_KEY is required}"
-              add_env REDIS_URL "$HEARTBEAT_REDIS_URL"
-              add_env HEARTBEAT_SERVICE_AUTH_KEY "$HEARTBEAT_SERVICE_AUTH_KEY"
-              add_env HEARTBEAT_JWKS_URL "$HEARTBEAT_JWKS_URL"
-              add_env HEARTBEAT_ADMIN_SWEEP_ENABLED false
-              add_env HEARTBEAT_KEYSPACE_SWEEPER_ENABLED false
-              add_env HEARTBEAT_DEFAULT_IDLE_TTL 0
-              add_env HTTP_ADDR ":$target"
-              ;;
             *) echo "Unsupported repository: $REPOSITORY" >&2; exit 1 ;;
           esac
           [[ "$IMAGE" =~ @sha256:[0-9a-f]{64}$ ]]
           docker pull "$IMAGE"
-          common=(--limit-cpu 0.75 --limit-memory 768M --reserve-cpu 0.10 --reserve-memory 64M
+          common=(
+            --limit-cpu 0.75 --limit-memory 768M --reserve-cpu 0.10 --reserve-memory 64M
             --log-driver json-file --log-opt max-size=10m --log-opt max-file=3
-            --update-order stop-first --update-failure-action pause --update-monitor 20s)
-          if docker service inspect "$service" >/dev/null 2>&1; then
-            if ! docker service inspect "$service" \
-              --format '{{range .Spec.TaskTemplate.Networks}}{{.Target}} {{end}}' | \
-              grep -Fq "$network_id"; then
-              network_update_args+=(--network-add "$network")
-            fi
-            if [ "$REPOSITORY" = jeeb-gateway ]; then
-              stale_gateway_network=jeeb-net
-              stale_gateway_network_id=$(docker network inspect \
-                --format '{{.Id}}' "$stale_gateway_network" 2>/dev/null || true)
-              if [ -n "$stale_gateway_network_id" ] && docker service inspect "$service" \
-                --format '{{range .Spec.TaskTemplate.Networks}}{{.Target}} {{end}}' | \
-                grep -Fq "$stale_gateway_network_id"; then
-                network_update_args+=(--network-rm "$stale_gateway_network")
-              fi
-            fi
-            docker service update --detach=false --replicas 1 --image "$IMAGE" --with-registry-auth \
-              "${network_update_args[@]}" \
-              "${secret_update_args[@]}" "${env_remove_args[@]}" \
-              "${update_env[@]}" "${common[@]}" "$service"
-          else
-            docker service create --detach=false --name "$service" --replicas 1 --network "$network" \
-              --publish "published=$published,target=$target,mode=host" \
-              --with-registry-auth "${mount_args[@]}" "${secret_create_args[@]}" "${create_env[@]}" \
-              "${common[@]}" "$IMAGE"
+            --update-order stop-first --update-parallelism 1 --update-monitor 20s
+            --update-failure-action rollback
+            --rollback-order stop-first
+            --rollback-parallelism 1
+            --rollback-monitor 20s
+            --rollback-failure-action pause
+          )
+          docker service inspect "$service" >/dev/null 2>&1 || {
+            echo 'Selective gateway deploy requires the incumbent service and rollback target' >&2
+            exit 1
+          }
+          [ "$(docker service inspect "$service" --format '{{.Spec.Mode.Replicated.Replicas}}')" = 1 ] || {
+            echo 'Gateway staging service must retain exactly one replica' >&2
+            exit 1
+          }
+          current_ports=$(docker service inspect "$service" \
+            --format '{{range .Endpoint.Spec.Ports}}{{.PublishedPort}}:{{.TargetPort}}:{{.PublishMode}}{{end}}')
+          [ "$current_ports" = "${published}:${target}:host" ] || {
+            echo 'Gateway staging service must retain the approved host-mode port' >&2
+            exit 1
+          }
+          previous_image=$(docker service inspect "$service" \
+            --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')
+          [[ "$previous_image" =~ @sha256:[0-9a-f]{64}$ ]] || {
+            echo 'Incumbent service image is not digest-pinned; rollback target is unsafe' >&2
+            exit 1
+          }
+          if ! docker service inspect "$service" \
+            --format '{{range .Spec.TaskTemplate.Networks}}{{.Target}} {{end}}' | \
+            grep -Fq "$network_id"; then
+            network_update_args+=(--network-add "$network")
           fi
+          stale_gateway_network=jeeb-net
+          stale_gateway_network_id=$(docker network inspect \
+            --format '{{.Id}}' "$stale_gateway_network" 2>/dev/null || true)
+          if [ -n "$stale_gateway_network_id" ] && docker service inspect "$service" \
+            --format '{{range .Spec.TaskTemplate.Networks}}{{.Target}} {{end}}' | \
+            grep -Fq "$stale_gateway_network_id"; then
+            network_update_args+=(--network-rm "$stale_gateway_network")
+          fi
+          was_update=true
+          rollback_armed=true
+          docker service update --detach=false --replicas 1 --image "$IMAGE" --with-registry-auth \
+            "${network_update_args[@]}" \
+            "${secret_update_args[@]}" "${env_remove_args[@]}" \
+            "${update_env[@]}" "${common[@]}" "$service"
+          [ "$(docker service inspect "$service" \
+            --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')" = "$IMAGE" ] || {
+            echo 'Deployed service spec does not match the build-produced digest' >&2
+            exit 1
+          }
           ports=$(docker service inspect -f '{{range .Endpoint.Spec.Ports}}{{.PublishedPort}}:{{.TargetPort}}:{{.PublishMode}}{{end}}' "$service")
           [ "$ports" = "${published}:${target}:host" ] || { echo "Unexpected ports: $ports" >&2; exit 1; }
           healthy=false
@@ -474,6 +537,7 @@ jobs:
             docker service ps --no-trunc "$service" | head -n 8 || true
             exit 1
           fi
+          rollback_armed=false
           REMOTE
           } | ssh jeeb-staging bash -se
 
@@ -509,7 +573,32 @@ jobs:
           probe_origin cms.jeeb.fds-1.com /gateway/admin/v1/auth/refresh https "$csrf_type"
           probe_origin cms.jeeb.fds-1.com /gateway/admin/v1/auth/refresh http "$origin_type"
 
+          for retired_path in /api/User/demo-users /api/User/super-login/users; do
+            status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+              "https://app.jeeb.fds-1.com${retired_path}")
+            [ "$status" = 404 ] || {
+              echo "Public debug login surface is still reachable: ${retired_path} -> ${status}" >&2
+              exit 1
+            }
+          done
+
+          otp_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' \
+            --header 'Content-Type: application/json' --data '{}' \
+            https://app.jeeb.fds-1.com/v1/auth/otp/request)
+          [ "$otp_status" = 400 ] || {
+            echo "OTP route is not enabled with its normal validation contract: ${otp_status}" >&2
+            exit 1
+          }
+
       - name: Clean up isolated remote Docker credentials
         if: always()
-        continue-on-error: true
-        run: ssh jeeb-staging "rm -rf '$REMOTE_DOCKER_CONFIG'"
+        run: |
+          set -euo pipefail
+          ssh jeeb-staging "set -eu
+            credential_dir=\"\$HOME/$REMOTE_DOCKER_CONFIG\"
+            case \"\$credential_dir\" in \"\$HOME/.jeeb-deploy/ghcr-${{ github.run_id }}-${{ github.run_attempt }}\") ;; *) exit 97 ;; esac
+            if [ -d \"\$credential_dir\" ]; then
+              DOCKER_CONFIG=\"\$credential_dir\" docker logout ghcr.io >/dev/null 2>&1 || true
+              rm -f -- \"\$credential_dir/config.json\"
+              rmdir -- \"\$credential_dir\"
+            fi"

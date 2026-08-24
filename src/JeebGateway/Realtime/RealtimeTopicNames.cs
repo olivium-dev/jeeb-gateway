@@ -25,6 +25,7 @@ public sealed class RealtimeTopicNames
 
         TenantPrefix = prefix;
         ChatTopic = prefix + ":chat";
+        ChatChannelPrefix = prefix + ":chat:";
         DeliveryTopicPrefix = prefix + ":delivery:";
         ConversationChannelPrefix = prefix + "_conversation:";
     }
@@ -34,6 +35,10 @@ public sealed class RealtimeTopicNames
 
     /// <summary>The 1:1 chat fan-out ingest topic, <c>{prefix}:chat</c>.</summary>
     public string ChatTopic { get; }
+
+    /// <summary>The canonical membership-aware chat-channel prefix,
+    /// <c>{prefix}:chat:</c>.</summary>
+    public string ChatChannelPrefix { get; }
 
     /// <summary>Courier-position topic prefix, <c>{prefix}:delivery:</c>.</summary>
     public string DeliveryTopicPrefix { get; }
@@ -46,6 +51,13 @@ public sealed class RealtimeTopicNames
     public string? DeliveryTopicFor(string? deliveryId)
         => CourierPositionTopic.IsSafeDeliveryId(deliveryId)
             ? DeliveryTopicPrefix + deliveryId
+            : null;
+
+    /// <summary>The canonical membership-aware Phoenix channel for a conversation,
+    /// or <c>null</c> when the id could escape the colon-delimited ACL namespace.</summary>
+    public string? ChatChannelFor(string? conversationId)
+        => CourierPositionTopic.IsSafeDeliveryId(conversationId)
+            ? ChatChannelPrefix + conversationId
             : null;
 
     /// <summary>The Phoenix channel a chat client joins for a conversation.</summary>

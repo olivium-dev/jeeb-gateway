@@ -190,7 +190,7 @@ public sealed class S08GatewayCloseoutTests
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         var json = JObject.Parse(await resp.Content.ReadAsStringAsync());
-        json["topic"]!.Value<string>().Should().Be("jeeb_conversation:conv-h6");
+        json["topic"]!.Value<string>().Should().Be("jeeb:chat:conv-h6");
         json["roleInConvo"]!.Value<string>().Should().Be("jeeber_offerer");
 
         var ticket = json["ticket"]!.Value<string>();
@@ -201,7 +201,9 @@ public sealed class S08GatewayCloseoutTests
         var jwt = new JwtSecurityTokenHandler().ReadJwtToken(ticket);
         jwt.Subject.Should().Be(viewerId);
         jwt.Claims.Should().Contain(c => c.Type == "conv" && c.Value == "conv-h6");
-        jwt.Claims.Should().Contain(c => c.Type == "role" && c.Value == "jeeber_offerer");
+        jwt.Issuer.Should().Be("jeeb-gateway");
+        jwt.Audiences.Should().ContainSingle().Which.Should().Be("jeeb-realtime");
+        jwt.Claims.Should().Contain(c => c.Type == "role" && c.Value == "jeeber");
         jwt.ValidTo.Should().BeAfter(DateTime.UtcNow);
     }
 

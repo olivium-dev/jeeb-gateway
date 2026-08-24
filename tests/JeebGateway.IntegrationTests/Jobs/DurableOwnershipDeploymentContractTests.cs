@@ -35,7 +35,10 @@ public sealed class DurableOwnershipDeploymentContractTests
         foreach (var target in targets)
             workflow.Should().Contain(target);
 
-        if (workflowName != "jeeb-staging-deploy.yml")
+        if (workflowName == "jeeb-staging-deploy.yml")
+            workflow.Should().Contain(
+                "target=$target_name,uid=65532,gid=65532,mode=0400");
+        else
             foreach (var target in targets)
                 workflow.Should().Contain($"target={target},mode=0444");
 
@@ -131,7 +134,7 @@ public sealed class DurableOwnershipDeploymentContractTests
     }
 
     [Fact]
-    public void Jeeb_staging_wires_dormant_typed_clients_without_enabling_them()
+    public void Jeeb_staging_enables_real_otp_and_keeps_unavailable_compliment_dormant()
     {
         var workflow = Workflow("jeeb-staging-deploy.yml");
 
@@ -139,7 +142,9 @@ public sealed class DurableOwnershipDeploymentContractTests
             "add_env Services__ServiceOTP__BaseUrl http://192.168.2.20:10037");
         workflow.Should().Contain(
             "add_env ComplimentServiceApi__BaseUrl http://192.168.2.20:10036");
-        workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Otp false");
+        workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Otp true");
+        workflow.Should().Contain(
+            "add_env Auth__Otp__ApplicationId 0d51afe1-499f-4a29-a55a-36d2dd223b05");
         workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Compliment false");
         workflow.Should().Contain("add_env CatalogServiceApi__BaseUrl ''");
 
@@ -149,6 +154,27 @@ public sealed class DurableOwnershipDeploymentContractTests
             "add_env Services__Compliment__BaseUrl http://192.168.2.20:10036");
         workflow.Should().Contain("ServiceOTPApi__BaseUrl");
         workflow.Should().Contain("Services__Compliment__BaseUrl");
+    }
+
+    [Fact]
+    public void Jeeb_staging_workflow_is_gateway_only_and_provider_secret_minimal()
+    {
+        var workflow = Workflow("jeeb-staging-deploy.yml");
+        var automaticRollback = "--update-failure-action " + "rollback";
+        var rollbackOrder = "--" + "rollback-order stop-first";
+        var openAiSecret = "secrets.OPENAI" + "_API_KEY";
+
+        workflow.Should().Contain("[ \"$REPOSITORY\" = jeeb-gateway ]");
+        workflow.Should().Contain("Selective gateway deploy requires the incumbent service");
+        workflow.Should().Contain(automaticRollback);
+        workflow.Should().Contain(rollbackOrder);
+        workflow.Should().Contain("--update-order stop-first");
+        workflow.Should().Contain(".jeeb-deploy/ghcr-");
+        workflow.Should().NotContain("docker service create");
+        workflow.Should().NotContain("WHISPER_FAKE_TRANSCRIBE 1");
+        workflow.Should().NotContain("secrets.JEEB_RTC_DATABASE_URL");
+        workflow.Should().NotContain("secrets.JEEB_DATABASE_URL");
+        workflow.Should().NotContain(openAiSecret);
     }
 
     [Fact]
@@ -196,14 +222,13 @@ public sealed class DurableOwnershipDeploymentContractTests
     [Theory]
     [InlineData("deploy-to-jeeb.yml")]
     [InlineData("jeeb-staging-deploy.yml")]
-    public void Gateway_deploys_pause_without_rollback_and_verify_the_exact_running_image(
+    public void Gateway_deploys_use_the_environment_specific_safe_rollout_and_verify_exact_image(
         string workflowName)
     {
         var workflow = Workflow(workflowName);
         var verifier = File.ReadAllText(Path.Combine(
             FindRepositoryRoot(), "scripts", "verify-swarm-service-image.sh"));
 
-        workflow.Should().Contain("--update-failure-action pause");
         workflow.Should().Contain("steps.immutable.outputs.image");
         workflow.Should().Contain("scripts/verify-swarm-service-image.sh");
         verifier.Should().Contain(".Spec.TaskTemplate.ContainerSpec.Image");
@@ -216,9 +241,22 @@ public sealed class DurableOwnershipDeploymentContractTests
         verifier.Should().Contain(".Status.ContainerStatus.ContainerID");
         verifier.Should().Contain("docker image inspect");
         verifier.Should().Contain("{{.Image}}");
-        workflow.Should().NotContain("--update-failure-action " + "rollback");
-        workflow.Should().NotContain("--" + "rollback-order");
-        workflow.Should().NotContain("docker service " + "rollback");
+        if (workflowName == "jeeb-staging-deploy.yml")
+        {
+            workflow.Should().Contain("--update-order stop-first");
+            workflow.Should().Contain("--update-failure-action " + "rollback");
+            workflow.Should().Contain("--" + "rollback-order stop-first");
+            workflow.Should().Contain("docker service " + "rollback --detach=false");
+            workflow.Should().Contain("Incumbent service image is not digest-pinned");
+            workflow.Should().NotContain("--update-order start-first");
+        }
+        else
+        {
+            workflow.Should().Contain("--update-failure-action pause");
+            workflow.Should().NotContain("--update-failure-action " + "rollback");
+            workflow.Should().NotContain("--" + "rollback-order");
+            workflow.Should().NotContain("docker service " + "rollback");
+        }
     }
 
     private static string Workflow(string name) => File.ReadAllText(Path.Combine(

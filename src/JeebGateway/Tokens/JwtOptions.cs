@@ -20,6 +20,13 @@ public class JwtOptions
     /// </summary>
     public string SigningKey { get; set; } = "dev-only-signing-key-32-bytes-minimum!!";
 
+    /// <summary>
+    /// Absolute mounted-secret path for container deployments. When set, this
+    /// takes precedence over <see cref="SigningKey"/> so the key never appears in
+    /// the Swarm service environment/spec.
+    /// </summary>
+    public string? SigningKeyFile { get; set; }
+
     public int AccessTokenMinutes { get; set; } = 15;
     public int RefreshTokenDays { get; set; } = 30;
 

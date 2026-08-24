@@ -54,6 +54,8 @@ public sealed class JeebConversationsController : ControllerBase
 {
     private readonly IJeebConversationClient _client;
     private readonly IRealtimeTicketIssuer _ticketIssuer;
+    private readonly JeebGateway.Realtime.IRealtimeGuardianTokenIssuer _guardian;
+    private readonly JeebGateway.Realtime.RealtimeGuardianOptions _realtimeOptions;
     private readonly IChatMessagePushNotifier _chatPush;
     private readonly JeebGateway.Realtime.RealtimeTopicNames _topics;
     private readonly UpstreamFeatureFlags _flags;
@@ -62,6 +64,8 @@ public sealed class JeebConversationsController : ControllerBase
     public JeebConversationsController(
         IJeebConversationClient client,
         IRealtimeTicketIssuer ticketIssuer,
+        JeebGateway.Realtime.IRealtimeGuardianTokenIssuer guardian,
+        IOptions<JeebGateway.Realtime.RealtimeGuardianOptions> realtimeOptions,
         IChatMessagePushNotifier chatPush,
         JeebGateway.Realtime.RealtimeTopicNames topics,
         IOptions<UpstreamFeatureFlags> flags,
@@ -69,6 +73,8 @@ public sealed class JeebConversationsController : ControllerBase
     {
         _client = client;
         _ticketIssuer = ticketIssuer;
+        _guardian = guardian;
+        _realtimeOptions = realtimeOptions.Value;
         _chatPush = chatPush;
         _topics = topics;
         _flags = flags.Value;
@@ -578,6 +584,15 @@ public sealed class JeebConversationsController : ControllerBase
                 statusCode: StatusCodes.Status400BadRequest);
         }
 
+        var topic = _topics.ChatChannelFor(conversationId);
+        if (topic is null)
+        {
+            return Problem(
+                title: "conversationId is not a valid realtime identifier.",
+                detail: "Realtime identifiers must be a plain [A-Za-z0-9_-] token.",
+                statusCode: StatusCodes.Status400BadRequest);
+        }
+
         JeebConversationMembership membership;
         try
         {
@@ -637,17 +652,20 @@ public sealed class JeebConversationsController : ControllerBase
                 });
         }
 
-        // Member: hand back the channel descriptor the client upgrades to. The
-        // suite topic is {tenant}:chat:{id}; the realtime channel is
-        // {tenant}_conversation:{id} — this descriptor maps the two so the client
-        // knows which Phoenix topic to join. The gateway does not open the socket.
+        // Member: hand back the complete descriptor the client needs. The canonical
+        // membership-aware Phoenix channel is {tenant}:chat:{id}. The separate
+        // Guardian token authenticates the socket connection and is subscribe-only,
+        // exact-topic scoped. The membership ticket is presented in the channel join
+        // payload and binds (conversation, viewer, role). Neither credential replaces
+        // the other and the client never calls realtime's token-minter route.
         //
         // S08 (D / H6): mint a short-lived signed membership ticket scoped to
         // (conversation, viewer, role) so realtime can authorize the WS join WITHOUT
         // calling chat-service (no inter-service coupling — the authority is encoded
-        // in the gateway-signed ticket). Ticket minting failure degrades to a null
-        // ticket but still returns the 200 descriptor (the REST pre-check is intact).
-        string? ticket = null;
+        // in the gateway-signed ticket). A partial descriptor is unusable and tempts
+        // clients to fall back to an over-broad minter, so every missing component is
+        // a fail-closed 503.
+        string ticket;
         try
         {
             ticket = _ticketIssuer.Issue(conversationId, viewerId, activeRole);
@@ -656,16 +674,40 @@ public sealed class JeebConversationsController : ControllerBase
         {
             _logger.LogWarning(ex,
                 "Realtime ticket mint for conversation {ConversationId} viewer {ViewerId} failed; "
-                + "returning the descriptor without a ticket.",
+                + "refusing to return a partial descriptor.",
                 conversationId, viewerId);
+            return RealtimeDescriptorUnavailable(
+                "The conversation membership ticket could not be issued.");
+        }
+
+        var credential = _guardian.Issue(
+            subject: viewerId,
+            topic: topic,
+            scopes: JeebGateway.Realtime.RealtimeGuardianTokenIssuer.SubscribeOnly);
+        if (credential is null)
+        {
+            return RealtimeDescriptorUnavailable(
+                "Services:Realtime:GuardianSecret is unset, so a scoped socket credential "
+                + "cannot be issued.");
+        }
+
+        if (!Uri.TryCreate(_realtimeOptions.PublicSocketUrl, UriKind.Absolute, out var socketUri)
+            || !string.Equals(socketUri.Scheme, "wss", StringComparison.OrdinalIgnoreCase))
+        {
+            return RealtimeDescriptorUnavailable(
+                "Services:Realtime:PublicSocketUrl must be an absolute wss URL reachable "
+                + "by mobile devices.");
         }
 
         return Ok(new RealtimeChannelDescriptor
         {
             ConversationId = conversationId,
-            Topic = _topics.ConversationChannelFor(conversationId),
+            Topic = topic,
             RoleInConvo = activeRole,
             Ticket = ticket,
+            SocketUrl = socketUri.AbsoluteUri,
+            Token = credential.Token,
+            ExpiresAt = credential.ExpiresAt,
         });
     }
 
@@ -696,6 +738,16 @@ public sealed class JeebConversationsController : ControllerBase
                 "The caller is not an active participant of this conversation and "
                 + "may not read its metadata or participant roster.");
     }
+
+    private IActionResult RealtimeDescriptorUnavailable(string detail) =>
+        StatusCode(
+            StatusCodes.Status503ServiceUnavailable,
+            new ProblemDetails
+            {
+                Title = "Realtime chat credentials are unavailable.",
+                Detail = detail,
+                Status = StatusCodes.Status503ServiceUnavailable,
+            });
 
     private static bool IsActiveMembership(JeebConversationMembership membership) =>
         membership.IsMember && membership.RemovedAt is null;
@@ -826,9 +878,16 @@ public sealed class RealtimeChannelDescriptor
 
     /// <summary>
     /// Signed, short-lived membership ticket scoped to (conversation, viewer, role).
-    /// The client passes it on the WS connect/join; realtime verifies it. Null only
-    /// if ticket minting is unavailable (the descriptor still returns 200 so the
-    /// REST pre-check is unaffected).
+    /// The client passes it in the Phoenix channel join payload; realtime verifies it.
     /// </summary>
-    public string? Ticket { get; set; }
+    public required string Ticket { get; set; }
+
+    /// <summary>Device-reachable, TLS-protected Phoenix WebSocket endpoint.</summary>
+    public required string SocketUrl { get; set; }
+
+    /// <summary>Short-lived, exact-topic, subscribe-only Guardian connect token.</summary>
+    public required string Token { get; set; }
+
+    /// <summary>When <see cref="Token"/> stops being accepted.</summary>
+    public required DateTimeOffset ExpiresAt { get; set; }
 }

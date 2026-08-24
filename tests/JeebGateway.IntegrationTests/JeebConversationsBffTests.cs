@@ -3,11 +3,13 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Json;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
 using JeebGateway.Auth.OtpSignIn;
 using JeebGateway.Conversations.Client;
+using JeebGateway.Realtime;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -42,6 +44,10 @@ namespace JeebGateway.IntegrationTests;
 /// </summary>
 public sealed class JeebConversationsBffTests
 {
+    private const string RealtimeGuardianSecret =
+        "test-only-chat-guardian-secret-0123456789-abcdefghijklmnopqrstuvwxyz";
+    private const string RealtimeSocketUrl = "wss://realtime.test/socket/websocket";
+
     // ---------------------------------------------------------------------
     // H1 — create
     // ---------------------------------------------------------------------
@@ -459,17 +465,83 @@ public sealed class JeebConversationsBffTests
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         var json = JObject.Parse(await resp.Content.ReadAsStringAsync());
-        // The descriptor maps the suite topic jeeb:chat:{id} -> realtime jeeb_conversation:{id}.
-        json["topic"]!.Value<string>().Should().Be("jeeb_conversation:conv-1");
+        json["topic"]!.Value<string>().Should().Be("jeeb:chat:conv-1");
         json["conversationId"]!.Value<string>().Should().Be("conv-1");
         json["roleInConvo"]!.Value<string>().Should().Be(activeRole);
+        json["socketUrl"]!.Value<string>().Should().Be(RealtimeSocketUrl);
+        json["expiresAt"]!.Value<DateTime>().Should().BeAfter(DateTime.UtcNow);
 
         var ticket = json["ticket"]!.Value<string>();
         ticket.Should().NotBeNullOrWhiteSpace();
         var jwt = new JwtSecurityTokenHandler().ReadJwtToken(ticket);
         jwt.Subject.Should().Be(viewerId);
-        jwt.Claims.Should().Contain(claim => claim.Type == "role" && claim.Value == activeRole);
+        jwt.Issuer.Should().Be("jeeb-gateway");
+        jwt.Audiences.Should().ContainSingle().Which.Should().Be("jeeb-realtime");
+        var expectedRealtimeRole = activeRole == "client" ? "client" : "jeeber";
+        jwt.Claims.Should().Contain(
+            claim => claim.Type == "role" && claim.Value == expectedRealtimeRole);
+
+        var guardian = json["token"]!.Value<string>();
+        guardian.Should().NotBeNullOrWhiteSpace();
+        var guardianPayload = DecodeJwtPayload(guardian!);
+        guardianPayload["sub"]!.Value<string>().Should().Be(viewerId);
+        guardianPayload["role"]!.Value<string>().Should().Be("user");
+        guardianPayload["scopes"]!.Values<string>().Should().Equal("subscribe");
+        guardianPayload["topics"]!.Values<string>().Should().Equal("jeeb:chat:conv-1");
         fake.LastByIdConversationId.Should().Be("conv-1");
+    }
+
+    [Fact]
+    public async Task RealtimeGate_MissingGuardianSecret_Returns503_NoPartialDescriptor()
+    {
+        var fake = new FakeJeebConversationClient
+        {
+            Membership = new JeebConversationMembership { IsMember = true },
+        };
+        using var factory = MakeFactory(fake, chatEnabled: true, guardianSecret: null);
+        var http = factory.CreateClient();
+        var (token, viewerId) = await MintSession(http, "+9613001855");
+        fake.ConversationById = ConversationWithParticipant(
+            "conv-no-guardian", viewerId, "client");
+
+        var msg = new HttpRequestMessage(
+            HttpMethod.Get, "/v1/realtime/jeeb:chat:conv-no-guardian");
+        msg.Headers.Authorization = Bearer(token);
+
+        var resp = await http.SendAsync(msg);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        var body = await resp.Content.ReadAsStringAsync();
+        body.Should().Contain("GuardianSecret");
+        body.Should().NotContain("\"ticket\"");
+        body.Should().NotContain("\"token\"");
+    }
+
+    [Fact]
+    public async Task RealtimeGate_NonWssPublicUrl_Returns503_NoPartialDescriptor()
+    {
+        var fake = new FakeJeebConversationClient
+        {
+            Membership = new JeebConversationMembership { IsMember = true },
+        };
+        using var factory = MakeFactory(
+            fake, chatEnabled: true, publicSocketUrl: "ws://realtime.test/socket/websocket");
+        var http = factory.CreateClient();
+        var (token, viewerId) = await MintSession(http, "+9613001856");
+        fake.ConversationById = ConversationWithParticipant(
+            "conv-cleartext", viewerId, "client");
+
+        var msg = new HttpRequestMessage(
+            HttpMethod.Get, "/v1/realtime/jeeb:chat:conv-cleartext");
+        msg.Headers.Authorization = Bearer(token);
+
+        var resp = await http.SendAsync(msg);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        var body = await resp.Content.ReadAsStringAsync();
+        body.Should().Contain("absolute wss URL");
+        body.Should().NotContain("\"ticket\"");
+        body.Should().NotContain("\"token\"");
     }
 
     [Fact]
@@ -871,7 +943,10 @@ public sealed class JeebConversationsBffTests
     private const string AppId = "jeeb-test-app";
 
     private static WebApplicationFactory<Program> MakeFactory(
-        IJeebConversationClient fake, bool chatEnabled) =>
+        IJeebConversationClient fake,
+        bool chatEnabled,
+        string? guardianSecret = RealtimeGuardianSecret,
+        string publicSocketUrl = RealtimeSocketUrl) =>
         new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.ConfigureServices(services =>
@@ -894,8 +969,20 @@ public sealed class JeebConversationsBffTests
                     o.ApplicationId = AppId;
                     o.TtlSeconds = 300;
                 });
+                services.Configure<RealtimeGuardianOptions>(o =>
+                {
+                    o.GuardianSecret = guardianSecret;
+                    o.PublicSocketUrl = publicSocketUrl;
+                });
             });
         });
+
+    private static JObject DecodeJwtPayload(string token)
+    {
+        var segment = token.Split('.')[1].Replace('-', '+').Replace('_', '/');
+        segment = segment.PadRight(segment.Length + ((4 - segment.Length % 4) % 4), '=');
+        return JObject.Parse(Encoding.UTF8.GetString(Convert.FromBase64String(segment)));
+    }
 
     /// <summary>Mints a real session via the OTP verify path; returns (accessToken, userId == sub).</summary>
     private static async Task<(string Token, string UserId)> MintSession(HttpClient http, string phone)

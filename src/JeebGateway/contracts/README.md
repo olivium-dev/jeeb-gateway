@@ -46,6 +46,15 @@ git commit -m "chore(contracts): bump <service> openapi to <commit-sha>"
 See [`SPECS-STATUS.md`](./SPECS-STATUS.md) for the current acquisition status
 (committed-real vs placeholder) per upstream service.
 
+## Gateway producer contracts
+
+`producer/staging-realtime-probe.openapi.json` pins the one staging-only
+gateway contract consumed directly by `jeeb-infrastructure`. It is not an
+upstream client-generation input and is intentionally excluded from public
+Swagger. The spec fixes the HMAC header shape, replay/error semantics, exact
+public WSS URL, and complete short-lived descriptor schema used by the edge
+deployment gate.
+
 ## Override fetch URLs
 
 Historically `scripts/regenerate-clients.sh` read per-service base URLs from

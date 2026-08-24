@@ -10,6 +10,7 @@ using JeebGateway.Kyc;
 using JeebGateway.Middleware;
 using JeebGateway.NotificationPreferences;
 using JeebGateway.Observability;
+using JeebGateway.Operations.RealtimeProbe;
 using JeebGateway.ProhibitedItems;
 using JeebGateway.StateService;
 using JeebGateway.Ratings;
@@ -121,6 +122,8 @@ builder.Services.Configure<SecurityOptions>(builder.Configuration.GetSection(Sec
 const string GatewayBearerScheme = "GatewayBearer";
 
 var jwt = builder.Configuration.GetSection(JwtOptions.SectionName).Get<JwtOptions>() ?? new JwtOptions();
+jwt.SigningKey = JeebGateway.Tokens.JwtSigningKeySource.Resolve(
+    jwt.SigningKey, jwt.SigningKeyFile, "Jwt:SigningKeyFile");
 
 // SEC-H2 (Leg-11): fail closed if the gateway would boot with a placeholder / dev / too-short
 // signing key outside Development/Testing. Bakes no key — only asserts a real secret was injected.
@@ -142,6 +145,8 @@ var signingBytes = Encoding.UTF8.GetBytes(jwt.SigningKey);
 // Jwt:SigningKey (operationally the same fleet secret today); supplying a distinct
 // UmJwt:SigningKey lets UM rotate off the leaked fleet key with no code change.
 var umJwt = builder.Configuration.GetSection(UmJwtOptions.SectionName).Get<UmJwtOptions>() ?? new UmJwtOptions();
+umJwt.SigningKey = JeebGateway.Tokens.JwtSigningKeySource.Resolve(
+    umJwt.SigningKey, umJwt.SigningKeyFile, "UmJwt:SigningKeyFile");
 var umSigningKey = string.IsNullOrWhiteSpace(umJwt.SigningKey) ? jwt.SigningKey : umJwt.SigningKey;
 
 // SEC-H2: when UmJwt supplies its OWN key (not the blank fall-through to Jwt:SigningKey,
@@ -543,8 +548,9 @@ builder.Services.AddHostedService(sp =>
 // mints a short-lived signed ticket scoped to (conversation, viewer, role) after
 // the chat-service membership check, so realtime-comunication-service can authorize
 // the WS join without calling chat-service (no inter-service coupling). HS256 over
-// the gateway's existing Jwt:SigningKey (the same secret the realtime Guardian
-// pipeline verifies the session bearer with). Singleton — the key is read once.
+// a dedicated mounted membership-ticket key in containers (Jwt:SigningKey remains
+// the native compatibility fallback). That is NOT realtime's HS512 Guardian key.
+// Singleton — the key is read once.
 builder.Services.AddSingleton<JeebGateway.Conversations.Realtime.IRealtimeTicketIssuer,
                               JeebGateway.Conversations.Realtime.RealtimeTicketIssuer>();
 
@@ -553,11 +559,11 @@ builder.Services.AddSingleton<JeebGateway.Conversations.Realtime.IRealtimeTicket
 // The credential issuer for realtime-comunication-service. Its Guardian pipeline
 // verifies with ITS OWN secret, not the gateway's Jwt:SigningKey, so neither the
 // forwarded user bearer nor the S08 membership ticket above can authenticate against
-// it. The service does ship an OPEN, UNAUTHENTICATED POST /api/auth/token that mints
-// topics:["*"] for anyone; nothing here is built on that. The gateway mints its own
-// credentials instead, each scoped to a single topic — publish-only for the server-side
-// fan-out, subscribe-only for a client. Unconfigured (the committed default) means no
-// token is minted and every dependent path fails closed.
+// it. Realtime's legacy POST /api/auth/token can mint wildcard credentials, but its
+// API-key guard remains unconfigured in staging and this gateway never calls it. The
+// gateway mints its own credentials instead, each scoped to a single topic —
+// publish-only for server-side fan-out, subscribe-only for a client. Unconfigured
+// (the committed default) means no token is minted and every dependent path fails closed.
 builder.Services.Configure<JeebGateway.Realtime.RealtimeGuardianOptions>(
     builder.Configuration.GetSection(JeebGateway.Realtime.RealtimeGuardianOptions.SectionName));
 builder.Services.AddSingleton<JeebGateway.Realtime.IRealtimeGuardianTokenIssuer,
@@ -565,6 +571,10 @@ builder.Services.AddSingleton<JeebGateway.Realtime.IRealtimeGuardianTokenIssuer,
 // Every LiveComm topic/channel name derives from Services:Realtime:TenantPrefix
 // here; the default keeps live names byte-identical (RTC rename phase G0).
 builder.Services.AddSingleton<JeebGateway.Realtime.RealtimeTopicNames>();
+// Staging-only edge proof: a dedicated HMAC-authenticated descriptor mint with
+// Redis replay protection. Registration is a no-op outside Staging, matching
+// the route map below, so the surface does not exist in production/dev/test.
+builder.Services.AddStagingRealtimeProbe(builder.Configuration, builder.Environment);
 // Rejects unknown {tenant} segments at URL matching, so those requests 404
 // pre-auth exactly as they did when the two realtime routes were literals.
 builder.Services.Configure<Microsoft.AspNetCore.Routing.RouteOptions>(options =>
@@ -1231,6 +1241,7 @@ builder.Services.AddOpenTelemetry()
             .AddAspNetCoreInstrumentation()
             .AddHttpClientInstrumentation()
             .AddSource(CaseTelemetry.ActivitySourceName)
+            .AddSource(RealtimeProbeTelemetry.ActivitySourceName)
             .AddOtlpExporter(opt => opt.Endpoint = new Uri(otlpEndpoint));
     })
     .WithMetrics(metrics =>
@@ -2313,6 +2324,11 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<DataExportProcesso
 // StateServiceRefreshTokenStore (register #3); the in-memory store is Development/Testing only.
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection(JwtOptions.SectionName));
 builder.Services.Configure<UmJwtOptions>(builder.Configuration.GetSection(UmJwtOptions.SectionName));
+// The authentication schemes above and the token/ticket issuers below must use
+// the same resolved key material. File-backed keys intentionally override any
+// committed development default or stale inline environment value.
+builder.Services.PostConfigure<JwtOptions>(options => options.SigningKey = jwt.SigningKey);
+builder.Services.PostConfigure<UmJwtOptions>(options => options.SigningKey = umJwt.SigningKey);
 // JEB-1502: register FakeTimeProvider as the singleton TimeProvider so the test
 // control-plane can shift the clock for ALL time-dependent background jobs without
 // any per-job patching. At zero offset this is behaviourally identical to
@@ -3077,6 +3093,7 @@ if (stateServiceWired)
 }
 
 app.MapControllers();
+app.MapStagingRealtimeProbe();
 
 // T-backend-050 — Prometheus scrape endpoint. Returns the OpenMetrics
 // snapshot for the configured MeterProvider (ASP.NET Core HTTP server,

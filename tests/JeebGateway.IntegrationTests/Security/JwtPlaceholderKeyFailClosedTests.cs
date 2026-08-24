@@ -103,6 +103,33 @@ public class JwtPlaceholderKeyFailClosedTests
     }
 
     [Fact]
+    public void MountedSecretFile_TakesPrecedence_Over_CommittedDevelopmentDefault()
+    {
+        const string expected = "mounted-jwt-signing-key-for-test-only-0123456789";
+        var path = Path.Combine(Path.GetTempPath(), $"jeeb-jwt-{Guid.NewGuid():N}.secret");
+        File.WriteAllText(path, expected + Environment.NewLine);
+        try
+        {
+            JwtSigningKeySource.Resolve(
+                    "dev-only-signing-key-32-bytes-minimum!!", path, "Jwt:SigningKeyFile")
+                .Should().Be(expected);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void MountedSecretFile_Rejects_RelativePaths()
+    {
+        var act = () => JwtSigningKeySource.Resolve(
+            null, "relative/jwt.secret", "Jwt:SigningKeyFile");
+
+        act.Should().Throw<InvalidOperationException>().WithMessage("*absolute mounted-secret path*");
+    }
+
+    [Fact]
     public void Production_Host_Refuses_To_Boot_With_Placeholder_Key()
     {
         using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(b =>

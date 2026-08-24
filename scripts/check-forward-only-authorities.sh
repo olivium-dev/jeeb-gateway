@@ -80,6 +80,30 @@ def normalized_shell_source(source):
     return re.sub(r"\\[ \t]*\r?\n[ \t]*", " ", source)
 
 
+def is_required_staging_rollback(path, label, line):
+    """Allow only the fail-safe rollback forms required by the staging authority.
+
+    Staging is a single-replica host-published fleet, so its order is deliberately
+    stop-first. This narrow exception does not authorize rollback commands anywhere
+    else and is backed by exact contract checks below.
+    """
+    if path != Path(".github/workflows/jeeb-staging-deploy.yml"):
+        return False
+    stripped = line.strip()
+    allowed = {
+        "service rollback": re.compile(
+            r'^docker service ' + r'rollback --detach=false "\$service" \|\| rollback_ok=false$'
+        ),
+        "automatic rollback": re.compile(
+            r'^--update-failure-action ' + r'rollback$'
+        ),
+        "rollback option": re.compile(
+            r'^--' + r'rollback-(?:order stop-first|parallelism 1|monitor 20s|failure-action pause)$'
+        ),
+    }
+    return label in allowed and bool(allowed[label].fullmatch(stripped))
+
+
 adversarial_canaries = {
     "variable Docker deletion": 'DOCKER=docker; "$DOCKER" service ' + "rm app",
     "variable Git prior selector": "git check" + 'out "$PREVIOUS_SHA"',
@@ -144,6 +168,8 @@ for path, text in tracked:
                 and path == Path("tests/gw3-pack/neg-controls.sh")
                 and line.strip().startswith("u_N17()")
             ):
+                continue
+            if is_required_staging_rollback(path, label, line):
                 continue
             if pattern.search(line):
                 violations.append(f"{path}:{line_number}: {label}: {line.strip()}")
@@ -310,6 +336,21 @@ for token, count in required_counts.items():
 staging_authority = Path(".github/workflows/jeeb-staging-deploy.yml").read_text()
 if "add_env FeatureFlags__DurableRequests__Enabled true" not in staging_authority:
     raise SystemExit("FAIL: staging DurableRequests forward authority lock drifted")
+for required_rollout in (
+    "--update-order stop-first",
+    "--update-failure-action " + "rollback",
+    "--" + "rollback-order stop-first",
+    "docker service " + "rollback --detach=false \"$service\"",
+    "Incumbent service image is not digest-pinned",
+):
+    if required_rollout not in staging_authority:
+        raise SystemExit(f"FAIL: staging safe-rollout contract missing: {required_rollout}")
+for forbidden_rollout in (
+    "--update-order start-first",
+    "published=$published,target=$target,mode=ingress",
+):
+    if forbidden_rollout in staging_authority:
+        raise SystemExit(f"FAIL: staging host-mode rollout drifted: {forbidden_rollout}")
 
 program = Path("src/JeebGateway/Program.cs").read_text()
 for guard in (

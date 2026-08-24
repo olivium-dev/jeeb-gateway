@@ -261,10 +261,14 @@ Security:TokenMint                                   setting -
 Security:TokenMint:Enabled                           setting -
 Security:TokenMint:HeaderName                        setting -
 Security:TokenMint:Key                               setting -
+Jwt:SigningKeyFile                                   setting - # mounted gateway session-signing key for container deployments
+UmJwt:SigningKeyFile                                 setting - # mounted UM verification key for container deployments
 Services:Delivery:ActiveDeliveriesLimit              setting -
 Services:Delivery:TenantId                           setting -
 Services:Realtime:GuardianIssuer                     setting -
 Services:Realtime:GuardianSecret                     setting -
+Services:Realtime:GuardianSecretFile                 setting - # mounted staging secret; mutually exclusive with the inline compatibility setting
+Services:Realtime:MembershipTicketSigningKeyFile     setting - # dedicated mounted HS256 membership-ticket key shared only with realtime
 Services:Realtime:PublicSocketUrl                    setting -
 Services:Realtime:TenantPrefix                       setting - # RTC-rename G0: LiveComm name prefix (RealtimeTopicNames), default "jeeb" = zero behavior change; flip owner-gated
 Services:Realtime:TokenTtlSeconds                    setting -

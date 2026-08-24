@@ -40,9 +40,11 @@ public class RealtimeTenantPrefixTests : IClassFixture<WebApplicationFactory<Pro
         var names = Names();
         names.TenantPrefix.Should().Be("jeeb");
         names.ChatTopic.Should().Be("jeeb:chat");
+        names.ChatChannelPrefix.Should().Be("jeeb:chat:");
         names.DeliveryTopicPrefix.Should().Be("jeeb:delivery:");
         names.ConversationChannelPrefix.Should().Be("jeeb_conversation:");
         names.DeliveryTopicFor("d-1").Should().Be("jeeb:delivery:d-1");
+        names.ChatChannelFor("c-1").Should().Be("jeeb:chat:c-1");
         names.ConversationChannelFor("c-1").Should().Be("jeeb_conversation:c-1");
     }
 
@@ -53,6 +55,7 @@ public class RealtimeTenantPrefixTests : IClassFixture<WebApplicationFactory<Pro
     {
         var names = Names("acme");
         names.ChatTopic.Should().Be("acme:chat");
+        names.ChatChannelFor("c-1").Should().Be("acme:chat:c-1");
         names.DeliveryTopicFor("d-1").Should().Be("acme:delivery:d-1");
         names.ConversationChannelFor("c-1").Should().Be("acme_conversation:c-1");
     }
@@ -76,6 +79,9 @@ public class RealtimeTenantPrefixTests : IClassFixture<WebApplicationFactory<Pro
         Names().DeliveryTopicFor("a:b").Should().BeNull();
         Names().DeliveryTopicFor("a*b").Should().BeNull();
         Names().DeliveryTopicFor(null).Should().BeNull();
+        Names().ChatChannelFor("a:b").Should().BeNull();
+        Names().ChatChannelFor("a*b").Should().BeNull();
+        Names().ChatChannelFor(null).Should().BeNull();
     }
 
     [Fact]

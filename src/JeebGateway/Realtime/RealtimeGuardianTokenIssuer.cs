@@ -17,10 +17,11 @@ namespace JeebGateway.Realtime;
 /// (<c>IngestController.authenticate/1</c> → <c>Guardian.verify_token/1</c>) and every
 /// socket (<c>LiveCommSocket.connect/3</c>) against <b>its own</b> Guardian secret —
 /// a different key from the gateway's <c>Jwt:SigningKey</c>. A forwarded gateway
-/// bearer therefore fails realtime auth. The service also ships an <b>open,
-/// unauthenticated</b> minter at <c>POST /api/auth/token</c> which will hand
-/// <c>topics:["*"], scopes:["subscribe","publish"]</c> to any caller. The client path
-/// must never be built on that: it is an unauthenticated grant of the whole bus.
+/// bearer therefore fails realtime auth. The service also ships a legacy operator
+/// minter at <c>POST /api/auth/token</c> which can hand out
+/// <c>topics:["*"], scopes:["subscribe","publish"]</c>; it now fails closed unless an
+/// operator key is configured, and staging deliberately leaves that key unset. The
+/// client path must never be built on that broad seam.
 /// Instead the gateway — which already authenticated the user and already knows which
 /// delivery is theirs — issues the credential itself, narrowed to the single topic the
 /// caller was authorized for.</para>
@@ -99,6 +100,8 @@ public sealed class RealtimeGuardianTokenIssuer : IRealtimeGuardianTokenIssuer
     /// <summary>Below this, HS512 is being used with less key material than its digest.</summary>
     private const int RecommendedSecretBytes = 64;
 
+    private const long MaximumSecretFileBytes = 4096;
+
     private static readonly JsonSerializerOptions ClaimJson = new()
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
@@ -116,7 +119,7 @@ public sealed class RealtimeGuardianTokenIssuer : IRealtimeGuardianTokenIssuer
         _options = options.Value;
         _clock = clock;
 
-        var secret = _options.GuardianSecret;
+        var secret = ResolveSecret(_options);
         if (string.IsNullOrWhiteSpace(secret))
         {
             // Not configured: IsConfigured stays false and every caller fails closed.
@@ -142,6 +145,59 @@ public sealed class RealtimeGuardianTokenIssuer : IRealtimeGuardianTokenIssuer
         }
 
         _key = keyBytes;
+    }
+
+    private static string? ResolveSecret(RealtimeGuardianOptions options)
+    {
+        var hasInline = !string.IsNullOrWhiteSpace(options.GuardianSecret);
+        var hasFile = !string.IsNullOrWhiteSpace(options.GuardianSecretFile);
+        if (hasInline && hasFile)
+        {
+            throw new InvalidOperationException(
+                $"Configure either {RealtimeGuardianOptions.SectionName}:GuardianSecret or "
+                + $"{RealtimeGuardianOptions.SectionName}:GuardianSecretFile, never both.");
+        }
+
+        if (!hasFile)
+        {
+            return options.GuardianSecret;
+        }
+
+        var path = options.GuardianSecretFile!;
+        if (!Path.IsPathFullyQualified(path))
+        {
+            throw new InvalidOperationException(
+                $"{RealtimeGuardianOptions.SectionName}:GuardianSecretFile must be an "
+                + "absolute mounted-secret path.");
+        }
+
+        try
+        {
+            var info = new FileInfo(path);
+            if (!info.Exists || info.Length is < 1 or > MaximumSecretFileBytes)
+            {
+                throw new InvalidOperationException(
+                    $"{RealtimeGuardianOptions.SectionName}:GuardianSecretFile must reference "
+                    + $"a readable 1..{MaximumSecretFileBytes}-byte secret file.");
+            }
+
+            var value = File.ReadAllText(path).Trim();
+            if (value.Length == 0)
+            {
+                throw new InvalidOperationException(
+                    $"{RealtimeGuardianOptions.SectionName}:GuardianSecretFile contains no key material.");
+            }
+            return value;
+        }
+        catch (InvalidOperationException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            throw new InvalidOperationException(
+                $"{RealtimeGuardianOptions.SectionName}:GuardianSecretFile could not be read.", ex);
+        }
     }
 
     public bool IsConfigured => _key is not null;
@@ -228,8 +284,9 @@ public sealed class RealtimeGuardianTokenIssuer : IRealtimeGuardianTokenIssuer
 }
 
 /// <summary>
-/// Binds <c>Services:Realtime</c>. The secret is supplied by the environment
-/// (<c>Services__Realtime__GuardianSecret</c>) and is never committed.
+/// Binds <c>Services:Realtime</c>. Container deployments mount the secret and set
+/// <c>Services__Realtime__GuardianSecretFile</c>; the inline property remains only
+/// for local/native compatibility. No value is committed.
 /// </summary>
 public sealed class RealtimeGuardianOptions
 {
@@ -250,6 +307,20 @@ public sealed class RealtimeGuardianOptions
     /// fails closed.
     /// </summary>
     public string? GuardianSecret { get; set; }
+
+    /// <summary>
+    /// Absolute path to a mounted Guardian secret. Production/staging containers use
+    /// this instead of placing key material in the Swarm service environment/spec.
+    /// Mutually exclusive with <see cref="GuardianSecret"/>.
+    /// </summary>
+    public string? GuardianSecretFile { get; set; }
+
+    /// <summary>
+    /// Absolute path to the dedicated HS256 membership-ticket key shared only with
+    /// realtime's gateway-ticket verifier. Unset retains the legacy/native
+    /// <c>Jwt:SigningKey</c> fallback; staging containers always mount this file.
+    /// </summary>
+    public string? MembershipTicketSigningKeyFile { get; set; }
 
     /// <summary>The <c>iss</c>/<c>aud</c> pair Guardian is configured with.</summary>
     public string GuardianIssuer { get; set; } = "live_comm";
