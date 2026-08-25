@@ -13,6 +13,7 @@ import hmac
 import http.client
 import json
 import os
+import re
 import secrets
 import socket
 import ssl
@@ -30,6 +31,32 @@ KEY_FILE_ENV = "STAGING_REALTIME_PROBE_KEY_FILE"
 MAX_HTTP_BODY_BYTES = 1024 * 1024
 MAX_WS_MESSAGE_BYTES = 1024 * 1024
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+RFC3339_TIMESTAMP = re.compile(
+    r"^(?P<date>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})"
+    r"(?:\.(?P<fraction>\d{1,7}))?"
+    r"(?P<offset>Z|[+-]\d{2}:\d{2})$"
+)
+
+
+def parse_rfc3339(value: object) -> datetime:
+    """Parse the strict RFC3339 shape emitted by .NET on Python 3.10+."""
+    if not isinstance(value, str):
+        raise RuntimeError("descriptor expiry was not an RFC3339 string")
+    match = RFC3339_TIMESTAMP.fullmatch(value)
+    if match is None:
+        raise RuntimeError("descriptor expiry was not strict RFC3339")
+
+    fraction = match.group("fraction")
+    normalized = match.group("date")
+    if fraction is not None:
+        normalized += "." + (fraction + "000000")[:6]
+    normalized += "+00:00" if match.group("offset") == "Z" else match.group("offset")
+    try:
+        return datetime.fromisoformat(normalized)
+    except ValueError as error:
+        raise RuntimeError(
+            "descriptor expiry was not a valid RFC3339 timestamp"
+        ) from error
 
 
 def descriptor_request(headers: dict[str, str]) -> tuple[int, dict[str, str], bytes]:
@@ -335,7 +362,7 @@ def main() -> None:
     for credential in ("token", "ticket"):
         if not isinstance(descriptor[credential], str) or not descriptor[credential].strip():
             raise RuntimeError("descriptor returned an empty credential")
-    expires_at = datetime.fromisoformat(descriptor["expiresAt"].replace("Z", "+00:00"))
+    expires_at = parse_rfc3339(descriptor["expiresAt"])
     ttl = (expires_at.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()
     if not 30 <= ttl <= 900:
         raise RuntimeError("descriptor credential TTL was outside the contract")
