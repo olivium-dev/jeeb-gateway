@@ -168,6 +168,8 @@ public sealed class S08GatewayCloseoutTests
         using var factory = NewRealtimeFactory(chat);
         var http = factory.CreateClient();
         var (token, viewerId) = await MintSession(http, "+9613009801");
+        chat.Membership.ConversationId = "conv-h6";
+        chat.Membership.ViewerId = viewerId;
         chat.ConversationById = new JeebConversationResponse
         {
             ConversationId = "conv-h6",
@@ -191,6 +193,7 @@ public sealed class S08GatewayCloseoutTests
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         var json = JObject.Parse(await resp.Content.ReadAsStringAsync());
         json["topic"]!.Value<string>().Should().Be("jeeb:chat:conv-h6");
+        json["viewerId"]!.Value<string>().Should().Be(viewerId);
         json["roleInConvo"]!.Value<string>().Should().Be("jeeber_offerer");
 
         var ticket = json["ticket"]!.Value<string>();

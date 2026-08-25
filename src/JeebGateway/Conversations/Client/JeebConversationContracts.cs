@@ -589,6 +589,14 @@ public sealed class JeebConversationSettleResponse
 /// </summary>
 public sealed class JeebConversationMembership
 {
+    /// <summary>The exact conversation chat-service evaluated.</summary>
+    [JsonProperty("conversation_id")]
+    public string? ConversationId { get; set; }
+
+    /// <summary>The exact viewer chat-service evaluated.</summary>
+    [JsonProperty("viewer_id")]
+    public string? ViewerId { get; set; }
+
     [JsonProperty("is_member")]
     public bool IsMember { get; set; }
 

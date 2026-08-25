@@ -1,4 +1,5 @@
 using System;
+using System.ComponentModel.DataAnnotations;
 using System.Linq;
 using System.Net;
 using System.Text.Json.Serialization;
@@ -615,6 +616,17 @@ public sealed class JeebConversationsController : ControllerBase
                 + "may not join its realtime channel.");
         }
 
+        // chat-service echoes the exact conversation + viewer it evaluated. These
+        // fields make the membership answer self-binding; missing or contradictory
+        // values must never be combined with the route/bearer to mint credentials.
+        if (!string.Equals(membership.ConversationId, conversationId, StringComparison.Ordinal)
+            || !string.Equals(membership.ViewerId, viewerId, StringComparison.Ordinal))
+        {
+            return RealtimeDescriptorUnavailable(
+                "chat-service returned a membership decision that is not bound to the "
+                + "requested conversation and authenticated viewer.");
+        }
+
         JeebConversationResponse conversation;
         try
         {
@@ -625,31 +637,54 @@ public sealed class JeebConversationsController : ControllerBase
             return ForwardUpstream(ex, "resolve realtime chat role");
         }
 
+        // The route, membership read, owner-service projection and ticket must all
+        // describe the SAME aggregate. Treat an owner response for another id as an
+        // upstream contract fault; never mint against a mixed pair of conversations.
+        if (!string.Equals(conversation.ConversationId, conversationId, StringComparison.Ordinal))
+        {
+            return RealtimeDescriptorUnavailable(
+                "chat-service returned a conversation projection that does not match "
+                + "the requested realtime conversation.");
+        }
+
         // chat-service's frozen membership response intentionally contains only the
         // active-membership decision. Resolve the opaque role from its authoritative
         // roster and fail closed if the two upstream projections disagree.
-        var participant = conversation.Participants.FirstOrDefault(candidate =>
-            string.Equals(candidate.UserId, viewerId, StringComparison.Ordinal)
-            && candidate.RemovedAt is null);
-        if (participant is null)
+        var activeViewerParticipants = conversation.Participants?
+            .Where(candidate => candidate is not null
+                && string.Equals(candidate.UserId, viewerId, StringComparison.Ordinal)
+                && candidate.RemovedAt is null)
+            .ToArray()
+            ?? Array.Empty<JeebConversationParticipant>();
+        if (activeViewerParticipants.Length != 1)
         {
-            return NotInActiveMembership(
-                "The caller has no active participant entry for this conversation and "
-                + "may not join its realtime channel.");
+            return RealtimeDescriptorUnavailable(
+                "chat-service confirmed active membership but its conversation projection "
+                + "did not contain exactly one active participant entry for the authenticated "
+                + "viewer; a realtime descriptor cannot be issued safely.");
         }
 
+        // Cardinality is proven above; never select a credential-bearing role from
+        // owner-service list order when duplicate rows could carry conflicting roles.
+        var participant = activeViewerParticipants[0];
         var activeRole = participant.RoleInConvo;
-        if (string.IsNullOrWhiteSpace(activeRole))
+        if (!IsAllowedRealtimeDescriptorRole(activeRole))
         {
-            return StatusCode(
-                StatusCodes.Status503ServiceUnavailable,
-                new ProblemDetails
-                {
-                    Title = "The active chat role is unavailable.",
-                    Detail = "chat-service confirmed membership but returned no active role; "
-                        + "a realtime descriptor cannot be issued safely.",
-                    Status = StatusCodes.Status503ServiceUnavailable,
-                });
+            return RealtimeDescriptorUnavailable(
+                "chat-service confirmed membership but did not return one of the canonical "
+                + "Jeeb conversation roles; a realtime descriptor cannot be issued safely.");
+        }
+
+        // Some chat-service versions include role_in_convo on the membership answer
+        // while older deployed versions omit it. When present, it is a second owner-
+        // service projection of the same fact and must agree byte-for-byte with the
+        // active roster entry. Do not normalize contradictory authority into a grant.
+        if (!string.IsNullOrWhiteSpace(membership.RoleInConvo)
+            && !string.Equals(membership.RoleInConvo, activeRole, StringComparison.Ordinal))
+        {
+            return RealtimeDescriptorUnavailable(
+                "chat-service returned inconsistent active roles for the requested member; "
+                + "a realtime descriptor cannot be issued safely.");
         }
 
         // Member: hand back the complete descriptor the client needs. The canonical
@@ -703,6 +738,7 @@ public sealed class JeebConversationsController : ControllerBase
         return Ok(new RealtimeChannelDescriptor
         {
             ConversationId = conversationId,
+            ViewerId = viewerId,
             Topic = topic,
             RoleInConvo = activeRole,
             Ticket = ticket,
@@ -740,15 +776,20 @@ public sealed class JeebConversationsController : ControllerBase
                 + "may not read its metadata or participant roster.");
     }
 
-    private IActionResult RealtimeDescriptorUnavailable(string detail) =>
-        StatusCode(
-            StatusCodes.Status503ServiceUnavailable,
-            new ProblemDetails
-            {
-                Title = "Realtime chat credentials are unavailable.",
-                Detail = detail,
-                Status = StatusCodes.Status503ServiceUnavailable,
-            });
+    private static JsonResult RealtimeDescriptorUnavailable(string detail) => new(
+        new ProblemDetails
+        {
+            Title = "Realtime chat credentials are unavailable.",
+            Detail = detail,
+            Status = StatusCodes.Status503ServiceUnavailable,
+        })
+    {
+        StatusCode = StatusCodes.Status503ServiceUnavailable,
+        ContentType = "application/problem+json",
+    };
+
+    private static bool IsAllowedRealtimeDescriptorRole(string? role) => role is
+        "client" or "jeeber_offerer" or "jeeber_winner";
 
     private static bool IsActiveMembership(JeebConversationMembership membership) =>
         membership.IsMember && membership.RemovedAt is null;
@@ -865,30 +906,58 @@ public sealed class AppendMessageBody
 
 /// <summary>
 /// The 200 descriptor the realtime gate hands a member: the Phoenix topic, the
-/// viewer's role, and a short-lived signed membership TICKET the client presents on
-/// the WS upgrade (S08 D / H6). The gateway never opens the socket itself — it runs
-/// the chat-service membership check, then mints the ticket so
+/// authenticated viewer, their canonical Jeeb conversation role, and a short-lived
+/// signed membership TICKET the client presents on the WS upgrade (S08 D / H6). The
+/// gateway never opens the socket itself — it runs the chat-service membership check,
+/// then mints the ticket so
 /// realtime-comunication-service can authorize the join WITHOUT calling chat-service
 /// (no inter-service coupling; the authority is encoded in the signed ticket).
 /// </summary>
 public sealed class RealtimeChannelDescriptor
 {
-    public string ConversationId { get; set; } = string.Empty;
-    public string Topic { get; set; } = string.Empty;
-    public string RoleInConvo { get; set; } = string.Empty;
+    /// <summary>The exact conversation requested and embedded in the membership ticket.</summary>
+    [Required, MinLength(1)]
+    [JsonPropertyName("conversationId")]
+    public required string ConversationId { get; init; }
+
+    /// <summary>
+    /// Canonical user id resolved only from the authenticated bearer by
+    /// <see cref="UserIdentity.TryGetUserId"/>. It is never accepted from client input.
+    /// </summary>
+    [Required, MinLength(1)]
+    [JsonPropertyName("viewerId")]
+    public required string ViewerId { get; init; }
+
+    /// <summary>Exact canonical Phoenix topic: {tenant}:chat:{conversationId}.</summary>
+    [Required, MinLength(1)]
+    [JsonPropertyName("topic")]
+    public required string Topic { get; init; }
+
+    /// <summary>Canonical owner-service role: client | jeeber_offerer | jeeber_winner.</summary>
+    [Required, MinLength(1)]
+    [JsonPropertyName("roleInConvo")]
+    public required string RoleInConvo { get; init; }
 
     /// <summary>
     /// Signed, short-lived membership ticket scoped to (conversation, viewer, role).
     /// The client passes it in the Phoenix channel join payload; realtime verifies it.
     /// </summary>
-    public required string Ticket { get; set; }
+    [Required, MinLength(1)]
+    [JsonPropertyName("ticket")]
+    public required string Ticket { get; init; }
 
     /// <summary>Device-reachable, TLS-protected Phoenix WebSocket endpoint.</summary>
-    public required string SocketUrl { get; set; }
+    [Required, MinLength(1)]
+    [JsonPropertyName("socketUrl")]
+    public required string SocketUrl { get; init; }
 
     /// <summary>Short-lived, exact-topic, subscribe-only Guardian connect token.</summary>
-    public required string Token { get; set; }
+    [Required, MinLength(1)]
+    [JsonPropertyName("token")]
+    public required string Token { get; init; }
 
     /// <summary>When <see cref="Token"/> stops being accepted.</summary>
-    public required DateTimeOffset ExpiresAt { get; set; }
+    [Required]
+    [JsonPropertyName("expiresAt")]
+    public required DateTimeOffset ExpiresAt { get; init; }
 }
