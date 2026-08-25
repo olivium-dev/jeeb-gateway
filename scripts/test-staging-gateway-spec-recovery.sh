@@ -40,6 +40,10 @@ verify_mode=pass
 
 reset_candidate() {
   cp "$candidate_spec" "$state_spec"
+  # A prior forward case deliberately truncates this output before simulating
+  # an ambiguous capture. Every recovery case must rebuild its own complete
+  # candidate fixture instead of inheriting that empty file.
+  printf '%s\n' 41 > "$candidate_version"
   cp "$candidate_version" "$state_version"
   cp "$candidate_id" "$state_id"
   capture_count=0

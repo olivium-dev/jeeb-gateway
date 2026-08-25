@@ -20,7 +20,9 @@ jobs:
       - name: Reject gateway provider-secret drift
         run: bash scripts/check-provider-secret-boundaries.sh
       - name: Lock staging authorized-WSS probe contract
-        run: bash scripts/check-staging-realtime-probe-contract.sh
+        run: |
+          bash scripts/check-staging-realtime-probe-contract.sh
+          bash scripts/check-staging-probe-key-rotation-contract.sh
 
   stateless-gate:
     # R9 — reject database ownership and ratchet the reviewed transitional
