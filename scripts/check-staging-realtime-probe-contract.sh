@@ -608,6 +608,7 @@ for credential_field in ("token", "ticket"):
 print("Staging realtime probe, fail-visible block, ingress topology, and exact recovery contracts are exact.")
 PY
 
+python3 scripts/test-staging-authenticated-realtime-probe.py
 bash scripts/test-staging-gateway-mutation-lock.sh
 bash scripts/test-staging-gateway-spec-recovery.sh
 bash scripts/test-staging-gateway-candidate-contract.sh
