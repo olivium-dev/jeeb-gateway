@@ -30,8 +30,7 @@ service_replicas() {
 
 probe_source() {
   docker service inspect "$service" \
-    --format '{{range .Spec.TaskTemplate.ContainerSpec.Secrets}}{{println .SecretName "|" .File.Name}}{{end}}' \
-    | awk -F' \| ' -v target="$probe_target" '$2 == target { print $1 }'
+    --format '{{range .Spec.TaskTemplate.ContainerSpec.Secrets}}{{if eq .File.Name "staging_wss_probe_mint_key"}}{{println .SecretName}}{{end}}{{end}}'
 }
 
 wait_for_update() {

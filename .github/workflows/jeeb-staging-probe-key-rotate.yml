@@ -148,8 +148,7 @@ jobs:
 
           old_probe_secret=$(ssh jeeb-staging \
             'docker service inspect jeeb-staging-jeeb-gateway \
-              --format '\''{{range .Spec.TaskTemplate.ContainerSpec.Secrets}}{{println .SecretName "|" .File.Name}}{{end}}'\'' \
-              | awk -F'\'' | '\'' '\''$2 == "staging_wss_probe_mint_key" { print $1 }'\''')
+              --format '\''{{range .Spec.TaskTemplate.ContainerSpec.Secrets}}{{if eq .File.Name "staging_wss_probe_mint_key"}}{{println .SecretName}}{{end}}{{end}}'\''')
           [[ "$old_probe_secret" =~ ^jeeb_staging_gateway_wss_probe_[A-Za-z0-9_-]+$ ]]
           # The non-secret run-scoped Docker secret name expands locally; the value is stdin-only.
           # shellcheck disable=SC2029

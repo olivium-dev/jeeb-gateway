@@ -51,6 +51,15 @@ forbidden = (
     ":latest",
 )
 combined = workflow + remote
+exact_probe_source_selector = (
+    '{{range .Spec.TaskTemplate.ContainerSpec.Secrets}}'
+    '{{if eq .File.Name "staging_wss_probe_mint_key"}}'
+    '{{println .SecretName}}{{end}}{{end}}'
+)
+if combined.count(exact_probe_source_selector) != 2:
+    raise SystemExit("rotation contract does not use the exact probe-secret target selector twice")
+if "awk -F' \\| '" in combined:
+    raise SystemExit("rotation contract reintroduced the ambiguous ERE field separator")
 for token in forbidden:
     if token in combined:
         raise SystemExit(f"rotation contract contains forbidden token: {token}")
