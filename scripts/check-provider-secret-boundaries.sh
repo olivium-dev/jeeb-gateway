@@ -164,7 +164,7 @@ if "--env " + voice_flag in direct:
     violations.append((DIRECT_DEPLOY, 1, "update-only deploy reintroduced a create-time voice enablement"))
 
 for expected in (
-    "add_env FeatureFlags__UseUpstream__Voice true",
+    "add_env FeatureFlags__UseUpstream__Voice false",
     "add_env Services__VoiceTranscription__BaseUrl http://192.168.2.20:10062",
 ):
     if staging.count(expected) != 1:

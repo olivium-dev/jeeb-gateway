@@ -53,15 +53,22 @@ public sealed class DurableOwnershipDeploymentContractTests
             "every versioned secret mount must have an explicitly reviewed helper invocation");
 
         var helper = ShellFunction(workflow, "add_rotated_secret");
-        CountOccurrences(helper, "--secret-add").Should().Be(1);
-        CountOccurrences(workflow, "--secret-add").Should().Be(1,
-            "raw secret mounts outside add_rotated_secret must be rejected");
         if (workflowName == "jeeb-staging-deploy.yml")
+        {
+            CountOccurrences(helper, "secret_additions+=(").Should().Be(1);
+            CountOccurrences(workflow, "secret_additions+=(").Should().Be(1,
+                "raw candidate-Spec secret mounts outside add_rotated_secret must be rejected");
             helper.Should().Contain(
-                "target=$target_name,uid=65532,gid=65532,mode=0400");
+                "File:{Name:$target,UID:\"65532\",GID:\"65532\",Mode:256}");
+        }
         else
+        {
+            CountOccurrences(helper, "--secret-add").Should().Be(1);
+            CountOccurrences(workflow, "--secret-add").Should().Be(1,
+                "raw secret mounts outside add_rotated_secret must be rejected");
             helper.Should().Contain(
                 "source=\\$source,target=\\$target,uid=65532,gid=65532,mode=0400");
+        }
 
         workflow.Should().NotContain("mode=0444");
 
@@ -112,7 +119,7 @@ public sealed class DurableOwnershipDeploymentContractTests
             "ServiceNotificationClient__BaseUrl http://jeeb-staging-notification:8000/");
         workflow.Should().Contain("stale_gateway_network=jeeb-net");
         workflow.Should().Contain(
-            "network_update_args+=(--network-rm \"$stale_gateway_network\")");
+            "map(select($stale_network_id == \"\" or .Target != $stale_network_id))");
 
         workflow.Should().NotContain("wallet_network");
         workflow.Should().NotContain("http://wallet-service:8080");
@@ -129,7 +136,7 @@ public sealed class DurableOwnershipDeploymentContractTests
 
         workflow.Should().Contain("UnifiedPaymentGateway__BaseUrl");
         workflow.Should().Contain("\"${retired_gateway_env[@]}\"");
-        workflow.Should().Contain("env_remove_args+=(--env-rm \"$stale_env\")");
+        workflow.Should().Contain("env_remove_keys+=(\"$stale_env\")");
     }
 
     [Fact]
@@ -183,21 +190,27 @@ public sealed class DurableOwnershipDeploymentContractTests
     public void Jeeb_staging_workflow_is_gateway_only_provider_secret_minimal_and_owner_blocked()
     {
         var workflow = Workflow("jeeb-staging-deploy.yml");
-        var automaticRollback = "--update-failure-action " + "rollback";
-        var rollbackOption = "--" + "rollback-order";
         var openAiSecret = "secrets.OPENAI" + "_API_KEY";
 
         workflow.Should().Contain("Owner block - forward-only promotion pending");
         workflow.Should().Contain("::error::Forward-only promotion pending owner-approved failure handling");
         workflow.Should().Contain("[ \"$REPOSITORY\" = jeeb-gateway ]");
+        workflow.Should().Contain("GITHUB_REF_PROTECTED: ${{ github.ref_protected }}");
+        workflow.Should().Contain("[ \"$GITHUB_REF_PROTECTED\" = true ]");
+        workflow.Should().Contain("environment: staging");
+        workflow.Should().Contain("[ \"$(hostname -s)\" = \"olivium-ephemerals\" ]");
+        workflow.Should().Contain("grep -Fxc \"192.168.2.20\"");
         workflow.Should().Contain("Selective gateway deploy requires an incumbent service");
-        workflow.Should().Contain("--update-failure-action pause");
-        workflow.Should().NotContain(automaticRollback);
-        workflow.Should().NotContain(rollbackOption);
-        workflow.Should().NotContain("recover_exact_" + "incumbent");
-        workflow.Should().Contain("--update-order stop-first");
+        workflow.Should().Contain("FailureAction:\"rollback\",Order:\"start-first\"");
+        workflow.Should().Contain("FailureAction:\"pause\",Order:\"start-first\"");
+        workflow.Should().Contain("staging_gateway_external_gate_recover");
+        workflow.Should().Contain("staging_gateway_forward_apply");
+        workflow.Should().Contain("registryAuthFrom=previous-spec");
+        workflow.Should().Contain("${published}:${target}:ingress");
+        workflow.Should().NotContain("${published}:${target}:host");
         workflow.Should().Contain(".jeeb-deploy/ghcr-");
         workflow.Should().NotContain("docker service create");
+        workflow.Should().NotContain("docker service update --detach=false");
         workflow.Should().NotContain("WHISPER_FAKE_TRANSCRIBE 1");
         workflow.Should().NotContain("secrets.JEEB_RTC_DATABASE_URL");
         workflow.Should().NotContain("secrets.JEEB_DATABASE_URL");
@@ -345,7 +358,7 @@ public sealed class DurableOwnershipDeploymentContractTests
     [Theory]
     [InlineData("deploy-to-jeeb.yml")]
     [InlineData("jeeb-staging-deploy.yml")]
-    public void Gateway_deploy_templates_are_owner_blocked_pause_only_and_verify_exact_image(
+    public void Gateway_deploy_templates_are_owner_blocked_and_verify_exact_image(
         string workflowName)
     {
         var workflow = Workflow(workflowName);
@@ -364,14 +377,7 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().NotContain("if: ${{ always() }}");
         workflow.Should().NotContain("if: ${{ failure() }}");
         workflow.Should().NotContain("if: ${{ cancelled() }}");
-        workflow.Should().Contain("--update-order stop-first");
-        workflow.Should().Contain("--update-failure-action pause");
-        workflow.Should().NotContain(automaticRollback);
-        workflow.Should().NotContain(rollbackOption);
         workflow.Should().NotContain("docker service " + "rollback");
-        workflow.Should().NotContain("recover_exact_" + "incumbent");
-        workflow.Should().NotContain("rollback_" + "armed");
-        workflow.Should().NotContain("--update-order start-first");
         verifier.Should().Contain(".Spec.TaskTemplate.ContainerSpec.Image");
         verifier.Should().Contain(".UpdateStatus");
         verifier.Should().Contain("initial|completed) break");
@@ -389,6 +395,11 @@ public sealed class DurableOwnershipDeploymentContractTests
         verifier.Should().Contain("{{.Image}}");
         if (workflowName == "jeeb-staging-deploy.yml")
         {
+            workflow.Should().Contain("FailureAction:\"rollback\",Order:\"start-first\"");
+            workflow.Should().Contain("FailureAction:\"pause\",Order:\"start-first\"");
+            workflow.Should().Contain("staging_gateway_external_gate_recover");
+            workflow.Should().Contain("staging_gateway_forward_apply");
+            workflow.Should().Contain("recovery_armed=true");
             workflow.Should().Contain("docker service inspect '$service' --format '{{json .Spec}}'");
             workflow.Should().Contain("docker service inspect '$service' --format '{{.ID}} {{.Version.Index}}'");
             workflow.Should().Contain("cmp -s \"$pre_update_spec\" \"$incumbent_spec\"");
@@ -396,10 +407,19 @@ public sealed class DurableOwnershipDeploymentContractTests
             workflow.Should().Contain("cmp -s \"$pre_update_id\" \"$incumbent_id\"");
             workflow.Should().Contain("verify_exact_candidate_after_checks");
             workflow.Should().Contain("EXPECTED_INCUMBENT_IMAGE");
+            workflow.Should().Contain("EXPECTED_INCUMBENT_SPEC_SHA");
+            workflow.Should().Contain("registryAuthFrom=previous-spec");
+            workflow.Should().NotContain("docker service update --detach=false");
             workflow.Should().Contain("Incumbent service image is not digest-pinned");
         }
         else
         {
+            workflow.Should().Contain("--update-order stop-first");
+            workflow.Should().Contain("--update-failure-action pause");
+            workflow.Should().NotContain(automaticRollback);
+            workflow.Should().NotContain(rollbackOption);
+            workflow.Should().NotContain("staging_gateway_external_gate_recover");
+            workflow.Should().NotContain("--update-order start-first");
             const string runtimeVerifier = "base64 -d | bash -s -- \"\\$SVC\" \"\\$REQUESTED_IMAGE\"";
             CountOccurrences(workflow, runtimeVerifier).Should().Be(1);
             workflow.Should().Contain("Deployed service spec does not match the requested immutable digest");
@@ -410,30 +430,41 @@ public sealed class DurableOwnershipDeploymentContractTests
     public void Jeeb_staging_is_an_owner_blocked_non_activating_full_spec_template()
     {
         var workflow = Workflow("jeeb-staging-deploy.yml");
-        var automaticRollback = "--update-failure-action " + "rollback";
-
         workflow.Should().Contain("Owner block - forward-only promotion pending");
-        workflow.Should().Contain("--update-failure-action pause");
-        workflow.Should().NotContain(automaticRollback);
+        workflow.Should().Contain("FailureAction:\"rollback\",Order:\"start-first\"");
+        workflow.Should().Contain("FailureAction:\"pause\",Order:\"start-first\"");
         workflow.Should().NotContain("docker service " + "rollback");
-        workflow.Should().NotContain("recover_exact_" + "incumbent");
-        workflow.Should().NotContain("rollback_" + "armed");
+        workflow.Should().NotContain("docker service update --detach=false");
+        workflow.Should().Contain("staging_gateway_external_gate_recover");
+        workflow.Should().Contain("staging_gateway_forward_apply");
+        workflow.Should().Contain("recovery_armed=true");
         workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Chat false");
         workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Realtime false");
+        workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Voice false");
+        workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Otp true");
         workflow.Should().NotContain("add_env FeatureFlags__UseUpstream__Chat true");
         workflow.Should().NotContain("add_env FeatureFlags__UseUpstream__Realtime true");
+        workflow.Should().NotContain("add_env FeatureFlags__UseUpstream__Voice true");
         workflow[..workflow.IndexOf("permissions:", StringComparison.Ordinal)]
             .Should().NotContain("inputs:");
         workflow.Should().NotContain("${{ inputs.");
 
         workflow.Should().Contain("capture_remote_spec() {");
+        workflow.Should().Contain("write_snapshot_manifest() {");
+        workflow.Should().Contain("ServiceID: $id");
+        workflow.Should().Contain("VersionIndex: $version");
+        workflow.Should().Contain("ImageDigest: $digest");
+        workflow.Should().Contain("Ports: ($spec[0].EndpointSpec.Ports // [])");
+        workflow.Should().Contain("Networks: ($spec[0].TaskTemplate.Networks // [])");
+        workflow.Should().Contain("Replicas: $spec[0].Mode.Replicated.Replicas");
+        workflow.Should().Contain("SecretNames: ([");
         workflow.Should().Contain("{{json .Spec}}");
         workflow.Should().Contain("{{.ID}} {{.Version.Index}}");
         workflow.Should().Contain("cmp -s \"$pre_update_spec\" \"$incumbent_spec\"");
         workflow.Should().Contain("cmp -s \"$pre_update_version\" \"$incumbent_version\"");
         workflow.Should().Contain("cmp -s \"$pre_update_id\" \"$incumbent_id\"");
         workflow.Should().Contain("tolower($1) == tolower(expected)");
-        workflow.Should().Contain("matches == 1 && exact_false == 1");
+        workflow.Should().Contain("matches == 1 && exact_value == 1");
         workflow.Should().Contain("verify_exact_candidate_after_checks() {");
         workflow.Should().Contain("cmp -s \"$final_spec\" \"$candidate_spec\"");
         workflow.Should().Contain("cmp -s \"$final_version\" \"$candidate_version\"");
@@ -451,8 +482,8 @@ public sealed class DurableOwnershipDeploymentContractTests
             "add_env Services__Realtime__MembershipTicketSigningKeyFile /run/secrets/realtime_membership_ticket_key");
         workflow.Should().Contain(
             "add_env Services__Realtime__PublicSocketUrl wss://app.jeeb.fds-1.com/socket/websocket");
-        CountOccurrences(workflow, "scripts/verify-swarm-service-image.sh").Should().Be(1,
-            "the inert forward template retains one exact candidate verifier");
+        CountOccurrences(workflow, "scripts/verify-swarm-service-image.sh").Should().Be(2,
+            "the blocked template retains exact candidate and recovered-incumbent verifiers");
 
         var ownerBlock = workflow.IndexOf(
             "Owner block - forward-only promotion pending", StringComparison.Ordinal);
@@ -461,12 +492,16 @@ public sealed class DurableOwnershipDeploymentContractTests
             "capture_remote_spec \"$pre_update_spec\" \"$pre_update_version\" \"$pre_update_id\"",
             StringComparison.Ordinal);
         var candidate = workflow.IndexOf(
-            "capture_remote_spec \"$candidate_spec\" \"$candidate_version\" \"$candidate_id\"",
+            "> \"$candidate_spec\"",
             preUpdate,
             StringComparison.Ordinal);
-        var update = workflow.IndexOf(
-            "docker service update --detach=false",
-            preUpdate,
+        var arm = workflow.IndexOf(
+            "recovery_armed=true",
+            candidate,
+            StringComparison.Ordinal);
+        var forward = workflow.IndexOf(
+            "staging_gateway_forward_apply \\",
+            arm,
             StringComparison.Ordinal);
         var readiness = workflow.IndexOf(
             "verify_candidate_readiness",
@@ -491,8 +526,10 @@ public sealed class DurableOwnershipDeploymentContractTests
             StringComparison.Ordinal);
 
         ownerBlock.Should().BeLessThan(firstExternalMutation);
-        preUpdate.Should().BeLessThan(update);
-        update.Should().BeLessThan(candidate);
+        preUpdate.Should().BeLessThan(candidate);
+        candidate.Should().BeLessThan(arm);
+        arm.Should().BeLessThan(forward);
+        forward.Should().BeLessThan(readiness);
         candidate.Should().BeLessThan(readiness);
         readiness.Should().BeLessThan(flags);
         flags.Should().BeLessThan(imageVerifier);

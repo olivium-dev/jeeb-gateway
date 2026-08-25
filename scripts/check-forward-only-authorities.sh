@@ -83,6 +83,23 @@ def normalized_shell_source(source):
     return re.sub(r"\\[ \t]*\r?\n[ \t]*", " ", source)
 
 
+def is_required_staging_failure_safety(path, label, line):
+    """Allow only the reviewed ingress-safe Swarm rollback configuration."""
+    if path != Path(".github/workflows/jeeb-staging-deploy.yml"):
+        return False
+    stripped = line.strip()
+    allowed = {
+        "automatic rollback": {
+            "--update-failure-action " + "rollback",
+        },
+        "rollback option": {
+            "--" + "rollback-order start-first --" + "rollback-parallelism 1 --" + "rollback-monitor 20s",
+            "--" + "rollback-failure-action pause",
+        },
+    }
+    return stripped in allowed.get(label, set())
+
+
 adversarial_canaries = {
     "variable Docker deletion": 'DOCKER=docker; "$DOCKER" service ' + "rm app",
     "variable Git prior selector": "git check" + 'out "$PREVIOUS_SHA"',
@@ -148,6 +165,8 @@ for path, text in tracked:
                 and line.strip().startswith("u_N17()")
             ):
                 continue
+            if is_required_staging_failure_safety(path, label, line):
+                continue
             if pattern.search(line):
                 violations.append(f"{path}:{line_number}: {label}: {line.strip()}")
 
@@ -176,6 +195,9 @@ mutation_pattern = re.compile(
     engine_pattern + r"\s+(?:service\s+(?:update|create|scale|" + "rm|rollback" + r")"
     r"|stack\s+(?:create|update|deploy|" + "rm" + r"))\b", re.I
 )
+engine_api_mutation_pattern = re.compile(
+    r"/services/[A-Za-z0-9_.$\{\}-]+/update\?version=", re.I
+)
 for canary in (
     "docker service " + "\\  \n" + 'update --image "$IMAGE" app',
     'ENGINE=docker\n"$ENGINE" service ' + 'update --image "$IMAGE" app',
@@ -183,15 +205,24 @@ for canary in (
     'ENGINE=docker\n"$ENGINE" service ' + "rollback app",
     'ENGINE=docker\n"$ENGINE" stack ' + 'deploy -c stack.yml app',
     'ENGINE=docker\n"$ENGINE" service ' + "\\  \n" + "rollback app",
+    "curl --unix-socket /var/run/docker.sock "
+    "http://localhost/v1.51/services/$service_id/update?version=$version",
 ):
-    if not mutation_pattern.search(normalized_shell_source(canary)):
+    normalized_canary = normalized_shell_source(canary)
+    if not (
+        mutation_pattern.search(normalized_canary)
+        or engine_api_mutation_pattern.search(normalized_canary)
+    ):
         raise SystemExit("FAIL: service mutation inventory misses an adversarial canary")
 mutation_inventory = {
     path.relative_to(Path(".")).as_posix()
     for root in (Path(".github/workflows"), Path(".github/scripts"))
     for path in root.rglob("*")
     if path.is_file() and path.suffix in {".yml", ".yaml", ".sh"}
-    and mutation_pattern.search(normalized_shell_source(path.read_text()))
+    and (
+        mutation_pattern.search(normalized_shell_source(path.read_text()))
+        or engine_api_mutation_pattern.search(normalized_shell_source(path.read_text()))
+    )
 }
 expected_mutation_inventory = {
     ".github/scripts/jeeb-gateway-secret-lifecycle.sh",
@@ -228,6 +259,7 @@ MUTATION_STEP_MARKERS = (
     "docker login",
     "docker build",
     "docker service update",
+    "/services/$service_id/update?version=",
     "docker secret create",
     "ssh jeeb",
 )

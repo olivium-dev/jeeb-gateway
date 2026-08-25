@@ -20,6 +20,7 @@ middleware_path = Path("src/JeebGateway/Security/ApiKeyAuthenticationMiddleware.
 contract_path = Path(
     "src/JeebGateway/contracts/producer/staging-realtime-probe.openapi.json"
 )
+transaction_path = Path("scripts/staging-gateway-spec-recovery.sh")
 
 documents = {
     "workflow": workflow_path.read_text(),
@@ -31,6 +32,7 @@ documents = {
     "credential configuration": credential_config_path.read_text(),
     "endpoint": endpoint_path.read_text(),
     "API-key middleware": middleware_path.read_text(),
+    "Spec transaction": transaction_path.read_text(),
 }
 
 
@@ -47,6 +49,17 @@ require(
     "workflow",
     (
         '[ "$GITHUB_REF" = "refs/heads/${DEFAULT_BRANCH}" ]',
+        'GITHUB_REF_PROTECTED: ${{ github.ref_protected }}',
+        '[ "$GITHUB_REF_PROTECTED" = true ]',
+        '[ "$REQUESTED_REPOSITORY" = "olivium-dev/jeeb-gateway" ]',
+        "environment: staging",
+        'StrictHostKeyChecking yes',
+        'UserKnownHostsFile ~/.ssh/known_hosts',
+        '[ "$(hostname -s)" = "olivium-ephemerals" ]',
+        'grep -Fxc "192.168.2.20"',
+        '[ "$approved_ip_count" -eq 1 ]',
+        "Preflight canonical Swarm ingress topology",
+        '"10000:8080:ingress"',
         "JEEB_STAGING_WSS_PROBE_MINT_KEY: ${{ secrets.JEEB_STAGING_WSS_PROBE_MINT_KEY }}",
         ': "${JEEB_STAGING_WSS_PROBE_MINT_KEY:?JEEB_STAGING_WSS_PROBE_MINT_KEY is required}"',
         '[ "$JEEB_STAGING_WSS_PROBE_MINT_KEY" != "$JWT_SIGNING_KEY" ]',
@@ -59,20 +72,37 @@ require(
         "add_env Services__Realtime__MembershipTicketSigningKeyFile /run/secrets/realtime_membership_ticket_key",
         "add_env Services__Realtime__PublicSocketUrl wss://app.jeeb.fds-1.com/socket/websocket",
         'add_rotated_secret "$probe_secret_name" staging_wss_probe_mint_key',
-        "uid=65532,gid=65532,mode=0400",
+        'File:{Name:$target,UID:"65532",GID:"65532",Mode:256}',
         "add_env ASPNETCORE_ENVIRONMENT Staging",
     ),
 )
 if "add_env Operations__RealtimeProbe__MintKey " in documents["workflow"]:
     raise SystemExit("FAIL: staging workflow puts the probe mint key in the service environment")
 
+require(
+    "Spec transaction",
+    (
+        "submitted-pending-reconciliation",
+        "unknown-third-preserved",
+        "candidate-capture-failed-after-submit",
+        'mv -f -- "$temporary" "$destination"',
+    ),
+)
+
 
 def validate_bootstrap_workflow(text):
     required = (
         "Owner block - forward-only promotion pending",
         "::error::Forward-only promotion pending owner-approved failure handling",
+        '[ "$GITHUB_REF_PROTECTED" = true ]',
+        '[ "$(hostname -s)" = "olivium-ephemerals" ]',
+        'grep -Fxc "192.168.2.20"',
         "add_env FeatureFlags__UseUpstream__Chat false",
         "add_env FeatureFlags__UseUpstream__Realtime false",
+        "add_env FeatureFlags__UseUpstream__Voice false",
+        "add_env FeatureFlags__UseUpstream__Otp true",
+        "add_env SuperLogin__OpenMode false",
+        "add_env DemoUsers__Enabled false",
         "capture_remote_spec() {",
         "docker service inspect '$service' --format '{{json .Spec}}'",
         "docker service inspect '$service' --format '{{.ID}} {{.Version.Index}}'",
@@ -85,14 +115,40 @@ def validate_bootstrap_workflow(text):
         'cmp -s "$final_spec" "$candidate_spec"',
         'cmp -s "$final_version" "$candidate_version"',
         'cmp -s "$final_id" "$candidate_id"',
-        "--update-failure-action pause",
+        "write_snapshot_manifest() {",
+        '"$incumbent_spec" "$incumbent_version" "$incumbent_id" "$incumbent_manifest"',
+        'SecretNames: ([',
+        "ServiceID: $id",
+        "VersionIndex: $version",
+        "ImageDigest: $digest",
+        "Ports: ($spec[0].EndpointSpec.Ports // [])",
+        "Networks: ($spec[0].TaskTemplate.Networks // [])",
+        "Replicas: $spec[0].Mode.Replicated.Replicas",
+        'FailureAction:"rollback",Order:"start-first"',
+        'FailureAction:"pause",Order:"start-first"',
+        '"${published}:${target}:ingress"',
+        ".UpdateConfig.Order == \"start-first\"",
+        ".UpdateConfig.FailureAction == \"rollback\"",
+        ".RollbackConfig.Order == \"start-first\"",
         "source scripts/staging-gateway-mutation-lock.sh",
+        "source scripts/staging-gateway-spec-recovery.sh",
+        "staging_gateway_external_gate_recover",
+        "staging_gateway_forward_apply",
+        "if (\n                  set -euo pipefail\n                  staging_gateway_external_gate_recover",
+        "staging_gateway_submit_spec_cas() {",
+        "registryAuthFrom=previous-spec",
+        'EXPECTED_INCUMBENT_SPEC_SHA=$(sha256sum "$incumbent_spec"',
+        'docker service inspect "$service" --format \'{{json .Spec}}\' > "$current_spec"',
+        'recovery_result=armed-pending',
+        'append_sanitized_transaction_summary',
+        'incumbent_spec_sha256:',
+        'candidate_spec_sha256:',
         'staging_gateway_lock_init jeeb-staging "$secret_stage"',
         "staging_gateway_lock_acquire",
         "staging_gateway_lock_assert",
         "staging_gateway_lock_release",
         'tolower($1) == tolower(expected)',
-        "matches == 1 && exact_false == 1",
+        "matches == 1 && exact_value == 1",
         "verify_bootstrap_flags",
         "probe_staging_realtime_descriptor",
         'STAGING_REALTIME_PROBE_KEY_FILE="$probe_key_file" python3',
@@ -110,27 +166,25 @@ def validate_bootstrap_workflow(text):
     )
     missing = [marker for marker in required if marker not in text]
     if missing:
-        raise ValueError(f"missing forward-only bootstrap markers: {missing}")
+        raise ValueError(f"missing ingress-safe bootstrap/recovery markers: {missing}")
 
     forbidden = (
         "docker service " + "rollback",
-        "--update-failure-action " + "rollback",
-        "--" + "rollback-order",
-        "--" + "rollback-parallelism",
-        "--" + "rollback-monitor",
-        "--" + "rollback-failure-action",
+        "--update-order " + "stop-first",
+        "--update-failure-action " + "pause",
         "&rollback=" + "previous",
-        "recover_exact_" + "incumbent",
-        "rollback_" + "armed",
+        "docker service " + "create",
+        '"${published}:${target}:host"',
+        "docker service update --detach=false",
     )
     present = [marker for marker in forbidden if marker in text]
     if present:
-        raise ValueError(f"automatic recovery behavior remains: {present}")
+        raise ValueError(f"unsafe staging mutation behavior remains: {present}")
 
     dispatch_header = text[: text.index("permissions:")]
     if re.search(r"(?m)^\s+inputs:\s*$", dispatch_header) or "${{ inputs." in text:
         raise ValueError("staging bootstrap exposes a callable activation input")
-    for authority in ("Chat", "Realtime"):
+    for authority in ("Chat", "Realtime", "Voice"):
         false_lock = f"add_env FeatureFlags__UseUpstream__{authority} false"
         true_lock = f"add_env FeatureFlags__UseUpstream__{authority} true"
         if text.count(false_lock) != 1 or true_lock in text:
@@ -142,23 +196,35 @@ def validate_bootstrap_workflow(text):
         text.index("docker/login-action@", blocker),
         text.index("docker/build-push-action@", blocker),
         text.index("ssh jeeb-staging", blocker),
-        text.index("docker service update --detach=false", blocker),
+        text.index("/services/$service_id/update?version=$expected_version", blocker),
     )
     if not blocker < blocker_exit < first_external_mutation:
         raise ValueError("loud owner block does not precede every external mutation")
     if "if: always()" in text:
         raise ValueError("an always() step can bypass the owner block")
+    host_assertion = text.index("Assert exact staging host")
+    topology_preflight = text.index("Preflight canonical Swarm ingress topology")
+    registry_login = text.index("docker/login-action@")
+    image_build = text.index("docker/build-push-action@")
+    if not host_assertion < topology_preflight < registry_login < image_build:
+        raise ValueError("target/topology assertions do not precede registry mutation")
 
     pre_update = text.index(
         'capture_remote_spec "$pre_update_spec" "$pre_update_version" "$pre_update_id"'
     )
-    update = text.index("docker service update --detach=false")
-    candidate = text.index(
-        'capture_remote_spec "$candidate_spec" "$candidate_version" "$candidate_id"',
-        update,
+    candidate = text.index('> "$candidate_spec"')
+    candidate_validation = text.index(
+        '[ "$(jq -er \'.TaskTemplate.ContainerSpec.Image\' "$candidate_spec")" = "$IMAGE" ]',
+        candidate,
     )
-    readiness = text.index("verify_candidate_readiness", candidate)
-    false_flags = text.index("verify_bootstrap_flags", candidate)
+    arm = text.index("recovery_armed=true", candidate_validation)
+    forward = text.index("staging_gateway_forward_apply \\", arm)
+    manifest = text.index(
+        '"$candidate_spec" "$candidate_version" "$candidate_id" "$candidate_manifest"',
+        forward,
+    )
+    readiness = text.index("verify_candidate_readiness", manifest)
+    false_flags = text.index("          verify_bootstrap_flags\n", manifest)
     verifier = text.index("scripts/verify-swarm-service-image.sh", false_flags)
     public_probe = text.index(
         "bash scripts/probe-staging-public-gateway-contract.sh", verifier
@@ -167,7 +233,8 @@ def validate_bootstrap_workflow(text):
     final_candidate = text.index(
         "verify_exact_candidate_after_checks", descriptor_probe
     )
-    if not pre_update < update < candidate < readiness < false_flags < verifier < public_probe < descriptor_probe < final_candidate:
+    disarm = text.index("recovery_armed=false", final_candidate)
+    if not pre_update < candidate < candidate_validation < arm < forward < manifest < readiness < false_flags < verifier < public_probe < descriptor_probe < final_candidate < disarm:
         raise ValueError("candidate verification order drifted")
 
 
@@ -204,10 +271,22 @@ negative_controls = (
         workflow.replace("Owner block - forward-only promotion pending", "Promotion gate", 1),
     ),
     (
-        "automatic recovery reintroduced",
+        "protected-ref assertion removed",
+        workflow.replace('[ "$GITHUB_REF_PROTECTED" = true ]', ":", 1),
+    ),
+    (
+        "exact staging host changed",
+        workflow.replace('hostname -s)" = "olivium-ephemerals"', 'hostname -s)" = "other-host"', 1),
+    ),
+    (
+        "exact staging address changed",
+        workflow.replace('grep -Fxc "192.168.2.20"', 'grep -Fxc "192.168.2.21"', 1),
+    ),
+    (
+        "automatic rollback disabled",
         workflow.replace(
-            "--update-failure-action pause",
-            "--update-failure-action " + "rollback",
+            'FailureAction:"rollback",Order:"start-first"',
+            'FailureAction:"pause",Order:"start-first"',
             1,
         ),
     ),
@@ -220,6 +299,38 @@ negative_controls = (
         workflow.replace(
             "add_env FeatureFlags__UseUpstream__Realtime false",
             "add_env FeatureFlags__UseUpstream__Realtime true",
+            1,
+        ),
+    ),
+    (
+        "voice bootstrap activated",
+        workflow.replace(
+            "add_env FeatureFlags__UseUpstream__Voice false",
+            "add_env FeatureFlags__UseUpstream__Voice true",
+            1,
+        ),
+    ),
+    (
+        "canonical ingress preflight weakened to host mode",
+        workflow.replace("${published}:${target}:ingress", "${published}:${target}:host"),
+    ),
+    (
+        "external recovery source removed",
+        workflow.replace("source scripts/staging-gateway-spec-recovery.sh", ":", 1),
+    ),
+    (
+        "external recovery strict shell removed",
+        workflow.replace(
+            "if (\n                  set -euo pipefail\n                  staging_gateway_external_gate_recover",
+            "if (\n                  set +e\n                  staging_gateway_external_gate_recover",
+            1,
+        ),
+    ),
+    (
+        "incumbent manifest capture removed",
+        workflow.replace(
+            '"$incumbent_spec" "$incumbent_version" "$incumbent_id" "$incumbent_manifest"',
+            '"$incumbent_spec" "$incumbent_version" "$incumbent_id" /dev/null',
             1,
         ),
     ),
@@ -241,7 +352,7 @@ negative_controls = (
     ),
     (
         "case-insensitive duplicate bootstrap flag guard removed",
-        workflow.replace("matches == 1 && exact_false == 1", "exact_false >= 1", 1),
+        workflow.replace("matches == 1 && exact_value == 1", "exact_value >= 1", 1),
     ),
 )
 for description, mutated in negative_controls:
@@ -360,8 +471,10 @@ for credential_field in ("token", "ticket"):
             f"FAIL: producer OpenAPI {credential_field} must be response-only"
         )
 
-print("Staging realtime probe, fail-visible deploy block, and forward-only contracts are exact.")
+print("Staging realtime probe, fail-visible block, ingress topology, and exact recovery contracts are exact.")
 PY
 
 bash scripts/test-staging-gateway-mutation-lock.sh
+bash scripts/test-staging-gateway-spec-recovery.sh
+bash scripts/check-staging-gateway-phase-contracts.sh
 bash scripts/test-assert-distinct-staging-signing-keys.sh
