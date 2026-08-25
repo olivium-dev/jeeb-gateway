@@ -85,9 +85,23 @@ def normalized_shell_source(source):
 
 def is_required_staging_failure_safety(path, label, line):
     """Allow only the reviewed ingress-safe Swarm rollback configuration."""
+    stripped = line.strip()
+    if path == Path(".github/scripts/rotate-staging-gateway-probe-key.sh"):
+        allowed_rotation = {
+            "automatic rollback": (
+                stripped.startswith('docker service update --detach="$1" ')
+                and '--image "$expected_image"' in stripped
+                and "--with-registry-auth" in stripped
+                and "--update-order start-first" in stripped
+                and "--update-failure-action " + "rollback" in stripped
+            ),
+            "service rollback": stripped == (
+                "docker service " + 'rollback --detach=false "$service" >/dev/null || true'
+            ),
+        }
+        return allowed_rotation.get(label, False)
     if path != Path(".github/workflows/jeeb-staging-deploy.yml"):
         return False
-    stripped = line.strip()
     allowed = {
         "automatic rollback": {
             "--update-failure-action " + "rollback",
@@ -226,6 +240,7 @@ mutation_inventory = {
 }
 expected_mutation_inventory = {
     ".github/scripts/jeeb-gateway-secret-lifecycle.sh",
+    ".github/scripts/rotate-staging-gateway-probe-key.sh",
     ".github/workflows/deploy-to-jeeb.yml",
     ".github/workflows/jeeb-staging-deploy.yml",
     ".github/workflows/jeeb-staging-state-auth-smoke.yml",
@@ -415,7 +430,7 @@ workflow_authority_paths = {
     "jeeb-staging-deploy.yml": workflow_dir / "jeeb-staging-deploy.yml",
     "jeeb-staging-state-auth-smoke.yml": workflow_dir / "jeeb-staging-state-auth-smoke.yml",
 }
-if len(workflow_authority_paths) + 1 != len(expected_mutation_inventory):
+if len(workflow_authority_paths) + 2 != len(expected_mutation_inventory):
     raise SystemExit("FAIL: owner-block authority inventory is incomplete")
 for name, path in workflow_authority_paths.items():
     document = load_workflow(path)
@@ -456,6 +471,20 @@ for name, path in workflow_authority_paths.items():
     }
     assert_workflow_rejected(
         "second-job terminal-status mutation bypass", name, cross_job_bypass
+    )
+
+rotation_contract = subprocess.run(
+    ["bash", "scripts/check-staging-probe-key-rotation-contract.sh"],
+    cwd=repo_root,
+    text=True,
+    capture_output=True,
+    check=False,
+)
+if rotation_contract.returncode != 0:
+    raise SystemExit(
+        "FAIL: protected staging probe-key rotation contract is invalid:\n"
+        + rotation_contract.stdout
+        + rotation_contract.stderr
     )
 
 try:

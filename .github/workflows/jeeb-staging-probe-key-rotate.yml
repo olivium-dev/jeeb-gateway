@@ -1,0 +1,256 @@
+name: jeeb-staging-probe-key-rotate
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: jeeb-staging-gateway-mutation
+  cancel-in-progress: false
+
+env:
+  EXPECTED_IMAGE: ghcr.io/olivium-dev/jeeb-gateway@sha256:baaf210a3966aa65fe97409647e2b8be4b60c122c60b3b9d4f84b81e692cf3a6
+  REMOTE_DOCKER_CONFIG: .jeeb-deploy/ghcr-${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+  rotate:
+    runs-on: ubuntu-22.04
+    environment: staging
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Require immutable protected default-branch authority
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GITHUB_REF_PROTECTED: ${{ github.ref_protected }}
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REPOSITORY" = olivium-dev/jeeb-gateway ]
+          [ "$GITHUB_REF" = "refs/heads/${DEFAULT_BRANCH}" ]
+          [ "$GITHUB_REF_PROTECTED" = true ]
+          [ "$GITHUB_SHA" = "$(git rev-parse HEAD)" ]
+          git diff --exit-code
+
+      - name: Install cloudflared and configure strict SSH
+        env:
+          SSH_HOST: ${{ secrets.JEEB_STAGING_SSH_HOST }}
+          SSH_USER: ${{ secrets.JEEB_STAGING_DEPLOY_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.JEEB_STAGING_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.JEEB_STAGING_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          : "${SSH_HOST:?JEEB_STAGING_SSH_HOST is required}"
+          : "${SSH_USER:?JEEB_STAGING_DEPLOY_USER is required}"
+          : "${SSH_PRIVATE_KEY:?JEEB_STAGING_SSH_PRIVATE_KEY is required}"
+          : "${SSH_KNOWN_HOSTS:?JEEB_STAGING_SSH_KNOWN_HOSTS is required}"
+          curl -fsSL --retry 3 -o cloudflared.deb \
+            https://github.com/cloudflare/cloudflared/releases/download/2026.8.2/cloudflared-linux-amd64.deb
+          printf '%s  %s\n' \
+            'c805c7c8102190c04dfc16e3b4cc4acc9007d5b19b3afbcd608ea6fed7645a43' \
+            cloudflared.deb | sha256sum --check --strict
+          sudo dpkg -i cloudflared.deb || sudo apt-get install -f -y
+          install -d -m 700 "$HOME/.ssh"
+          if printf '%s' "$SSH_PRIVATE_KEY" | grep -q '^-----BEGIN'; then
+            printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          else
+            printf '%s' "$SSH_PRIVATE_KEY" | base64 --decode > "$HOME/.ssh/id_ed25519"
+          fi
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+          ssh-keygen -F "$SSH_HOST" -f "$HOME/.ssh/known_hosts" >/dev/null
+          {
+            printf '%s\n' 'Host jeeb-staging'
+            printf '  HostName %s\n' "$SSH_HOST"
+            printf '  User %s\n' "$SSH_USER"
+            printf '%s\n' \
+              '  IdentityFile ~/.ssh/id_ed25519' \
+              '  ProxyCommand cloudflared access ssh --hostname %h' \
+              '  UserKnownHostsFile ~/.ssh/known_hosts' \
+              '  StrictHostKeyChecking yes' \
+              '  ConnectTimeout 20' \
+              '  ServerAliveInterval 10' \
+              '  ServerAliveCountMax 2'
+          } > "$HOME/.ssh/config"
+          chmod 600 "$HOME/.ssh/config"
+
+      - name: Rotate exact Gateway B probe key and verify
+        env:
+          JEEB_STAGING_WSS_PROBE_MINT_KEY: ${{ secrets.JEEB_STAGING_WSS_PROBE_MINT_KEY }}
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_USER: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          : "${JEEB_STAGING_WSS_PROBE_MINT_KEY:?JEEB_STAGING_WSS_PROBE_MINT_KEY is required}"
+          [ "$(printf '%s' "$JEEB_STAGING_WSS_PROBE_MINT_KEY" | LC_ALL=C wc -c)" -ge 32 ]
+          private_root=$(mktemp -d)
+          chmod 700 "$private_root"
+          key_file="$private_root/probe.key"
+          rotation_result="$private_root/rotation.env"
+          finalize_result="$private_root/finalize.env"
+          evidence="$private_root/sanitized-evidence.json"
+          new_probe_secret="jeeb_staging_gateway_wss_probe_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          old_probe_secret=''
+          rotation_armed=false
+          lock_held=false
+          cleanup() {
+            status=$?
+            trap - EXIT HUP INT TERM
+            if [ "$status" -ne 0 ] && [ "$rotation_armed" = true ] \
+              && [ -n "$old_probe_secret" ]; then
+              ssh jeeb-staging bash -s -- rollback "$EXPECTED_IMAGE" \
+                "$new_probe_secret" "$REMOTE_DOCKER_CONFIG" "$old_probe_secret" \
+                < .github/scripts/rotate-staging-gateway-probe-key.sh >/dev/null 2>&1 \
+                || true
+            fi
+            if [ "$lock_held" = true ]; then
+              staging_gateway_lock_release >/dev/null 2>&1 || status=1
+            fi
+            # Local expansion selects the run-scoped remote credential directory.
+            # shellcheck disable=SC2029
+            ssh jeeb-staging \
+              "rm -rf -- \"\$HOME/$REMOTE_DOCKER_CONFIG\"" >/dev/null 2>&1 || true
+            rm -rf -- "$private_root"
+            exit "$status"
+          }
+          trap cleanup EXIT
+          trap 'exit 129' HUP
+          trap 'exit 130' INT
+          trap 'exit 143' TERM
+
+          ssh jeeb-staging 'set -euo pipefail
+            [ "$(hostname -s)" = "olivium-ephemerals" ]
+            approved_ip_count=$(ip -4 -o addr show scope global \
+              | awk '\''{ split($4, address, "/"); print address[1] }'\'' \
+              | grep -Fxc "192.168.2.20" || true)
+            [ "$approved_ip_count" -eq 1 ]
+            [ "$(docker info --format "{{.Swarm.LocalNodeState}}")" = active ]
+            [ "$(docker info --format "{{.Swarm.ControlAvailable}}")" = true ]'
+
+          # Local expansion selects the run-scoped remote credential directory.
+          # shellcheck disable=SC2029
+          ssh jeeb-staging \
+            "install -d -m 700 \"\$HOME/.jeeb-deploy\" \"\$HOME/$REMOTE_DOCKER_CONFIG\""
+          # shellcheck disable=SC2029
+          printf '%s' "$REGISTRY_TOKEN" | ssh jeeb-staging \
+            "DOCKER_CONFIG=\"\$HOME/$REMOTE_DOCKER_CONFIG\" docker login ghcr.io \
+              -u '$REGISTRY_USER' --password-stdin >/dev/null"
+
+          # shellcheck source=staging-gateway-mutation-lock.sh
+          source scripts/staging-gateway-mutation-lock.sh
+          staging_gateway_lock_init jeeb-staging "$private_root"
+          staging_gateway_lock_acquire
+          lock_held=true
+          staging_gateway_lock_assert
+
+          old_probe_secret=$(ssh jeeb-staging \
+            'docker service inspect jeeb-staging-jeeb-gateway \
+              --format '\''{{range .Spec.TaskTemplate.ContainerSpec.Secrets}}{{println .SecretName "|" .File.Name}}{{end}}'\'' \
+              | awk -F'\'' | '\'' '\''$2 == "staging_wss_probe_mint_key" { print $1 }'\''')
+          [[ "$old_probe_secret" =~ ^jeeb_staging_gateway_wss_probe_[A-Za-z0-9_-]+$ ]]
+          # The non-secret run-scoped Docker secret name expands locally; the value is stdin-only.
+          # shellcheck disable=SC2029
+          printf '%s' "$JEEB_STAGING_WSS_PROBE_MINT_KEY" | ssh jeeb-staging \
+            "docker secret create '$new_probe_secret' - >/dev/null"
+          rotation_armed=true
+          ssh jeeb-staging bash -s -- rotate "$EXPECTED_IMAGE" \
+            "$new_probe_secret" "$REMOTE_DOCKER_CONFIG" \
+            < .github/scripts/rotate-staging-gateway-probe-key.sh > "$rotation_result"
+          chmod 600 "$rotation_result"
+          [ "$(awk -F= '$1 == "OLD_PROBE_SECRET" { print $2 }' \
+            "$rotation_result")" = "$old_probe_secret" ]
+          [ "$(awk -F= '$1 == "CANDIDATE_HEALTHY_WITH_INCUMBENT" { print $2 }' \
+            "$rotation_result")" = 1 ]
+
+          (umask 077; printf '%s' "$JEEB_STAGING_WSS_PROBE_MINT_KEY" > "$key_file")
+          mapfile -t direct_auth < <(python3 - "$key_file" <<'PY'
+          import hashlib
+          import hmac
+          import sys
+          import time
+          import uuid
+
+          with open(sys.argv[1], "rb") as stream:
+              key = stream.read(4097)
+          if not 32 <= len(key) <= 4096:
+              raise RuntimeError("probe key length is outside the contract")
+          timestamp = str(int(time.time()))
+          nonce = str(uuid.uuid4())
+          canonical = (
+              "v1\nPOST\n/internal/ops/staging/realtime-probe-descriptor\n"
+              + timestamp + "\n" + nonce
+          ).encode()
+          print(timestamp)
+          print(nonce)
+          print(hmac.new(key, canonical, hashlib.sha256).hexdigest())
+          PY
+          )
+          [ "${#direct_auth[@]}" -eq 3 ]
+          direct_status=$(ssh jeeb-staging bash -s -- \
+            "${direct_auth[0]}" "${direct_auth[1]}" "${direct_auth[2]}" <<'DIRECT'
+          set -euo pipefail
+          curl --silent --show-error --max-time 20 --output /dev/null \
+            --write-out '%{http_code}' --request POST \
+            --header "X-Jeeb-Staging-Probe-Timestamp: $1" \
+            --header "X-Jeeb-Staging-Probe-Nonce: $2" \
+            --header "X-Jeeb-Staging-Probe-Signature: $3" \
+            http://127.0.0.1:10000/internal/ops/staging/realtime-probe-descriptor
+          DIRECT
+          )
+          [ "$direct_status" = 200 ]
+
+          STAGING_REALTIME_PROBE_KEY_FILE="$key_file" \
+            python3 scripts/probe-staging-authenticated-realtime.py
+
+          leak_count=$(ssh jeeb-staging \
+            "docker service logs --since 10m jeeb-staging-jeeb-gateway 2>&1 \
+              | grep -Eic '([?&]token=|authorization:|x-jeeb-staging-probe-signature:)' || true")
+          [ "$leak_count" -eq 0 ]
+
+          ssh jeeb-staging bash -s -- finalize "$EXPECTED_IMAGE" \
+            "$new_probe_secret" "$REMOTE_DOCKER_CONFIG" "$old_probe_secret" \
+            < .github/scripts/rotate-staging-gateway-probe-key.sh > "$finalize_result"
+          chmod 600 "$finalize_result"
+          rotation_armed=false
+          final_version=$(awk -F= '$1 == "FINAL_VERSION" { print $2 }' "$finalize_result")
+          [[ "$final_version" =~ ^[0-9]+$ ]]
+          rotated_version=$(awk -F= '$1 == "ROTATED_VERSION" { print $2 }' "$rotation_result")
+          [[ "$rotated_version" =~ ^[0-9]+$ ]]
+
+          jq -n \
+            --arg repository "$GITHUB_REPOSITORY" \
+            --arg source_sha "$GITHUB_SHA" \
+            --arg image "$EXPECTED_IMAGE" \
+            --argjson rotated_version "$rotated_version" \
+            --argjson final_version "$final_version" \
+            '{
+              repository: $repository,
+              protected_main_sha: $source_sha,
+              image: $image,
+              rotated_service_version: $rotated_version,
+              final_service_version: $final_version,
+              candidate_healthy_with_incumbent: true,
+              direct_descriptor_http_status: 200,
+              public_authenticated_wss: "gateway",
+              credential_log_leak_count: 0,
+              final_replicas: 1,
+              gateway_b_contract: "exact"
+            }' > "$evidence"
+          chmod 600 "$evidence"
+          staging_gateway_lock_release
+          lock_held=false
+          install -d -m 700 "$GITHUB_WORKSPACE/.jeeb-deploy-evidence"
+          install -m 600 "$evidence" \
+            "$GITHUB_WORKSPACE/.jeeb-deploy-evidence/probe-key-rotation.json"
+
+      - name: Upload sanitized rotation evidence
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: jeeb-staging-probe-key-rotation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .jeeb-deploy-evidence/probe-key-rotation.json
+          if-no-files-found: error
+          retention-days: 30
