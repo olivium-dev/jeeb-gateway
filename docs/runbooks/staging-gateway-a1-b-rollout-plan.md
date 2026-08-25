@@ -93,6 +93,7 @@ the existing digest-pinned gateway with:
 |---|---|
 | `FeatureFlags__UseUpstream__Chat` | `false` |
 | `FeatureFlags__UseUpstream__Realtime` | `false` |
+| `Features__RealtimeWebSocketProxy__Enabled` | `false` (route absent; no dial) |
 | `FeatureFlags__UseUpstream__Voice` | `false` |
 | `FeatureFlags__UseUpstream__Otp` | `true` |
 | `Services__ServiceOTP__BaseUrl` | `http://jeeb-staging-one-time-password:8080` |
@@ -122,6 +123,7 @@ Its reviewed configuration delta is limited to:
 |---|---|
 | `FeatureFlags__UseUpstream__Chat` | `true` |
 | `FeatureFlags__UseUpstream__Realtime` | `true` |
+| `Features__RealtimeWebSocketProxy__Enabled` | `true` (Staging-only exact-path proxy) |
 | `FeatureFlags__UseUpstream__Voice` | `false` (campaign lock) |
 | `FeatureFlags__UseUpstream__Otp` | `true` |
 | `SuperLogin__OpenMode` | `false` |

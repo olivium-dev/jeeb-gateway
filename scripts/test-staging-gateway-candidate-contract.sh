@@ -30,7 +30,8 @@ cat > "$candidate" <<JSON
         "DemoUsers__Enabled=false",
         "ForwardedHeaders__KnownProxies__0=172.18.0.1",
         "Jwt__SigningKeyFile=/run/secrets/jeeb_gateway_jwt",
-        "ServiceNotificationClient__ServiceTokenFile=/run/secrets/notification_service_token"
+        "ServiceNotificationClient__ServiceTokenFile=/run/secrets/notification_service_token",
+        "Features__RealtimeWebSocketProxy__Enabled=false"
       ]
     },
     "Networks": [{"Target":"$network_id"}]
@@ -83,6 +84,8 @@ reject_mutant 'Chat activated in A1' \
   '(.TaskTemplate.ContainerSpec.Env[3]) = "FeatureFlags__UseUpstream__Chat=true"'
 reject_mutant 'Realtime activated in A1' \
   '(.TaskTemplate.ContainerSpec.Env[4]) = "FeatureFlags__UseUpstream__Realtime=true"'
+reject_mutant 'WebSocket proxy activated in A1' \
+  '(.TaskTemplate.ContainerSpec.Env[15]) = "Features__RealtimeWebSocketProxy__Enabled=true"'
 reject_mutant 'wrong b05 application ID' \
   '(.TaskTemplate.ContainerSpec.Env[5]) = "Auth__Otp__ApplicationId=wrong"'
 reject_mutant 'Lebanon enforcement disabled' \

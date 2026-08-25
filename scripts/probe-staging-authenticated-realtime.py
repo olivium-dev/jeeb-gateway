@@ -119,6 +119,8 @@ class PhoenixWebSocket:
             for item in response_headers.get("connection", "").split(",")
         }:
             raise RuntimeError("WebSocket upgrade response omitted Connection: Upgrade")
+        if response_headers.get("x-jeeb-realtime-proxy") != "gateway":
+            raise RuntimeError("WebSocket upgrade did not traverse the gateway proxy")
         expected_accept = base64.b64encode(
             hashlib.sha1((websocket_key + WS_GUID).encode("ascii")).digest()
         ).decode("ascii")

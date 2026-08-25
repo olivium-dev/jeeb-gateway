@@ -185,6 +185,12 @@ DurableRequests:BroadcastingPhase                    setting -
 EarningsStatement:SignedUrlHmacKey                   setting -
 EarningsStatement:SignedUrlTtlHours                  setting -
 Features:DevEndpoints:Enabled                        setting - # prod-off dev-endpoint seam
+Features:RealtimeWebSocketProxy:ActivityTimeoutSeconds setting - # Staging-only Phoenix proxy idle timeout; production remains committed OFF
+Features:RealtimeWebSocketProxy:ConnectTimeoutSeconds  setting - # Staging-only Phoenix proxy connect bound; production remains committed OFF
+Features:RealtimeWebSocketProxy:Enabled                setting - # dedicated Staging A1-off/B-on activation; may never be true outside Staging
+Features:RealtimeWebSocketProxy:GlobalConcurrencyLimit setting - # queue-free global WebSocket connection bound
+Features:RealtimeWebSocketProxy:MaximumTrackedClientIps setting - # bounded per-IP limiter partition map
+Features:RealtimeWebSocketProxy:PerIpConcurrencyLimit   setting - # trusted-forwarded-client-IP WebSocket connection bound
 Features:Swagger:Enabled                             setting -
 Financials:SettlementLedgerReconciler:PageSize       setting -
 Financials:SettlementLedgerReconciler:SweepInterval  setting -

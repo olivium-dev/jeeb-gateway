@@ -17,6 +17,7 @@ using JeebGateway.Ratings;
 using JeebGateway.ProhibitedItems.FlaggedRequests;
 using JeebGateway.ProhibitedItems.Scanner;
 using JeebGateway.Push;
+using JeebGateway.Realtime.Proxy;
 using JeebGateway.Services.Bff;
 using JeebGateway.Services.Clients;
 using JeebGateway.Requests;
@@ -568,6 +569,7 @@ builder.Services.Configure<JeebGateway.Realtime.RealtimeGuardianOptions>(
     builder.Configuration.GetSection(JeebGateway.Realtime.RealtimeGuardianOptions.SectionName));
 builder.Services.AddSingleton<JeebGateway.Realtime.IRealtimeGuardianTokenIssuer,
                               JeebGateway.Realtime.RealtimeGuardianTokenIssuer>();
+builder.Services.AddRealtimeWebSocketProxy(builder.Configuration);
 // Every LiveComm topic/channel name derives from Services:Realtime:TenantPrefix
 // here; the default keeps live names byte-identical (RTC rename phase G0).
 builder.Services.AddSingleton<JeebGateway.Realtime.RealtimeTopicNames>();
@@ -1238,7 +1240,12 @@ builder.Services.AddOpenTelemetry()
     .WithTracing(tracing =>
     {
         tracing
-            .AddAspNetCoreInstrumentation()
+            // The Phoenix connect query contains short-lived credentials and a
+            // membership ticket. This exact transport emits bounded metrics only;
+            // never create an inbound span whose url.full could retain its query.
+            .AddAspNetCoreInstrumentation(options =>
+                options.Filter = context =>
+                    !RealtimeWebSocketProxyEndpoint.IsSensitivePath(context.Request.Path))
             .AddHttpClientInstrumentation()
             .AddSource(CaseTelemetry.ActivitySourceName)
             .AddSource(RealtimeProbeTelemetry.ActivitySourceName)
@@ -1254,6 +1261,7 @@ builder.Services.AddOpenTelemetry()
             .AddMeter(CaseTelemetry.MeterName)
             // GW12-OBS-6 — business outcome counters for auth and durable writers.
             .AddMeter(BusinessOutcomeTelemetry.MeterName)
+            .AddMeter(RealtimeWebSocketProxyMetrics.MeterName)
             // Explicit buckets keep the 400ms p95 SLO on a bucket boundary so
             // histogram_quantile() does not round across a wide bucket (T-backend-050).
             .AddView(
@@ -1307,6 +1315,10 @@ builder.Logging.AddOpenTelemetry(logging =>
     logging.ParseStateValues = true;
     logging.AddOtlpExporter(opt => opt.Endpoint = new Uri(otlpEndpoint));
 });
+// YARP's detailed forwarder diagnostics can include the destination request
+// URI. The WebSocket query is credential-bearing, so this dedicated proxy uses
+// fixed-outcome metrics and suppresses YARP logs at every level.
+builder.Logging.AddFilter("Yarp.ReverseProxy", LogLevel.None);
 
 // T-backend-050 — singleton wrapper around the latency Meter. The Meter is
 // owned by DI so its lifetime matches the host's, which keeps the OTel
@@ -3093,6 +3105,7 @@ if (stateServiceWired)
 }
 
 app.MapControllers();
+app.MapRealtimeWebSocketProxy(app.Environment);
 app.MapStagingRealtimeProbe();
 
 // T-backend-050 — Prometheus scrape endpoint. Returns the OpenMetrics

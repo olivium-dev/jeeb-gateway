@@ -60,6 +60,12 @@
     -->
     <PackageReference Include="Microsoft.Extensions.Http.Resilience" Version="8.10.0" />
     <!--
+      Direct, bounded WebSocket forwarding for the exact public Phoenix socket
+      path.  We intentionally use IHttpForwarder instead of the configuration-
+      driven reverse-proxy router so no wildcard proxy surface is introduced.
+    -->
+    <PackageReference Include="Yarp.ReverseProxy" Version="2.3.0" />
+    <!--
       URL-group health checks for downstream services in Extensions/HealthCheckExtensions.cs.
     -->
     <PackageReference Include="AspNetCore.HealthChecks.Uris" Version="8.0.1" />

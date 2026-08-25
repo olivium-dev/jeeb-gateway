@@ -451,10 +451,12 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().Contain("recovery_armed=true");
         workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Chat false");
         workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Realtime false");
+        workflow.Should().Contain("add_env Features__RealtimeWebSocketProxy__Enabled false");
         workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Voice false");
         workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Otp true");
         workflow.Should().NotContain("add_env FeatureFlags__UseUpstream__Chat true");
         workflow.Should().NotContain("add_env FeatureFlags__UseUpstream__Realtime true");
+        workflow.Should().NotContain("add_env Features__RealtimeWebSocketProxy__Enabled true");
         workflow.Should().NotContain("add_env FeatureFlags__UseUpstream__Voice true");
         workflow[..workflow.IndexOf("permissions:", StringComparison.Ordinal)]
             .Should().NotContain("inputs:");
