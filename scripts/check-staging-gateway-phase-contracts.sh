@@ -38,6 +38,12 @@ expected_a1 = {
     "FeatureFlags__UseUpstream__Otp": "true",
     "FeatureFlags__UseUpstream__Realtime": "false",
     "FeatureFlags__UseUpstream__Voice": "false",
+    "Services__ServiceOTP__BaseUrl": "http://jeeb-staging-one-time-password:8080",
+    "ServiceOTPApi__BaseUrl": "http://jeeb-staging-one-time-password:8080",
+    "Auth__Otp__ApplicationId": "0d51afe1-499f-4a29-a55a-36d2dd223b05",
+    "Auth__Otp__Phone__AllowedRegion": "LB",
+    "Auth__Otp__Phone__EnforceRegion": "true",
+    "Services__Realtime__BaseUrl": "http://jeeb-staging-realtime-comunication-service:4000",
     "Operations__RealtimeProbe__MintKeyFile": "/run/secrets/staging_wss_probe_mint_key",
     "SuperLogin__OpenMode": "false",
 }
@@ -45,7 +51,6 @@ expected_b = dict(expected_a1)
 for activated in (
     "FeatureFlags__UseUpstream__Chat",
     "FeatureFlags__UseUpstream__Realtime",
-    "FeatureFlags__UseUpstream__Voice",
 ):
     expected_b[activated] = "true"
 
@@ -74,7 +79,6 @@ for key, value in expected_a1.items():
 for activated in (
     "FeatureFlags__UseUpstream__Chat",
     "FeatureFlags__UseUpstream__Realtime",
-    "FeatureFlags__UseUpstream__Voice",
 ):
     if f"add_env {activated} true" in workflow:
         raise SystemExit(f"FAIL: B activation leaked into A1 workflow: {activated}")
@@ -85,7 +89,6 @@ deltas = {key for key in a1 if a1[key] != b[key]}
 expected_deltas = {
     "FeatureFlags__UseUpstream__Chat",
     "FeatureFlags__UseUpstream__Realtime",
-    "FeatureFlags__UseUpstream__Voice",
 }
 if deltas != expected_deltas:
     raise SystemExit(f"FAIL: B activation delta is not flag-only: {sorted(deltas)}")

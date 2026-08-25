@@ -9,6 +9,8 @@ namespace JeebGateway.Operations.RealtimeProbe;
 internal static class StagingRealtimeProbeEndpoint
 {
     internal const string Route = "/internal/ops/staging/realtime-probe-descriptor";
+    internal const string ObservedRemoteIpHeader =
+        "X-Jeeb-Staging-Observed-Remote-Ip";
 
     internal static IServiceCollection AddStagingRealtimeProbe(
         this IServiceCollection services,
@@ -105,6 +107,17 @@ internal static class StagingRealtimeProbeEndpoint
         }
 
         var result = await service.MintAsync(context.Request.Headers, cancellationToken);
+        if (result.Status == RealtimeProbeMintStatus.Success
+            && result.Descriptor is not null)
+        {
+            // This response-only value lets the blocked deployment prove the
+            // real Swarm-ingress peer is allow-listed by ForwardedHeaders: the
+            // controlled XFF sentinel must become RemoteIpAddress. The header is
+            // emitted only after the dedicated HMAC/replay/credential gates pass.
+            context.Response.Headers[ObservedRemoteIpHeader] =
+                context.Connection.RemoteIpAddress?.ToString() ?? "unavailable";
+        }
+
         return result.Status switch
         {
             RealtimeProbeMintStatus.Success when result.Descriptor is not null

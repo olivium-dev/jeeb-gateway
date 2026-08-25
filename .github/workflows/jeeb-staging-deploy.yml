@@ -368,6 +368,12 @@ jobs:
                   FeatureFlags__UseUpstream__Realtime=false
                   FeatureFlags__UseUpstream__Voice=false
                   FeatureFlags__UseUpstream__Otp=true
+                  Services__ServiceOTP__BaseUrl=http://jeeb-staging-one-time-password:8080
+                  ServiceOTPApi__BaseUrl=http://jeeb-staging-one-time-password:8080
+                  Auth__Otp__ApplicationId=0d51afe1-499f-4a29-a55a-36d2dd223b05
+                  Auth__Otp__Phone__AllowedRegion=LB
+                  Auth__Otp__Phone__EnforceRegion=true
+                  Services__Realtime__BaseUrl=http://jeeb-staging-realtime-comunication-service:4000
                   SuperLogin__OpenMode=false
                   DemoUsers__Enabled=false
                   Operations__RealtimeProbe__MintKeyFile=/run/secrets/staging_wss_probe_mint_key
@@ -387,118 +393,132 @@ jobs:
                 done
           FLAGS
             }
-            probe_staging_realtime_descriptor() {
-              STAGING_REALTIME_PROBE_KEY_FILE="$probe_key_file" python3 - <<'PY'
+            probe_staging_authenticated_realtime() {
+              STAGING_REALTIME_PROBE_KEY_FILE="$probe_key_file" \
+                python3 scripts/probe-staging-authenticated-realtime.py
+            }
+            probe_staging_proxy_source_contract() {
+              local probe_source_ip=198.51.100.42
+              local -a probe_auth
+              mapfile -t probe_auth < <(
+                python3 - "$probe_key_file" <<'PY'
           import hashlib
           import hmac
-          import http.client
-          import json
-          import os
-          import ssl
+          import sys
           import time
           import uuid
-          from datetime import datetime, timezone
 
-          HOST = "app.jeeb.fds-1.com"
-          PATH = "/internal/ops/staging/realtime-probe-descriptor"
-          KEY_FILE = os.environ["STAGING_REALTIME_PROBE_KEY_FILE"]
-          MAX_BODY_BYTES = 1024 * 1024
-
-
-          def request(headers):
-              connection = http.client.HTTPSConnection(
-                  HOST,
-                  443,
-                  timeout=20,
-                  context=ssl.create_default_context(),
-              )
-              try:
-                  connection.request("POST", PATH, body=b"", headers=headers)
-                  response = connection.getresponse()
-                  body = response.read(MAX_BODY_BYTES + 1)
-                  if len(body) > MAX_BODY_BYTES:
-                      raise RuntimeError("descriptor response exceeded the private validation bound")
-                  response_headers = {name.lower(): value for name, value in response.getheaders()}
-                  return response.status, response_headers, body
-              finally:
-                  connection.close()
-
-
-          with open(KEY_FILE, "rb") as key_stream:
-              key = key_stream.read(4097)
+          key_file = sys.argv[1]
+          with open(key_file, "rb") as stream:
+              key = stream.read(4097)
           if not 32 <= len(key) <= 4096:
-              raise RuntimeError("private descriptor key length is outside the accepted contract")
-
-          malformed_status, _, _ = request({})
-          if malformed_status != 400:
-              raise RuntimeError("malformed descriptor request did not return 400")
-
+              raise RuntimeError("dedicated descriptor key length is outside the contract")
           timestamp = str(int(time.time()))
-          forged_nonce = str(uuid.uuid4())
-          forged_headers = {
-              "X-Jeeb-Staging-Probe-Timestamp": timestamp,
-              "X-Jeeb-Staging-Probe-Nonce": forged_nonce,
-              "X-Jeeb-Staging-Probe-Signature": "0" * 64,
-          }
-          forged_status, _, _ = request(forged_headers)
-          if forged_status != 403:
-              raise RuntimeError("forged descriptor signature did not return 403")
-
           nonce = str(uuid.uuid4())
-          timestamp = str(int(time.time()))
-          canonical = f"v1\nPOST\n{PATH}\n{timestamp}\n{nonce}".encode()
-          signature = hmac.new(key, canonical, hashlib.sha256).hexdigest()
-          headers = {
-              "X-Jeeb-Staging-Probe-Timestamp": timestamp,
-              "X-Jeeb-Staging-Probe-Nonce": nonce,
-              "X-Jeeb-Staging-Probe-Signature": signature,
-          }
-          status, response_headers, body = request(headers)
-          if status != 200:
-              raise RuntimeError("valid descriptor request did not return 200")
-          if "no-store" not in {
-              directive.strip().lower()
-              for directive in response_headers.get("cache-control", "").split(",")
-          }:
-              raise RuntimeError("descriptor response is missing Cache-Control: no-store")
-          if response_headers.get("content-type", "").split(";", 1)[0].lower() != "application/json":
-              raise RuntimeError("descriptor response is not application/json")
-
-          descriptor = json.loads(body)
-          expected_fields = {
-              "conversationId",
-              "topic",
-              "roleInConvo",
-              "socketUrl",
-              "token",
-              "ticket",
-              "expiresAt",
-          }
-          if set(descriptor) != expected_fields:
-              raise RuntimeError("descriptor response fields drifted")
-          conversation_id = "edge-probe-" + nonce
-          if descriptor["conversationId"] != conversation_id:
-              raise RuntimeError("descriptor conversationId does not bind the signed nonce")
-          if descriptor["topic"] != "jeeb:chat:" + conversation_id:
-              raise RuntimeError("descriptor topic does not bind the signed nonce")
-          if descriptor["roleInConvo"] != "client":
-              raise RuntimeError("descriptor role is not the subscribe-only client role")
-          if descriptor["socketUrl"] != "wss://app.jeeb.fds-1.com/socket/websocket":
-              raise RuntimeError("descriptor socket URL drifted")
-          for credential in ("token", "ticket"):
-              if not isinstance(descriptor[credential], str) or not descriptor[credential].strip():
-                  raise RuntimeError("descriptor returned an empty credential")
-          expires_at = datetime.fromisoformat(descriptor["expiresAt"].replace("Z", "+00:00"))
-          ttl = (expires_at.astimezone(timezone.utc) - datetime.now(timezone.utc)).total_seconds()
-          if not 30 <= ttl <= 900:
-              raise RuntimeError("descriptor credential TTL is outside the accepted contract")
-
-          replay_status, _, _ = request(headers)
-          if replay_status != 409:
-              raise RuntimeError("replayed descriptor request did not return 409")
-
-          print("staging_realtime_descriptor_contract=ok")
+          canonical = (
+              "v1\nPOST\n/internal/ops/staging/realtime-probe-descriptor\n"
+              + timestamp
+              + "\n"
+              + nonce
+          ).encode()
+          print(timestamp)
+          print(nonce)
+          print(hmac.new(key, canonical, hashlib.sha256).hexdigest())
           PY
+              )
+              [ "${#probe_auth[@]}" -eq 3 ]
+              [[ "${probe_auth[0]}" =~ ^[0-9]+$ ]]
+              [[ "${probe_auth[1]}" =~ ^[0-9a-f-]{36}$ ]]
+              [[ "${probe_auth[2]}" =~ ^[0-9a-f]{64}$ ]]
+              ssh jeeb-staging bash -s -- \
+                "${probe_auth[0]}" "${probe_auth[1]}" "${probe_auth[2]}" \
+                "$probe_source_ip" <<'PROXY_SOURCE'
+                set -euo pipefail
+                timestamp=$1
+                nonce=$2
+                signature=$3
+                expected_remote_ip=$4
+                response_headers=$(mktemp)
+                trap 'rm -f -- "$response_headers"' EXIT
+                status=$(curl --silent --show-error --max-time 20 \
+                  --output /dev/null --dump-header "$response_headers" \
+                  --write-out '%{http_code}' --request POST \
+                  --header "X-Forwarded-For: $expected_remote_ip" \
+                  --header "X-Jeeb-Staging-Probe-Timestamp: $timestamp" \
+                  --header "X-Jeeb-Staging-Probe-Nonce: $nonce" \
+                  --header "X-Jeeb-Staging-Probe-Signature: $signature" \
+                  http://127.0.0.1:10000/internal/ops/staging/realtime-probe-descriptor)
+                [ "$status" = 200 ]
+                awk -F': *' -v expected="$expected_remote_ip" '
+                  tolower($1) == "x-jeeb-staging-observed-remote-ip" {
+                    gsub(/\r$/, "", $2)
+                    matches++
+                    if ($2 == expected) exact++
+                  }
+                  END { exit !(matches == 1 && exact == 1) }
+                ' "$response_headers"
+          PROXY_SOURCE
+            }
+            verify_staging_overlay_and_dns() {
+              ssh jeeb-staging bash -s -- \
+                jeeb-staging-net \
+                jeeb-staging-jeeb-gateway \
+                jeeb-staging-one-time-password \
+                jeeb-staging-realtime-comunication-service <<'OVERLAY_DNS'
+                set -euo pipefail
+                network=$1
+                gateway_service=$2
+                otp_service=$3
+                realtime_service=$4
+                network_document=$(docker network inspect "$network")
+                network_id=$(jq -er --arg expected_name "$network" '
+                  select(length == 1)
+                  | .[0]
+                  | select(.Name == $expected_name)
+                  | select(.Driver == "overlay" and .Scope == "swarm")
+                  | select(.Attachable == true and .Ingress == false)
+                  | select(.Options | has("encrypted"))
+                  | select(.Options.encrypted == "" or .Options.encrypted == "true")
+                  | .Id
+                  | select(test("^[a-z0-9]+$"))
+                ' <<< "$network_document")
+                for member_service in "$gateway_service" "$otp_service" "$realtime_service"; do
+                  docker service inspect "$member_service" >/dev/null
+                  membership_count=$(docker service inspect "$member_service" \
+                    --format '{{range .Spec.TaskTemplate.Networks}}{{println .Target}}{{end}}' \
+                    | grep -Fxc "$network_id" || true)
+                  [ "$membership_count" -eq 1 ] || {
+                    echo "Required service is not on the exact staging overlay: $member_service" >&2
+                    exit 1
+                  }
+                done
+                running_container() {
+                  local member_service=$1 task_id container_id
+                  local -a task_ids=()
+                  mapfile -t task_ids < <(docker service ps "$member_service" \
+                    --filter desired-state=running --format '{{.ID}}')
+                  [ "${#task_ids[@]}" -eq 1 ]
+                  task_id=${task_ids[0]}
+                  [[ "$task_id" =~ ^[a-z0-9]+$ ]]
+                  container_id=$(docker inspect "$task_id" \
+                    --format '{{.Status.ContainerStatus.ContainerID}}')
+                  [[ "$container_id" =~ ^[0-9a-f]{64}$ ]]
+                  [ "$(docker inspect "$container_id" --format '{{.State.Running}}')" = true ]
+                  printf '%s\n' "$container_id"
+                }
+                resolves_in_task() {
+                  local container_id=$1 dns_name=$2
+                  docker exec "$container_id" getent hosts "$dns_name" \
+                    | awk 'NF >= 2 && $1 ~ /^[0-9a-fA-F:.]+$/ { found=1 } END { exit !found }'
+                }
+                gateway_container=$(running_container "$gateway_service")
+                otp_container=$(running_container "$otp_service")
+                realtime_container=$(running_container "$realtime_service")
+                resolves_in_task "$gateway_container" "$otp_service"
+                resolves_in_task "$gateway_container" "$realtime_service"
+                resolves_in_task "$otp_container" "$gateway_service"
+                resolves_in_task "$realtime_container" "$gateway_service"
+          OVERLAY_DNS
             }
             staging_gateway_submit_spec_cas() {
               local service_id=$1 expected_version=$2 replacement_spec=$3
@@ -703,6 +723,7 @@ jobs:
             echo 'RED: incumbent service Spec drifted before update; deploy made no mutation' >&2
             exit 1
           fi
+          verify_staging_overlay_and_dns
           # Serialized into the private remote builder below.
           # shellcheck disable=SC2034
           EXPECTED_INCUMBENT_IMAGE=$incumbent_image
@@ -734,7 +755,6 @@ jobs:
           retired_gateway_env=(
             UnifiedPaymentGateway__BaseUrl
             Services__Compliment__BaseUrl
-            ServiceOTPApi__BaseUrl
             GatewayPostgres__ConnectionString
             WalletPostgres__ConnectionString
             Whisper__FakeTranscribe
@@ -747,13 +767,21 @@ jobs:
           secret_remove_targets=()
           secret_additions=()
           add_env() { desired_env+=("$1=$2"); }
-          [ "$(docker network inspect \
-            --format '{{.Driver}}:{{.Scope}}:{{.Attachable}}' "$network")" = \
-            'overlay:swarm:true' ] || {
-            echo 'Approved staging overlay is absent or has unsafe topology' >&2
+          network_document=$(docker network inspect "$network")
+          network_id=$(jq -er --arg expected_name "$network" '
+            select(length == 1)
+            | .[0]
+            | select(.Name == $expected_name)
+            | select(.Driver == "overlay" and .Scope == "swarm")
+            | select(.Attachable == true and .Ingress == false)
+            | select(.Options | has("encrypted"))
+            | select(.Options.encrypted == "" or .Options.encrypted == "true")
+            | .Id
+            | select(test("^[a-z0-9]+$"))
+          ' <<< "$network_document") || {
+            echo 'Approved staging overlay is absent, inexact, or not encrypted' >&2
             exit 1
           }
-          network_id=$(docker network inspect --format '{{.Id}}' "$network")
           published_port_proxy_ip=$(docker network inspect \
             --format '{{(index .IPAM.Config 0).Gateway}}' docker_gwbridge)
           printf '%s\n' "$published_port_proxy_ip" | awk -F. '
@@ -819,6 +847,7 @@ jobs:
               add_env Services__Realtime__GuardianSecretFile /run/secrets/realtime_guardian_secret
               add_env Services__Realtime__MembershipTicketSigningKeyFile /run/secrets/realtime_membership_ticket_key
               add_env Services__Realtime__PublicSocketUrl wss://app.jeeb.fds-1.com/socket/websocket
+              add_env Services__Realtime__BaseUrl http://jeeb-staging-realtime-comunication-service:4000
               add_env Operations__RealtimeProbe__MintKeyFile /run/secrets/staging_wss_probe_mint_key
               add_rotated_secret() {
                 local source=$1 target_name=$2
@@ -866,7 +895,8 @@ jobs:
               add_env FeatureFlags__UseUpstream__Ban true
               # Voice bytes always cross the owning service boundary; the gateway
               # has no local provider path or credential fallback.
-              # A1 bootstrap: real voice activation is a separate reviewed B change.
+              # Campaign lock: Voice remains off in A1 and B. A future campaign
+              # needs its own reviewed activation decision and canary.
               add_env FeatureFlags__UseUpstream__Voice false
               add_env FeatureFlags__UseUpstream__Delivery true
               add_env FeatureFlags__UseUpstream__Offer true
@@ -880,6 +910,8 @@ jobs:
               add_env FeatureFlags__UseUpstream__Kyc true
               add_env FeatureFlags__Kyc__AutoApprove true
               add_env Auth__Otp__ApplicationId 0d51afe1-499f-4a29-a55a-36d2dd223b05
+              add_env Auth__Otp__Phone__AllowedRegion LB
+              add_env Auth__Otp__Phone__EnforceRegion true
               add_env FeatureFlags__UseUpstream__Compliment false
               # The existing gateway deploy is native and uses host loopback.
               # This staging gateway is containerized, so retain the same fleet
@@ -890,7 +922,6 @@ jobs:
               add_env Services__Offer__BaseUrl http://192.168.2.20:10063
               add_env Services__Cdn__BaseUrl http://192.168.2.20:10072
               add_env ComplimentServiceApi__BaseUrl http://192.168.2.20:10036
-              add_env Services__Realtime__BaseUrl http://192.168.2.20:10069
               add_env Services__ContractSigning__BaseUrl http://192.168.2.20:10071
               add_env Services__FormBuilder__BaseUrl http://192.168.2.20:10070
               add_env Services__Kyc__BaseUrl http://192.168.2.20:10074
@@ -906,7 +937,8 @@ jobs:
               # with the gateway and are addressed by their verified Swarm service names and
               # target ports; no LAN-published owner port is part of this contract.
               add_env WalletServiceApi__BaseUrl http://jeeb-staging-wallet-service:8080/
-              add_env Services__ServiceOTP__BaseUrl http://192.168.2.20:10037
+              add_env Services__ServiceOTP__BaseUrl http://jeeb-staging-one-time-password:8080
+              add_env ServiceOTPApi__BaseUrl http://jeeb-staging-one-time-password:8080
               add_env ChatServiceApi__BaseUrl http://192.168.2.20:10028
               add_env ServiceNotificationClient__BaseUrl http://jeeb-staging-notification:8000/
               add_env PushNotificationServiceApi__BaseUrl http://192.168.2.20:10040
@@ -939,9 +971,6 @@ jobs:
             echo 'Incumbent service changed after the authoritative snapshot was captured' >&2
             exit 1
           }
-          stale_gateway_network=jeeb-net
-          stale_gateway_network_id=$(docker network inspect \
-            --format '{{.Id}}' "$stale_gateway_network" 2>/dev/null || true)
           build_root=$(mktemp -d "$HOME/.jeeb-deploy/candidate-spec.XXXXXX")
           chmod 700 "$build_root"
           trap 'rm -rf -- "$build_root"' EXIT
@@ -970,7 +999,6 @@ jobs:
           jq -e \
             --arg image "$IMAGE" \
             --arg network_id "$network_id" \
-            --arg stale_network_id "$stale_gateway_network_id" \
             --slurpfile desired_env "$desired_env_json" \
             --slurpfile env_remove "$env_remove_json" \
             --slurpfile secret_additions "$secret_additions_json" \
@@ -996,11 +1024,7 @@ jobs:
                       )))
                   + $secret_additions[0]
                 )
-              | .TaskTemplate.Networks = (
-                  ((.TaskTemplate.Networks // [])
-                    | map(select($stale_network_id == "" or .Target != $stale_network_id)))
-                  | if any(.Target == $network_id) then . else . + [{Target:$network_id}] end
-                )
+              | .TaskTemplate.Networks = [{Target:$network_id}]
               | .TaskTemplate.Resources.Limits = (
                   (.TaskTemplate.Resources.Limits // {})
                   + {NanoCPUs:750000000,MemoryBytes:805306368}
@@ -1028,17 +1052,31 @@ jobs:
           } | ssh jeeb-staging bash -se > "$candidate_spec"
           chmod 600 "$candidate_spec"
           [ "$(jq -er '.TaskTemplate.ContainerSpec.Image' "$candidate_spec")" = "$IMAGE" ]
-          jq -e --argjson published "$published" '
-            .EndpointSpec.Ports as $ports
-            | ($ports | length) == 1
-              and $ports[0].PublishedPort == $published
-              and $ports[0].TargetPort == 8080
-              and $ports[0].PublishMode == "ingress"
-              and .UpdateConfig.Order == "start-first"
-              and .UpdateConfig.FailureAction == "rollback"
-              and .RollbackConfig.Order == "start-first"
-              and .RollbackConfig.FailureAction == "pause"
-          ' "$candidate_spec" >/dev/null
+          candidate_network_id=$(jq -er '
+            select((.TaskTemplate.Networks // []) | length == 1)
+            | .TaskTemplate.Networks[0].Target
+            | select(test("^[a-z0-9]+$"))
+          ' "$candidate_spec")
+          observed_network_id=$(ssh jeeb-staging \
+            "docker network inspect jeeb-staging-net" \
+            | jq -er '
+                select(length == 1)
+                | .[0]
+                | select(.Name == "jeeb-staging-net")
+                | select(.Driver == "overlay" and .Scope == "swarm")
+                | select(.Attachable == true and .Ingress == false)
+                | select(.Options | has("encrypted"))
+                | select(.Options.encrypted == "" or .Options.encrypted == "true")
+                | .Id
+                | select(test("^[a-z0-9]+$"))
+              ')
+          [ "$candidate_network_id" = "$observed_network_id" ]
+          jq -e \
+            --arg image "$IMAGE" \
+            --arg network_id "$observed_network_id" \
+            --argjson published "$published" \
+            -f scripts/staging-gateway-candidate-contract.jq \
+            "$candidate_spec" >/dev/null
           recovery_armed=true
           recovery_result=armed-pending
           staging_gateway_forward_apply \
@@ -1047,12 +1085,14 @@ jobs:
             "$secret_stage" "$forward_result"
           write_snapshot_manifest \
             "$candidate_spec" "$candidate_version" "$candidate_id" "$candidate_manifest"
-          verify_candidate_readiness
-          verify_bootstrap_flags
           ssh jeeb-staging bash -s -- jeeb-staging-jeeb-gateway "$IMAGE" \
             < scripts/verify-swarm-service-image.sh
+          verify_candidate_readiness
+          verify_staging_overlay_and_dns
+          verify_bootstrap_flags
           bash scripts/probe-staging-public-gateway-contract.sh
-          probe_staging_realtime_descriptor
+          probe_staging_proxy_source_contract
+          probe_staging_authenticated_realtime
           verify_exact_candidate_after_checks
           recovery_armed=false
           recovery_result=not-required

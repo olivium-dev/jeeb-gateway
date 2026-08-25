@@ -35,6 +35,8 @@ public sealed class StagingRealtimeProbeEndpointTests
 
         response.StatusCode.Should().Be(HttpStatusCode.OK);
         response.Headers.CacheControl!.NoStore.Should().BeTrue();
+        response.Headers.GetValues(StagingRealtimeProbeEndpoint.ObservedRemoteIpHeader)
+            .Should().ContainSingle().Which.Should().Be(IPAddress.Loopback.ToString());
         response.Content.Headers.ContentType!.MediaType.Should().Be("application/json");
 
         using var json = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
@@ -177,6 +179,8 @@ public sealed class StagingRealtimeProbeEndpointTests
             response,
             HttpStatusCode.Forbidden,
             "https://jeeb.dev/errors/staging-realtime-probe-forbidden");
+        response.Headers.Contains(StagingRealtimeProbeEndpoint.ObservedRemoteIpHeader)
+            .Should().BeFalse();
         host.Redis.Calls.Should().BeEmpty();
     }
 
@@ -449,6 +453,11 @@ public sealed class StagingRealtimeProbeEndpointTests
 
             var app = builder.Build();
             app.UseExceptionHandler();
+            app.Use((context, next) =>
+            {
+                context.Connection.RemoteIpAddress = IPAddress.Loopback;
+                return next(context);
+            });
             app.MapStagingRealtimeProbe();
             await app.StartAsync();
             return new ProbeHost(app, app.GetTestClient(), redis, tempDirectory);

@@ -21,6 +21,8 @@ contract_path = Path(
     "src/JeebGateway/contracts/producer/staging-realtime-probe.openapi.json"
 )
 transaction_path = Path("scripts/staging-gateway-spec-recovery.sh")
+authenticated_probe_path = Path("scripts/probe-staging-authenticated-realtime.py")
+candidate_contract_path = Path("scripts/staging-gateway-candidate-contract.jq")
 
 documents = {
     "workflow": workflow_path.read_text(),
@@ -33,6 +35,8 @@ documents = {
     "endpoint": endpoint_path.read_text(),
     "API-key middleware": middleware_path.read_text(),
     "Spec transaction": transaction_path.read_text(),
+    "authenticated probe": authenticated_probe_path.read_text(),
+    "candidate contract": candidate_contract_path.read_text(),
 }
 
 
@@ -71,6 +75,12 @@ require(
         "add_env Services__Realtime__GuardianSecretFile /run/secrets/realtime_guardian_secret",
         "add_env Services__Realtime__MembershipTicketSigningKeyFile /run/secrets/realtime_membership_ticket_key",
         "add_env Services__Realtime__PublicSocketUrl wss://app.jeeb.fds-1.com/socket/websocket",
+        "add_env Services__Realtime__BaseUrl http://jeeb-staging-realtime-comunication-service:4000",
+        "add_env Services__ServiceOTP__BaseUrl http://jeeb-staging-one-time-password:8080",
+        "add_env ServiceOTPApi__BaseUrl http://jeeb-staging-one-time-password:8080",
+        "add_env Auth__Otp__Phone__AllowedRegion LB",
+        "add_env Auth__Otp__Phone__EnforceRegion true",
+        "add_env Auth__Otp__ApplicationId 0d51afe1-499f-4a29-a55a-36d2dd223b05",
         'add_rotated_secret "$probe_secret_name" staging_wss_probe_mint_key',
         'File:{Name:$target,UID:"65532",GID:"65532",Mode:256}',
         "add_env ASPNETCORE_ENVIRONMENT Staging",
@@ -88,6 +98,69 @@ require(
         'mv -f -- "$temporary" "$destination"',
     ),
 )
+require(
+    "authenticated probe",
+    (
+        'EXACT_SOCKET_URL = f"wss://{HOST}/socket/websocket"',
+        '"Upgrade: websocket\\r\\n"',
+        '"Sec-WebSocket-Version: 13\\r\\n"',
+        'response_head.decode("iso-8859-1")',
+        'hashlib.sha1((websocket_key + WS_GUID)',
+        '[reference, reference, topic, "phx_join", {"ticket": ticket}]',
+        'event == "phx_reply"',
+        'websocket = PhoenixWebSocket(EXACT_SOCKET_URL, token)',
+        '{"reason": "forbidden"}',
+        '{"reason": "not_in_membership"}',
+        '{"conversation_id": conversation_id, "role": "client"}',
+        'if actual["response"] != expected_response:',
+        'if replay_status != 409:',
+        'print("staging_authenticated_realtime_contract=ok")',
+    ),
+)
+authenticated_probe = documents["authenticated probe"]
+if authenticated_probe.count("PhoenixWebSocket(EXACT_SOCKET_URL, token)") != 1:
+    raise SystemExit("FAIL: authenticated probe must use exactly one WebSocket connection")
+single_connection = authenticated_probe.index(
+    "websocket = PhoenixWebSocket(EXACT_SOCKET_URL, token)"
+)
+cross_topic_denial = authenticated_probe.index(
+    '{"reason": "forbidden"}', single_connection
+)
+forged_ticket_denial = authenticated_probe.index(
+    '{"reason": "not_in_membership"}', cross_topic_denial
+)
+exact_join = authenticated_probe.index(
+    '{"conversation_id": conversation_id, "role": "client"}',
+    forged_ticket_denial,
+)
+if not single_connection < cross_topic_denial < forged_ticket_denial < exact_join:
+    raise SystemExit("FAIL: authenticated probe join sequence drifted")
+require(
+    "candidate contract",
+    (
+        'and ($networks == [{Target:$network_id}])',
+        'http://jeeb-staging-one-time-password:8080',
+        'http://jeeb-staging-realtime-comunication-service:4000',
+        '0d51afe1-499f-4a29-a55a-36d2dd223b05',
+        '$environment["auth__otp__phone__allowedregion"] == "LB"',
+        '$environment["auth__otp__phone__enforceregion"] == "true"',
+        '$environment["featureflags__useupstream__voice"] == "false"',
+        '.UpdateConfig.Order == "start-first"',
+        '.UpdateConfig.FailureAction == "rollback"',
+        '.RollbackConfig.Order == "start-first"',
+        '.RollbackConfig.FailureAction == "pause"',
+        'def canonical_identifier:',
+        'def raw_secret_config_key:',
+        'def embeds_inline_credential:',
+        'def forbidden_payment_gateway_reference:',
+        'contains("192.168.2.50")',
+        'unified[-_. ]*payment',
+        'payment[-_. ]*gateway',
+        '|upg)',
+        'contains("192.168.2.20:10037")',
+        'contains("192.168.2.20:10069")',
+    ),
+)
 
 
 def validate_bootstrap_workflow(text):
@@ -101,6 +174,12 @@ def validate_bootstrap_workflow(text):
         "add_env FeatureFlags__UseUpstream__Realtime false",
         "add_env FeatureFlags__UseUpstream__Voice false",
         "add_env FeatureFlags__UseUpstream__Otp true",
+        "add_env Services__ServiceOTP__BaseUrl http://jeeb-staging-one-time-password:8080",
+        "add_env ServiceOTPApi__BaseUrl http://jeeb-staging-one-time-password:8080",
+        "add_env Auth__Otp__Phone__AllowedRegion LB",
+        "add_env Auth__Otp__Phone__EnforceRegion true",
+        "add_env Auth__Otp__ApplicationId 0d51afe1-499f-4a29-a55a-36d2dd223b05",
+        "add_env Services__Realtime__BaseUrl http://jeeb-staging-realtime-comunication-service:4000",
         "add_env SuperLogin__OpenMode false",
         "add_env DemoUsers__Enabled false",
         "capture_remote_spec() {",
@@ -127,9 +206,6 @@ def validate_bootstrap_workflow(text):
         'FailureAction:"rollback",Order:"start-first"',
         'FailureAction:"pause",Order:"start-first"',
         '"${published}:${target}:ingress"',
-        ".UpdateConfig.Order == \"start-first\"",
-        ".UpdateConfig.FailureAction == \"rollback\"",
-        ".RollbackConfig.Order == \"start-first\"",
         "source scripts/staging-gateway-mutation-lock.sh",
         "source scripts/staging-gateway-spec-recovery.sh",
         "staging_gateway_external_gate_recover",
@@ -150,19 +226,16 @@ def validate_bootstrap_workflow(text):
         'tolower($1) == tolower(expected)',
         "matches == 1 && exact_value == 1",
         "verify_bootstrap_flags",
-        "probe_staging_realtime_descriptor",
-        'STAGING_REALTIME_PROBE_KEY_FILE="$probe_key_file" python3',
-        'PATH = "/internal/ops/staging/realtime-probe-descriptor"',
-        "if malformed_status != 400:",
-        "if forged_status != 403:",
-        "if status != 200:",
-        "if replay_status != 409:",
-        "if set(descriptor) != expected_fields:",
-        "if not 30 <= ttl <= 900:",
-        '"no-store" not in',
-        'descriptor["conversationId"] != conversation_id',
-        'descriptor["topic"] != "jeeb:chat:" + conversation_id',
-        'descriptor["socketUrl"] != "wss://app.jeeb.fds-1.com/socket/websocket"',
+        "probe_staging_authenticated_realtime",
+        "python3 scripts/probe-staging-authenticated-realtime.py",
+        "probe_staging_proxy_source_contract",
+        "x-jeeb-staging-observed-remote-ip",
+        "verify_staging_overlay_and_dns",
+        "jeeb-staging-one-time-password",
+        "jeeb-staging-realtime-comunication-service",
+        'select(.Options | has("encrypted"))',
+        'select(.Options.encrypted == "" or .Options.encrypted == "true")',
+        "-f scripts/staging-gateway-candidate-contract.jq",
     )
     missing = [marker for marker in required if marker not in text]
     if missing:
@@ -223,18 +296,20 @@ def validate_bootstrap_workflow(text):
         '"$candidate_spec" "$candidate_version" "$candidate_id" "$candidate_manifest"',
         forward,
     )
-    readiness = text.index("verify_candidate_readiness", manifest)
-    false_flags = text.index("          verify_bootstrap_flags\n", manifest)
-    verifier = text.index("scripts/verify-swarm-service-image.sh", false_flags)
+    verifier = text.index("scripts/verify-swarm-service-image.sh", manifest)
+    readiness = text.index("verify_candidate_readiness", verifier)
+    network = text.index("verify_staging_overlay_and_dns", readiness)
+    false_flags = text.index("          verify_bootstrap_flags\n", network)
     public_probe = text.index(
         "bash scripts/probe-staging-public-gateway-contract.sh", verifier
     )
-    descriptor_probe = text.index("probe_staging_realtime_descriptor", public_probe)
+    proxy_probe = text.index("probe_staging_proxy_source_contract", public_probe)
+    descriptor_probe = text.index("probe_staging_authenticated_realtime", proxy_probe)
     final_candidate = text.index(
         "verify_exact_candidate_after_checks", descriptor_probe
     )
     disarm = text.index("recovery_armed=false", final_candidate)
-    if not pre_update < candidate < candidate_validation < arm < forward < manifest < readiness < false_flags < verifier < public_probe < descriptor_probe < final_candidate < disarm:
+    if not pre_update < candidate < candidate_validation < arm < forward < manifest < verifier < readiness < network < false_flags < public_probe < proxy_probe < descriptor_probe < final_candidate < disarm:
         raise ValueError("candidate verification order drifted")
 
 
@@ -309,6 +384,46 @@ negative_controls = (
             "add_env FeatureFlags__UseUpstream__Voice true",
             1,
         ),
+    ),
+    (
+        "OTP overlay endpoint weakened to host port",
+        workflow.replace(
+            "add_env Services__ServiceOTP__BaseUrl http://jeeb-staging-one-time-password:8080",
+            "add_env Services__ServiceOTP__BaseUrl http://192.168.2.20:10037",
+            1,
+        ),
+    ),
+    (
+        "OTP compatibility endpoint removed",
+        workflow.replace(
+            "add_env ServiceOTPApi__BaseUrl http://jeeb-staging-one-time-password:8080",
+            "",
+            1,
+        ),
+    ),
+    (
+        "Lebanon phone enforcement disabled",
+        workflow.replace("add_env Auth__Otp__Phone__EnforceRegion true", "add_env Auth__Otp__Phone__EnforceRegion false", 1),
+    ),
+    (
+        "realtime overlay endpoint weakened to host port",
+        workflow.replace(
+            "add_env Services__Realtime__BaseUrl http://jeeb-staging-realtime-comunication-service:4000",
+            "add_env Services__Realtime__BaseUrl http://192.168.2.20:10069",
+            1,
+        ),
+    ),
+    (
+        "encrypted overlay proof removed",
+        workflow.replace('select(.Options | has("encrypted"))', "select(true)"),
+    ),
+    (
+        "authenticated WSS probe removed",
+        workflow.replace("python3 scripts/probe-staging-authenticated-realtime.py", ":", 1),
+    ),
+    (
+        "proxy source evidence probe removed",
+        workflow.replace("x-jeeb-staging-observed-remote-ip", "x-removed-evidence", 1),
     ),
     (
         "canonical ingress preflight weakened to host mode",
@@ -426,6 +541,9 @@ require(
         "StatusCodes.Status409Conflict",
         "StatusCodes.Status503ServiceUnavailable",
         'context.Response.Headers.CacheControl = "no-store"',
+        'ObservedRemoteIpHeader =',
+        '"X-Jeeb-Staging-Observed-Remote-Ip"',
+        "context.Connection.RemoteIpAddress?.ToString()",
     ),
 )
 require("API-key middleware", ("StagingRealtimeProbeEndpoint.Route",))
@@ -435,6 +553,9 @@ if contract["openapi"] != "3.1.0":
     raise SystemExit("FAIL: producer contract must remain OpenAPI 3.1.0")
 path = "/internal/ops/staging/realtime-probe-descriptor"
 operation = contract["paths"][path]["post"]
+success_headers = set(operation["responses"]["200"]["headers"])
+if success_headers != {"Cache-Control", "X-Jeeb-Staging-Observed-Remote-Ip"}:
+    raise SystemExit("FAIL: producer OpenAPI success evidence headers drifted")
 header_names = {parameter["name"] for parameter in operation["parameters"]}
 required_headers = {
     "X-Jeeb-Staging-Probe-Timestamp",
@@ -476,5 +597,6 @@ PY
 
 bash scripts/test-staging-gateway-mutation-lock.sh
 bash scripts/test-staging-gateway-spec-recovery.sh
+bash scripts/test-staging-gateway-candidate-contract.sh
 bash scripts/check-staging-gateway-phase-contracts.sh
 bash scripts/test-assert-distinct-staging-signing-keys.sh

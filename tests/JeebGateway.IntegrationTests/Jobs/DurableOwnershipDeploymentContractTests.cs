@@ -117,11 +117,16 @@ public sealed class DurableOwnershipDeploymentContractTests
             "WalletServiceApi__BaseUrl http://jeeb-staging-wallet-service:8080/");
         workflow.Should().Contain(
             "ServiceNotificationClient__BaseUrl http://jeeb-staging-notification:8000/");
-        workflow.Should().Contain("stale_gateway_network=jeeb-net");
         workflow.Should().Contain(
-            "map(select($stale_network_id == \"\" or .Target != $stale_network_id))");
+            ".TaskTemplate.Networks = [{Target:$network_id}]");
+        workflow.Should().Contain("select(.Options | has(\"encrypted\"))");
+        workflow.Should().Contain(
+            "select(.Options.encrypted == \"\" or .Options.encrypted == \"true\")");
+        workflow.Should().Contain("verify_staging_overlay_and_dns");
+        workflow.Should().Contain("docker exec \"$container_id\" getent hosts \"$dns_name\"");
 
         workflow.Should().NotContain("wallet_network");
+        workflow.Should().NotContain("stale_gateway_network=jeeb-net");
         workflow.Should().NotContain("http://wallet-service:8080");
         workflow.Should().NotContain("jeeb-staging-notification-service");
         workflow.Should().NotContain("WalletServiceApi__BaseUrl http://192.168.2.20");
@@ -169,17 +174,23 @@ public sealed class DurableOwnershipDeploymentContractTests
         var workflow = Workflow("jeeb-staging-deploy.yml");
 
         workflow.Should().Contain(
-            "add_env Services__ServiceOTP__BaseUrl http://192.168.2.20:10037");
+            "add_env Services__ServiceOTP__BaseUrl http://jeeb-staging-one-time-password:8080");
+        workflow.Should().Contain(
+            "add_env ServiceOTPApi__BaseUrl http://jeeb-staging-one-time-password:8080");
         workflow.Should().Contain(
             "add_env ComplimentServiceApi__BaseUrl http://192.168.2.20:10036");
         workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Otp true");
         workflow.Should().Contain(
             "add_env Auth__Otp__ApplicationId 0d51afe1-499f-4a29-a55a-36d2dd223b05");
+        workflow.Should().Contain("add_env Auth__Otp__Phone__AllowedRegion LB");
+        workflow.Should().Contain("add_env Auth__Otp__Phone__EnforceRegion true");
         workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Compliment false");
         workflow.Should().Contain("add_env CatalogServiceApi__BaseUrl ''");
 
         workflow.Should().NotContain(
             "add_env ServiceOTPApi__BaseUrl http://192.168.2.20:10037");
+        workflow.Should().NotContain(
+            "add_env Services__ServiceOTP__BaseUrl http://192.168.2.20:10037");
         workflow.Should().NotContain(
             "add_env Services__Compliment__BaseUrl http://192.168.2.20:10036");
         workflow.Should().Contain("ServiceOTPApi__BaseUrl");
@@ -482,6 +493,12 @@ public sealed class DurableOwnershipDeploymentContractTests
             "add_env Services__Realtime__MembershipTicketSigningKeyFile /run/secrets/realtime_membership_ticket_key");
         workflow.Should().Contain(
             "add_env Services__Realtime__PublicSocketUrl wss://app.jeeb.fds-1.com/socket/websocket");
+        workflow.Should().Contain(
+            "add_env Services__Realtime__BaseUrl http://jeeb-staging-realtime-comunication-service:4000");
+        workflow.Should().NotContain(
+            "add_env Services__Realtime__BaseUrl http://192.168.2.20:10069");
+        workflow.Should().Contain("python3 scripts/probe-staging-authenticated-realtime.py");
+        workflow.Should().Contain("probe_staging_proxy_source_contract");
         CountOccurrences(workflow, "scripts/verify-swarm-service-image.sh").Should().Be(2,
             "the blocked template retains exact candidate and recovered-incumbent verifiers");
 
@@ -495,6 +512,10 @@ public sealed class DurableOwnershipDeploymentContractTests
             "> \"$candidate_spec\"",
             preUpdate,
             StringComparison.Ordinal);
+        var candidateSemantics = workflow.IndexOf(
+            "-f scripts/staging-gateway-candidate-contract.jq",
+            candidate,
+            StringComparison.Ordinal);
         var arm = workflow.IndexOf(
             "recovery_armed=true",
             candidate,
@@ -503,22 +524,30 @@ public sealed class DurableOwnershipDeploymentContractTests
             "staging_gateway_forward_apply \\",
             arm,
             StringComparison.Ordinal);
-        var readiness = workflow.IndexOf(
-            "verify_candidate_readiness",
-            candidate,
-            StringComparison.Ordinal);
-        var flags = workflow.IndexOf("verify_bootstrap_flags", candidate, StringComparison.Ordinal);
         var imageVerifier = workflow.IndexOf(
             "scripts/verify-swarm-service-image.sh",
-            flags,
+            forward,
             StringComparison.Ordinal);
+        var readiness = workflow.IndexOf(
+            "verify_candidate_readiness",
+            imageVerifier,
+            StringComparison.Ordinal);
+        var network = workflow.IndexOf(
+            "verify_staging_overlay_and_dns",
+            readiness,
+            StringComparison.Ordinal);
+        var flags = workflow.IndexOf("verify_bootstrap_flags", network, StringComparison.Ordinal);
         var publicProbe = workflow.IndexOf(
             "bash scripts/probe-staging-public-gateway-contract.sh",
             imageVerifier,
             StringComparison.Ordinal);
-        var descriptor = workflow.IndexOf(
-            "probe_staging_realtime_descriptor",
+        var proxyProbe = workflow.IndexOf(
+            "probe_staging_proxy_source_contract",
             publicProbe,
+            StringComparison.Ordinal);
+        var descriptor = workflow.IndexOf(
+            "probe_staging_authenticated_realtime",
+            proxyProbe,
             StringComparison.Ordinal);
         var finalCandidate = workflow.IndexOf(
             "verify_exact_candidate_after_checks",
@@ -527,14 +556,18 @@ public sealed class DurableOwnershipDeploymentContractTests
 
         ownerBlock.Should().BeLessThan(firstExternalMutation);
         preUpdate.Should().BeLessThan(candidate);
+        candidate.Should().BeLessThan(candidateSemantics);
+        candidateSemantics.Should().BeLessThan(arm);
         candidate.Should().BeLessThan(arm);
         arm.Should().BeLessThan(forward);
-        forward.Should().BeLessThan(readiness);
-        candidate.Should().BeLessThan(readiness);
-        readiness.Should().BeLessThan(flags);
-        flags.Should().BeLessThan(imageVerifier);
-        imageVerifier.Should().BeLessThan(publicProbe);
-        publicProbe.Should().BeLessThan(descriptor);
+        forward.Should().BeLessThan(imageVerifier);
+        candidate.Should().BeLessThan(imageVerifier);
+        imageVerifier.Should().BeLessThan(readiness);
+        readiness.Should().BeLessThan(network);
+        network.Should().BeLessThan(flags);
+        flags.Should().BeLessThan(publicProbe);
+        publicProbe.Should().BeLessThan(proxyProbe);
+        proxyProbe.Should().BeLessThan(descriptor);
         descriptor.Should().BeLessThan(finalCandidate);
     }
 

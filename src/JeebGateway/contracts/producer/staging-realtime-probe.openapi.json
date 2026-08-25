@@ -52,6 +52,14 @@
                   "type": "string",
                   "enum": ["no-store"]
                 }
+              },
+              "X-Jeeb-Staging-Observed-Remote-Ip": {
+                "description": "RemoteIpAddress after the trusted forwarded-header middleware. Used only by the controlled staging ingress/XFF proof.",
+                "schema": {
+                  "type": "string",
+                  "minLength": 2,
+                  "maxLength": 45
+                }
               }
             },
             "content": {

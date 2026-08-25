@@ -6,7 +6,7 @@ Mode: **PREPARE ONLY — no live authority granted**
 
 ## Preparation
 
-- [x] Exact clean PR worktree selected at `b3d27996e90f8bfeef6e156221d9d01cbee13b02`.
+- [x] Approved local base selected at `5f3da8b2a2bffbfbc96243d80e21ca0f3a8df1e4`.
 - [x] Existing owner block retained before checkout, build, registry, SSH, secret,
       Swarm, and staging mutations.
 - [x] A1 and B configuration contracts written separately.
@@ -48,6 +48,10 @@ Mode: **PREPARE ONLY — no live authority granted**
 - [x] Realtime OFF.
 - [x] Voice OFF.
 - [x] OTP ON.
+- [x] Both OTP base-URL aliases use exact overlay DNS, never host port.
+- [x] Exact b05 application ID and Lebanese phone enforcement are candidate and
+      post-deploy invariants.
+- [x] Realtime base URL uses exact reviewed overlay DNS, never host port.
 - [x] Super Login open mode OFF.
 - [x] Demo users OFF.
 - [x] Descriptor remains Staging-only and file-key-backed.
@@ -55,7 +59,14 @@ Mode: **PREPARE ONLY — no live authority granted**
 - [ ] Incumbent and candidate images are immutable digests.
 - [ ] Existing-service-only and one-replica assertions pass.
 - [ ] Ingress/start-first/automatic-rollback preflight passes.
-- [ ] Runtime image, readiness, A1 flags, public, descriptor, and final-Spec gates pass.
+- [ ] Exact encrypted `jeeb-staging-net` ID, gateway/OTP/realtime memberships,
+      and reciprocal in-task DNS checks pass before CAS and after rollout.
+- [x] Complete candidate semantics are executable and occur before CAS.
+- [ ] Controlled local-ingress request proves the configured proxy processes XFF
+      by promoting the documentation-only sentinel into `RemoteIpAddress`.
+- [ ] Runtime image, readiness, A1 flags, public, authenticated WSS upgrade,
+      exact Phoenix join, forged-ticket rejection, cross-topic rejection, and
+      final-Spec gates pass.
 
 ## Recovery adversarial coverage
 
@@ -76,8 +87,8 @@ Mode: **PREPARE ONLY — no live authority granted**
 ## B activation (separate blocked change)
 
 - [x] B contract is separate from A1 and not exposed as an A1 input.
+- [x] Voice remains OFF in B for this campaign.
 - [ ] Real non-Super-Login SMS canary passes.
-- [ ] Real voice canary passes.
 - [ ] Real Firebase/chat canary passes.
 - [ ] Scoped public WSS canary passes.
 - [ ] Real delivery and KYC device paths pass.

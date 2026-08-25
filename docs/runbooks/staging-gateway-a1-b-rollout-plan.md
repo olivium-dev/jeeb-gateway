@@ -2,7 +2,7 @@
 
 Status: **PREPARE ONLY — LIVE MUTATION BLOCKED**
 
-PR head: `b3d27996e90f8bfeef6e156221d9d01cbee13b02`
+Approved local base: `5f3da8b2a2bffbfbc96243d80e21ca0f3a8df1e4`
 
 Target: `olivium-ephemerals` with global IPv4 `192.168.2.20`
 
@@ -35,6 +35,14 @@ Swarm mutation, nginx change, Cloudflare change, or staging request.
 8. The candidate is a complete desired `Spec`, derived from and hash-bound to
    the captured incumbent. Recovery is armed before that Spec is submitted to
    Docker Engine with the incumbent `Service.ID` and `Version.Index`.
+9. The exact `jeeb-staging-net` ID must resolve to an encrypted, attachable,
+   non-ingress Swarm overlay. Gateway, OTP, and realtime services must each be
+   attached to that ID, and their running tasks must resolve one another through
+   Swarm DNS before the CAS. The candidate attaches only that exact network ID.
+10. Candidate semantics are validated before CAS: both OTP configuration aliases
+    use `http://jeeb-staging-one-time-password:8080`, b05 is exact, Lebanese
+    region enforcement is active, realtime uses the reviewed overlay endpoint,
+    Voice remains off, and host-port OTP/realtime aliases are absent.
 
 ## Phase T — topology conversion handoff (dry run only)
 
@@ -67,9 +75,10 @@ The intended sequence is:
    the candidate contract before deployment.
 7. Remove the temporary bridge only after a final exact topology and public
    verification. Preserve one replica; this single-node fleet is not HA.
-8. Independently migrate LAN-address owner backends to their reviewed
-   `jeeb-staging-net` DNS names. Each backend needs its own readiness proof; no
-   `.50` address and no payment-gateway route is allowed.
+8. Independently migrate owner backends to their reviewed `jeeb-staging-net`
+   DNS names. This campaign requires OTP and realtime before A1; every other
+   backend keeps its own review/readiness handoff. No `.50` address and no
+   payment-gateway route is allowed.
 
 No concrete bridge image or nginx path is guessed here. The nginx/registry
 owners must supply the reviewed digest and active configuration path after a
@@ -86,14 +95,23 @@ the existing digest-pinned gateway with:
 | `FeatureFlags__UseUpstream__Realtime` | `false` |
 | `FeatureFlags__UseUpstream__Voice` | `false` |
 | `FeatureFlags__UseUpstream__Otp` | `true` |
+| `Services__ServiceOTP__BaseUrl` | `http://jeeb-staging-one-time-password:8080` |
+| `ServiceOTPApi__BaseUrl` | `http://jeeb-staging-one-time-password:8080` |
+| `Auth__Otp__ApplicationId` | b05 GUID `0d51afe1-499f-4a29-a55a-36d2dd223b05` |
+| OTP phone policy | `AllowedRegion=LB`, `EnforceRegion=true` |
+| `Services__Realtime__BaseUrl` | `http://jeeb-staging-realtime-comunication-service:4000` |
 | `SuperLogin__OpenMode` | `false` |
 | `DemoUsers__Enabled` | `false` |
 | staging realtime descriptor | enabled by Staging environment plus file-backed mint key |
 
-Required gates, in order: immutable runtime image, readiness, exact A1 flags,
-public gateway contract, private descriptor contract, then a final exact
-candidate Spec check. Any external-gate failure leaves the run failed even when
-exact-incumbent recovery succeeds.
+Required gates, in order: pre-CAS encrypted-overlay membership and in-task DNS,
+complete candidate semantic validation, immutable runtime image, readiness,
+post-CAS overlay/DNS, exact A1 flags, public gateway contract, controlled
+ingress/XFF source proof, authenticated WSS 101 upgrade, exact Phoenix topic
+join, forged-ticket rejection, cross-topic rejection, then a final exact
+candidate Spec check. Credentials stay memory-only and are never logged. Any
+external-gate failure leaves the run failed even when exact-incumbent recovery
+succeeds.
 
 ## Phase B — activation contract
 
@@ -104,15 +122,16 @@ Its reviewed configuration delta is limited to:
 |---|---|
 | `FeatureFlags__UseUpstream__Chat` | `true` |
 | `FeatureFlags__UseUpstream__Realtime` | `true` |
-| `FeatureFlags__UseUpstream__Voice` | `true` |
+| `FeatureFlags__UseUpstream__Voice` | `false` (campaign lock) |
 | `FeatureFlags__UseUpstream__Otp` | `true` |
 | `SuperLogin__OpenMode` | `false` |
 | `DemoUsers__Enabled` | `false` |
 | staging realtime descriptor | remains enabled and file-backed |
 
-B requires real, non-Super-Login SMS, voice, Firebase/chat, scoped WSS, delivery,
-and KYC canaries plus independent approval. Store upload remains outside this
-gateway runbook.
+B requires real, non-Super-Login SMS, Firebase/chat, scoped WSS, delivery, and
+KYC canaries plus independent approval. Voice remains off throughout this
+campaign and needs its own future activation decision. Store upload remains
+outside this gateway runbook.
 
 ## Recovery command contract
 
@@ -154,6 +173,7 @@ only incumbent/candidate SHA-256 hashes and fixed-enum forward/recovery results.
 ## Verification handoff
 
 The Principal Deploy Verification Engineer receives: captured incumbent
-manifest hash, candidate manifest hash, exact image proof, readiness result,
-A1/B flag result, public canary result, descriptor result, final full-Spec
-comparison, and recovery result when armed.
+manifest hash, candidate manifest hash, exact image proof, encrypted overlay ID,
+service membership and in-task DNS result, readiness result, A1/B flag result,
+public canary result, ingress/XFF source proof, authenticated WSS positive and
+negative join results, final full-Spec comparison, and recovery result when armed.
