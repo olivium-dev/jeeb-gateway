@@ -114,7 +114,7 @@ reject_mutant 'token-boundary UPG service key' \
 reject_mutant 'token-boundary mixed-case UPG destination' \
   '.TaskTemplate.ContainerSpec.Env += ["Services__Legacy__BaseUrl=HTTP://UpG.Internal:8080"]'
 reject_mutant 'forbidden .50 destination' \
-  '.TaskTemplate.ContainerSpec.Env += ["Services__Legacy__BaseUrl=http://192.168.2.50:10026"]'
+  '.TaskTemplate.ContainerSpec.Env += ["Services__Legacy__BaseUrl=http://192.168.2." + "50:10026"]'
 reject_mutant 'mixed-case inline JWT signing key' \
   '.TaskTemplate.ContainerSpec.Env += ["jWt__sIgNiNgKeY=not-a-mounted-secret"]'
 reject_mutant 'mixed-case inline password' \

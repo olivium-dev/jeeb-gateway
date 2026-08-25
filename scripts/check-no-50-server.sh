@@ -39,6 +39,12 @@ def in_comment(path: str, line: str, idx: int) -> bool:
     return False
 
 
+def is_violation(path: str, line: str) -> bool:
+    """Use the production classifier for both self-tests and scanned hits."""
+    index = line.find(PATTERN)
+    return index >= 0 and not in_comment(path, line, index)
+
+
 # Guard the classifier itself: URL schemes must never be mistaken for C# comments.
 canaries = (
     ("deploy.yml", f"base_url: http://{PATTERN}:10040", False),
@@ -50,9 +56,14 @@ canaries = (
     ("appsettings.json", f"\"_comment\": \"historical {PATTERN}\"", True),
 )
 for path, line, expected in canaries:
-    actual = in_comment(path, line, line.index(PATTERN))
-    if actual != expected:
+    actual_comment = in_comment(path, line, line.index(PATTERN))
+    if actual_comment != expected:
         raise SystemExit(f"FAIL: .50 classifier self-test failed for {path}: {line}")
+    actual_violation = is_violation(path, line)
+    if actual_violation != (not expected):
+        raise SystemExit(
+            f"FAIL: .50 violation self-test failed for {path}: {line}"
+        )
 
 violations = []
 comments = 0
@@ -63,13 +74,12 @@ for raw in sys.stdin.read().splitlines():
         path, line_number, content = raw.split(":", 2)
     except ValueError:
         continue
-    index = content.find(PATTERN)
-    if index < 0:
+    if PATTERN not in content:
         continue
-    if in_comment(path, content, index):
-        comments += 1
-    else:
+    if is_violation(path, content):
         violations.append((path, line_number, content.strip()))
+    else:
+        comments += 1
 
 if violations:
     print(

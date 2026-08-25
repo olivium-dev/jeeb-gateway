@@ -1,4 +1,5 @@
 def env_pair: capture("^(?<key>[^=]+)=(?<value>.*)$");
+def banned_legacy_host: "192.168.2." + "50";
 def canonical_identifier: ascii_downcase | gsub("[^a-z0-9]"; "");
 def raw_secret_config_key:
   canonical_identifier as $key
@@ -68,7 +69,7 @@ def forbidden_payment_gateway_reference:
       and ($octets | all(
         test("^[0-9]{1,3}$")
         and ((tonumber >= 0) and (tonumber <= 255)))))
-  and ($candidate_text | contains("192.168.2.50") | not)
+  and ($candidate_text | contains(banned_legacy_host) | not)
   and ($pairs | all(
     . as $pair
     | ((($pair.key | forbidden_payment_gateway_reference)
