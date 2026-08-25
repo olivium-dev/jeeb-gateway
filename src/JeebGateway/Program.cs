@@ -1511,6 +1511,12 @@ builder.Services.AddSingleton<JeebGateway.Financials.Holds.IHoldIntentStore,
     JeebGateway.Financials.Holds.HoldIntentStore>();
 builder.Services.AddSingleton<JeebGateway.Financials.Holds.IHoldManager,
     JeebGateway.Financials.Holds.HoldManager>();
+// OD-P1 (W5) — post-capture cancels credit the captured fee back. Keyed on the wallet ledger, not
+// on CommissionCollection:Enabled, so with the flag off it issues no wallet mutation at all.
+builder.Services.AddSingleton<JeebGateway.Financials.Refunds.IRefundIntentStore,
+    JeebGateway.Financials.Refunds.RefundIntentStore>();
+builder.Services.AddSingleton<JeebGateway.Financials.Refunds.IFeeRefunder,
+    JeebGateway.Financials.Refunds.FeeRefunder>();
 // TimeProvider is already registered as a singleton further down (JEB-1502); the sweeper reuses
 // that one so its interval is wall-clock-free in tests. Do NOT register a second one here.
 var holdSweeperState = JeebGateway.StateService.StateServiceOptionsFactory

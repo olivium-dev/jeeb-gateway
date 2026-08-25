@@ -68,6 +68,25 @@ public readonly record struct HoldHeader(Guid TxId, string? Status, decimal Amou
     }
 }
 
+/// <summary>One wallet-service transaction header under a fee external reference, with the fields the
+/// refund decision reads: its tag, status, summed leg amount and the first leg's two wallets.</summary>
+public readonly record struct FeeLedgerEntry(
+    Guid TxId, string? Tag, string? Status, decimal Amount, Guid SourceWalletId, Guid DestinationWalletId)
+{
+    /// <summary>THE executed predicate for the refund decision. Numeric or name-shaped; an ABSENT or
+    /// unclassifiable status is NOT executed, so an unreadable header never triggers a credit.</summary>
+    public bool IsExecuted
+    {
+        get
+        {
+            var value = Status?.Trim();
+            if (string.IsNullOrEmpty(value)) return false;
+            return string.Equals(value, "executed", StringComparison.OrdinalIgnoreCase)
+                   || string.Equals(value, "0", StringComparison.Ordinal);
+        }
+    }
+}
+
 /// <summary>
 /// O1 — the narrow wallet-service surface the commission debit needs. Hand-rolled because the
 /// generated <c>ServiceWalletClient</c> carries no <c>Idempotency-Key</c> parameter, and that header
@@ -108,6 +127,14 @@ public interface IWalletCommissionDebitClient
         // Fails loud rather than reporting a fabricated (and therefore unreleasable) empty hold set.
         => throw new NotSupportedException(
             $"{GetType().Name} does not implement ListByExternalReferenceAsync.");
+
+    /// <summary>The FULL header set under one external reference with tag + both wallet ids — the
+    /// read the refund decision is keyed on; empty when the reference is unknown.</summary>
+    Task<IReadOnlyList<FeeLedgerEntry>> ListFeeLedgerByExternalReferenceAsync(
+        string externalReference, CancellationToken ct)
+        // Fails loud rather than reporting a fabricated (and therefore un-refundable) empty ledger.
+        => throw new NotSupportedException(
+            $"{GetType().Name} does not implement ListFeeLedgerByExternalReferenceAsync.");
 
     /// <summary>POST Transaction/{id}/execute. Idempotent upstream on the transaction id.</summary>
     Task ExecuteAsync(Guid transactionId, CancellationToken ct);
@@ -222,6 +249,45 @@ public sealed class WalletCommissionDebitClient : IWalletCommissionDebitClient
         }
 
         return headers;
+    }
+
+    public async Task<IReadOnlyList<FeeLedgerEntry>> ListFeeLedgerByExternalReferenceAsync(
+        string externalReference, CancellationToken ct)
+    {
+        var found = await GetAsync<List<TransactionWire>>(
+            $"Transaction/by-external-reference/{Uri.EscapeDataString(externalReference)}", ct);
+        if (found is null || found.Count == 0) return Array.Empty<FeeLedgerEntry>();
+
+        var entries = new List<FeeLedgerEntry>(found.Count);
+        foreach (var transaction in found)
+        {
+            var header = transaction?.TransactionHeader;
+            if (header is null) continue;
+
+            var amount = 0m;
+            var source = Guid.Empty;
+            var destination = Guid.Empty;
+            var seenLeg = false;
+            var legs = transaction.TransactionDetails;
+            if (legs is not null)
+            {
+                foreach (var leg in legs)
+                {
+                    if (leg is null) continue;
+                    amount += leg.Amount;
+                    // Capture and refund are single-leg: the first leg carries the routing to swap.
+                    if (seenLeg) continue;
+                    source = leg.SourceWalletId;
+                    destination = leg.DestinationWalletId;
+                    seenLeg = true;
+                }
+            }
+
+            entries.Add(new FeeLedgerEntry(
+                header.TxId, header.Tag, DescribeStatus(header.Status), amount, source, destination));
+        }
+
+        return entries;
     }
 
     public async Task ExecuteAsync(Guid transactionId, CancellationToken ct)
@@ -377,11 +443,19 @@ public sealed class WalletCommissionDebitClient : IWalletCommissionDebitClient
 
         /// <summary>Numeric on the wire; nullable so a body without it deserializes as before.</summary>
         public JsonElement? Status { get; set; }
+
+        /// <summary>The caller-supplied tag; nullable so a body without it deserializes as before.</summary>
+        public string? Tag { get; set; }
     }
 
     private sealed class TransactionLegWire
     {
         public decimal Amount { get; set; }
+
+        /// <summary>Leg routing, read only to be swapped for a compensating credit.</summary>
+        public Guid SourceWalletId { get; set; }
+
+        public Guid DestinationWalletId { get; set; }
     }
 
     private sealed class HolderWalletsWire

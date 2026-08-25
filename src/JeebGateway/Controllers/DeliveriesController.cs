@@ -104,6 +104,10 @@ public class DeliveriesController : ControllerBase
     private readonly IOptions<GatewayPublicOptions> _publicOptions;
     private readonly TimeProvider _clock;
     private readonly ILogger<DeliveriesController> _log;
+    // W5/OD-P1: a bare status PATCH to Cancelled is a terminal cancel route, so it owes the same
+    // defensive hold release + captured-fee refund the CancellationService seams do.
+    private readonly JeebGateway.Financials.Holds.IHoldManager? _holds;
+    private readonly JeebGateway.Financials.Refunds.IFeeRefunder? _refunder;
 
     // T-BE-019 (JEB-55): external-OTP attempt + lockout TTLs. 15 min on
     // both: long enough to cover the handover window, short enough that
@@ -242,7 +246,9 @@ public class DeliveriesController : ControllerBase
         IOptions<GatewayPublicOptions> publicOptions,
         TimeProvider clock,
         ILogger<DeliveriesController> log,
-        FailOpenEscalationMirror? escalationMirror = null)
+        FailOpenEscalationMirror? escalationMirror = null,
+        JeebGateway.Financials.Holds.IHoldManager? holds = null,
+        JeebGateway.Financials.Refunds.IFeeRefunder? refunder = null)
     {
         _store = store;
         _offers = offers;
@@ -266,6 +272,8 @@ public class DeliveriesController : ControllerBase
         _clock = clock;
         _log = log;
         _escalationMirror = escalationMirror ?? (IEscalationMirror)new NoOpEscalationMirror();
+        _holds = holds;
+        _refunder = refunder;
     }
 
     /// <summary>
@@ -940,6 +948,45 @@ public class DeliveriesController : ControllerBase
                 _log.LogWarning(ex,
                     "Canonical transition mirror failed for delivery {DeliveryId} (status {Status}); upstream write is authoritative.",
                     deliveryId, upstream.Status);
+            }
+
+            // W5/OD-P1: the cancel is committed upstream, so both wallet calls are fire-and-log on a
+            // DETACHED token — a client disconnect must not strand a release or a captured fee.
+            if (string.Equals(
+                    DeliveryStatusAlias.ToCanonical(upstream.Status),
+                    CanonicalDeliveryStatus.Cancelled,
+                    StringComparison.Ordinal))
+            {
+                if (_holds is not null)
+                {
+                    try
+                    {
+                        await _holds.ReleaseForRequestAsync(
+                            deliveryId, "request-cancelled", CancellationToken.None);
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.LogWarning(ex,
+                            "Delivery {DeliveryId} was cancelled but releasing its offer holds failed; "
+                            + "the hold sweeper will retry.", deliveryId);
+                    }
+                }
+
+                if (_refunder is not null)
+                {
+                    try
+                    {
+                        await _refunder.RefundOnCancelAsync(
+                            deliveryId, preTransitionRow?.JeeberId, $"status-patch:{partySource}",
+                            CancellationToken.None);
+                    }
+                    catch (Exception ex)
+                    {
+                        _log.LogWarning(ex,
+                            "Delivery {DeliveryId} was cancelled but refunding its captured fee failed; "
+                            + "the refund sweeper will retry.", deliveryId);
+                    }
+                }
             }
 
             // JEBV4-306: on the canonical transition INTO AtDoor, durably snapshot the

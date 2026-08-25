@@ -1,11 +1,15 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
+using FluentAssertions;
+using FluentAssertions.Collections;
 using JeebGateway.Financials;
+using JeebGateway.Financials.Refunds;
 using JeebGateway.service.ServiceWallet;
 using SwServiceWalletClient = JeebGateway.service.ServiceWallet.ServiceWalletClient;
 
@@ -23,6 +27,12 @@ public sealed class FakeWalletHoldEngine : IWalletCommissionDebitClient
     public const string StatusExecuted = "Executed";
     public const string StatusAborted = "Aborted";
 
+    /// <summary>Frozen fee tags: the capture's <c>CommissionCollectionOptions.Tag</c> default and
+    /// the W5 CONTRACT §4 refund tag.</summary>
+    public const string CaptureTag = "platform-fee";
+
+    public const string RefundTag = "platform-fee-refund";
+
     /// <summary>Fixed platform counterparty, mirroring <c>ResolveSystemWalletAsync</c>'s
     /// <c>__SYSTEM__</c> holder wallet.</summary>
     public static readonly Guid SystemWalletId = new("5f57e1ec-0000-4000-8000-00000000fee5");
@@ -38,13 +48,19 @@ public sealed class FakeWalletHoldEngine : IWalletCommissionDebitClient
     /// with <see cref="SetBalance"/>. Generous by default so unrelated guards never trip.</summary>
     public decimal Balance { get; set; } = 1_000_000m;
 
-    /// <summary>Flag-OFF pin counter: MUST stay 0 while <c>CommissionCollection:Enabled=false</c>
-    /// (DECISION invariant I3).</summary>
-    public int ExecuteCalls { get; private set; }
+    /// <summary>Flag-OFF pin log: MUST stay empty while <c>CommissionCollection:Enabled=false</c>
+    /// (DECISION invariant I3). <c>Should().Be(n)</c> asserts the call COUNT, as it always did.</summary>
+    public CallLog<Guid> ExecuteCalls { get; } = new();
 
-    public int AbortCalls { get; private set; }
+    public CallLog<Guid> AbortCalls { get; } = new();
 
-    public int InitiateCalls { get; private set; }
+    /// <summary>Every initiate attempt, refused ones included, with the frozen body fields the
+    /// W5 refund-naming assertions read.</summary>
+    public CallLog<(Guid Source, Guid Destination, decimal Amount, string Tag, string IdempotencyKey, string ExternalReference)> InitiateCalls { get; } = new();
+
+    /// <summary>initiate+execute+abort — the single "did the gateway touch money at all" number
+    /// the flag-off money-neutrality pins assert is 0.</summary>
+    public int MutationCallCount => InitiateCalls.Count + ExecuteCalls.Count + AbortCalls.Count;
 
     /// <summary>Drives the "no fee wallet resolvable" branch, which the hold placer maps to
     /// E6 503 wallet-service-unavailable.</summary>
@@ -52,13 +68,22 @@ public sealed class FakeWalletHoldEngine : IWalletCommissionDebitClient
 
     public bool SystemWalletUnresolvable { get; set; }
 
-    /// <summary>One-shot fault for the NEXT initiate, so 402-vs-503 mapping is injectable
-    /// without a network or a clock. Cleared as it fires.</summary>
-    public InitiateFault? FailNextInitiate { get; set; }
+    /// <summary>One-shot fault for the NEXT initiate, so 402-vs-503 mapping is injectable without
+    /// a network or a clock; takes an <see cref="InitiateFault"/> or the bare <c>true</c> sugar.</summary>
+    public InitiateFaultScript? FailNextInitiate { get; set; }
+
+    /// <summary>Per-key failure scripting: invoked with the idempotency key BEFORE the call is
+    /// processed, so throwing from it injects a fault on exactly the transaction under test.</summary>
+    public Action<string>? OnInitiate { get; set; }
 
     /// <summary>Frozen external reference (DECISION Naming): one ref per offer, shared by its
     /// base + delta holds.</summary>
     public static string OfferReference(string offerId) => $"jeeb:offer:{offerId}";
+
+    /// <summary>The capture/refund reference pair: one ref per delivery, straight off the
+    /// production helper so a test can never drift from the frozen shape.</summary>
+    public static string DeliveryReference(string requestId)
+        => WalletCommissionCollector.ExternalReferenceFor(requestId);
 
     /// <summary>Stable per-holder fee wallet id; the same Guid for the whole engine lifetime so
     /// a hold placed under it nets out of that holder's later reads.</summary>
@@ -159,12 +184,21 @@ public sealed class FakeWalletHoldEngine : IWalletCommissionDebitClient
     {
         lock (_gate)
         {
-            InitiateCalls++;
+            InitiateCalls.Add((sourceWalletId, destinationWalletId, amount, tag, idempotencyKey, externalReference));
 
-            if (FailNextInitiate is { } fault)
+            try
+            {
+                OnInitiate?.Invoke(idempotencyKey);
+            }
+            catch (Exception scripted)
+            {
+                return Task.FromException<Guid>(scripted);
+            }
+
+            if (FailNextInitiate is { Armed: true } script)
             {
                 FailNextInitiate = null;
-                return Task.FromException<Guid>(FaultFor(fault));
+                return Task.FromException<Guid>(FaultFor(script.Fault));
             }
 
             // Idempotent replay is fingerprint-scoped upstream: same key + same legs replays the
@@ -231,11 +265,80 @@ public sealed class FakeWalletHoldEngine : IWalletCommissionDebitClient
         }
     }
 
+    /// <summary>W5 §3 — the richer ledger read the refunder decides on: Tag, Status and both legs
+    /// per header, newest-first; empty for an unknown reference (upstream 404).</summary>
+    public Task<IReadOnlyList<FeeLedgerEntry>> ListFeeLedgerByExternalReferenceAsync(
+        string externalReference, CancellationToken ct)
+    {
+        lock (_gate)
+        {
+            IReadOnlyList<FeeLedgerEntry> rows = _entries
+                .Where(e => Matches(e, externalReference))
+                .Reverse()
+                .Select(e => new FeeLedgerEntry(
+                    e.TxId, e.Tag, e.Status, e.Amount, e.SourceWalletId, e.DestinationWalletId))
+                .ToArray();
+            return Task.FromResult(rows);
+        }
+    }
+
+    /// <summary>Arranges the POST-CAPTURE world: one EXECUTED platform-fee debit feeWallet→system
+    /// under <c>delivery:{requestId}</c>, without counting as a mutation call the pins read.</summary>
+    public Guid SeedExecutedCapture(string requestId, decimal amount, Guid feeWalletId)
+    {
+        lock (_gate)
+        {
+            var entry = new HoldEntry
+            {
+                TxId = Guid.NewGuid(),
+                HolderId = OwnerOfLocked(feeWalletId),
+                SourceWalletId = feeWalletId,
+                DestinationWalletId = SystemWalletId,
+                Amount = amount,
+                Tag = CaptureTag,
+                Notes = "seeded capture",
+                IdempotencyKey = WalletCommissionCollector.IdempotencyKeyFor(requestId),
+                ExternalReference = WalletCommissionCollector.ExternalReferenceFor(requestId),
+                IsAdditionalFees = true,
+                Status = StatusExecuted,
+            };
+            _entries.Add(entry);
+            _byIdempotencyKey[entry.IdempotencyKey] = entry.TxId;
+            return entry.TxId;
+        }
+    }
+
+    /// <summary>Arranges the ALREADY-REFUNDED world: one EXECUTED platform-fee-refund credit
+    /// system→feeWallet under the same delivery ref, again without counting as a mutation call.</summary>
+    public Guid SeedExecutedRefund(string requestId, decimal amount, Guid feeWalletId)
+    {
+        lock (_gate)
+        {
+            var entry = new HoldEntry
+            {
+                TxId = Guid.NewGuid(),
+                HolderId = OwnerOfLocked(feeWalletId),
+                SourceWalletId = SystemWalletId,
+                DestinationWalletId = feeWalletId,
+                Amount = amount,
+                Tag = RefundTag,
+                Notes = "seeded refund",
+                IdempotencyKey = FeeRefunder.IdempotencyKeyFor(requestId),
+                ExternalReference = WalletCommissionCollector.ExternalReferenceFor(requestId),
+                IsAdditionalFees = false,
+                Status = StatusExecuted,
+            };
+            _entries.Add(entry);
+            _byIdempotencyKey[entry.IdempotencyKey] = entry.TxId;
+            return entry.TxId;
+        }
+    }
+
     public Task ExecuteAsync(Guid transactionId, CancellationToken ct)
     {
         lock (_gate)
         {
-            ExecuteCalls++;
+            ExecuteCalls.Add(transactionId);
             var entry = _entries.FirstOrDefault(e => e.TxId == transactionId);
             if (entry is null)
             {
@@ -259,7 +362,7 @@ public sealed class FakeWalletHoldEngine : IWalletCommissionDebitClient
     {
         lock (_gate)
         {
-            AbortCalls++;
+            AbortCalls.Add(transactionId);
             var entry = _entries.FirstOrDefault(e => e.TxId == transactionId);
             // Unknown / already aborted: releasing twice is a success upstream, never an error.
             if (entry is null || entry.Status == StatusAborted) return Task.CompletedTask;
@@ -331,6 +434,16 @@ public sealed class FakeWalletHoldEngine : IWalletCommissionDebitClient
         IdempotencyConflict,
         ServerError,
         Transport,
+    }
+
+    /// <summary>What <see cref="FailNextInitiate"/> holds: an explicit fault, or the bare
+    /// <c>true</c>/<c>false</c> sugar which arms/disarms the generic server-error leg.</summary>
+    public readonly record struct InitiateFaultScript(bool Armed, InitiateFault Fault)
+    {
+        public static implicit operator InitiateFaultScript(InitiateFault fault) => new(true, fault);
+
+        public static implicit operator InitiateFaultScript(bool armed)
+            => new(armed, InitiateFault.ServerError);
     }
 
     /// <summary>Assertion projection of one wallet-service transaction header; Tag and
@@ -439,5 +552,61 @@ public sealed class FakeWalletHoldEngine : IWalletCommissionDebitClient
             if (_disarmed) return;
             if (!_barrier.SignalAndWait(GateTimeoutMs)) _disarmed = true;
         }
+    }
+}
+
+/// <summary>A wallet-call log that answers BOTH shapes the suites need: the W3/W4 count pin
+/// (<c>Should().Be(n)</c>) and the W5 argument list, so no existing call site changed.</summary>
+public sealed class CallLog<T> : IReadOnlyList<T>
+{
+    private readonly object _gate = new();
+    private readonly List<T> _items = new();
+
+    public int Count
+    {
+        get { lock (_gate) { return _items.Count; } }
+    }
+
+    public T this[int index]
+    {
+        get { lock (_gate) { return _items[index]; } }
+    }
+
+    /// <summary>Instance <c>Should()</c>: it binds ahead of the FluentAssertions extension, which
+    /// is what lets one member carry the count assertion and the collection assertions.</summary>
+    public CallLogAssertions<T> Should() => new(this);
+
+    public IEnumerator<T> GetEnumerator() => Snapshot().GetEnumerator();
+
+    IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+
+    internal void Add(T item)
+    {
+        lock (_gate) { _items.Add(item); }
+    }
+
+    // Enumeration snapshots under the gate: the concurrency suite writes from many threads.
+    private List<T> Snapshot()
+    {
+        lock (_gate) { return new List<T>(_items); }
+    }
+}
+
+/// <summary>The full FluentAssertions collection surface plus the legacy counter form
+/// <c>Be(n)</c>, so widening the int counters into logs is source-compatible.</summary>
+public sealed class CallLogAssertions<T>
+    : GenericCollectionAssertions<IEnumerable<T>, T, CallLogAssertions<T>>
+{
+    internal CallLogAssertions(IEnumerable<T> subject)
+        : base(subject)
+    {
+    }
+
+    /// <summary>Counter form: how many calls were logged.</summary>
+    public AndConstraint<CallLogAssertions<T>> Be(
+        int expected, string because = "", params object[] becauseArgs)
+    {
+        Subject.Count().Should().Be(expected, because, becauseArgs);
+        return new AndConstraint<CallLogAssertions<T>>(this);
     }
 }

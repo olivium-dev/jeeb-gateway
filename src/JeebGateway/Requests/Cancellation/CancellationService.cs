@@ -165,6 +165,7 @@ public sealed class CancellationService : ICancellationService
     private readonly CancellationPolicyOptions _policy;
     private readonly ILogger<CancellationService> _log;
     private readonly JeebGateway.Financials.Holds.IHoldManager? _holds;
+    private readonly JeebGateway.Financials.Refunds.IFeeRefunder? _refunder;
 
     public CancellationService(
         IRequestsStore store,
@@ -172,7 +173,8 @@ public sealed class CancellationService : ICancellationService
         TimeProvider clock,
         IOptions<CancellationPolicyOptions> policy,
         ILogger<CancellationService>? logger = null,
-        JeebGateway.Financials.Holds.IHoldManager? holds = null)
+        JeebGateway.Financials.Holds.IHoldManager? holds = null,
+        JeebGateway.Financials.Refunds.IFeeRefunder? refunder = null)
     {
         _store = store;
         _restrictions = restrictions;
@@ -180,25 +182,49 @@ public sealed class CancellationService : ICancellationService
         _policy = policy.Value;
         _log = logger ?? NullLogger<CancellationService>.Instance;
         _holds = holds;
+        _refunder = refunder;
     }
 
-    /// <summary>DECISION Op 3 "request cancelled pre-accept" — the CANONICAL cancel path, so every
-    /// bidder's hold is freed here rather than stranded until the sweeper's orphan grace.</summary>
-    private async Task ReleaseBidderHoldsAsync(string requestId, CancellationToken ct)
+    /// <summary>DECISION Op 3 — frees every bidder's hold on the CANONICAL cancel path. Runs on a
+    /// DETACHED token: the commit already happened, so a caller abort must not cut it short (W5-F1).</summary>
+    private async Task ReleaseBidderHoldsAsync(string requestId)
     {
         if (_holds is null) return;
 
         try
         {
-            await _holds.ReleaseForRequestAsync(requestId, "request-cancelled", ct);
+            await _holds.ReleaseForRequestAsync(
+                requestId, "request-cancelled", CancellationToken.None);
         }
-        catch (Exception ex) when (!ct.IsCancellationRequested)
+        catch (Exception ex)
         {
             // The cancel is already durable: a failed abort keeps the intent record and the
             // hold sweeper retries it, but it must never fail the client's cancel.
             _log.LogWarning(ex,
                 "Request {RequestId} was cancelled but releasing its offer holds failed; "
                 + "the hold sweeper will retry.", requestId);
+        }
+    }
+
+    /// <summary>OD-P1/W5 — refunds the captured fee on a committed cancel. Fire-and-log on a DETACHED
+    /// token: a client disconnect must never strand a captured fee with no intent and no trace.</summary>
+    private async Task RefundOnCancelSafeAsync(
+        string requestId, string? jeeberId, string cancelledBy)
+    {
+        if (_refunder is null) return;
+
+        try
+        {
+            await _refunder.RefundOnCancelAsync(
+                requestId, jeeberId, cancelledBy, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            // The cancel is already durable: a failed refund leaves the durable intent and the
+            // sweeper retries it, but it must never fail the user's cancel.
+            _log.LogWarning(ex,
+                "Request {RequestId} was cancelled but refunding its captured fee failed; "
+                + "the refund sweeper will retry.", requestId);
         }
     }
 
@@ -290,6 +316,11 @@ public sealed class CancellationService : ICancellationService
 
             ObserveRetainedCommission(storeResult.Request, "jeeber");
 
+            // The release is DEFENSIVE — it drains a winner hold left live by a failed accept-time
+            // release; abuse deterrence stays the 3+/7d restriction above, never fee retention.
+            await ReleaseBidderHoldsAsync(deliveryId);
+            await RefundOnCancelSafeAsync(deliveryId, storeResult.Request.JeeberId, "jeeber");
+
             return new CancellationResult(
                 CancellationOutcome.CancelledByJeeber,
                 storeResult.Request,
@@ -327,7 +358,8 @@ public sealed class CancellationService : ICancellationService
                 }
 
                 ObserveRetainedCommission(storeResult.Request, "client");
-                await ReleaseBidderHoldsAsync(deliveryId, ct);
+                await ReleaseBidderHoldsAsync(deliveryId);
+                await RefundOnCancelSafeAsync(deliveryId, storeResult.Request.JeeberId, "client");
 
                 return new CancellationResult(
                     CancellationOutcome.CancelledImmediately,
@@ -422,7 +454,15 @@ public sealed class CancellationService : ICancellationService
                 AdminCancellationDecisionOutcome.NotPending, existing, existing.Status);
         }
 
-        if (approve) ObserveRetainedCommission(result.Request, "admin");
+        if (approve)
+        {
+            ObserveRetainedCommission(result.Request, "admin");
+
+            // Approving the park is where the post-pickup cancel actually turns terminal, so the
+            // (defensive) release and the refund belong here, not on the P2 parking write.
+            await ReleaseBidderHoldsAsync(deliveryId);
+            await RefundOnCancelSafeAsync(deliveryId, result.Request?.JeeberId, "admin");
+        }
 
         return new AdminCancellationDecisionResult(
             approve ? AdminCancellationDecisionOutcome.Approved : AdminCancellationDecisionOutcome.Rejected,

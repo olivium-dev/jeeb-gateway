@@ -1,6 +1,16 @@
 # ADR-0011 — O1: collecting the platform commission
 
-Status: accepted, **AMENDED 2026-08-16 by the owner** · Supersedes nothing · Raised from OA-30
+Status: accepted, **AMENDED 2026-08-16 by the owner**, **PARTLY SUPERSEDED 2026-08-25** ·
+Supersedes nothing · Raised from OA-30
+
+> **SUPERSESSION — the no-refund stance is dead.** Owner decision **OD-P1 `p1-refund-first`
+> (2026-08-24)** — *"refund path before fees flip on"* — reverses it:
+> a cancelled delivery now gives the platform fee back (hold release pre-capture, compensating
+> credit post-capture). See **[ADR-0012](0012-w5-fee-refund-on-cancel.md)**, which supersedes
+> *"The open question this creates: cancellation"* and the *"does not refund anything, ever"* bullet
+> below. Everything else in this ADR — the debit at ACCEPT, `accept:{requestId}` exactly-once, the
+> settle-time link, the off-by-default gate, the COD source-side deny — is unchanged and still
+> governs. `CommissionCollection:Enabled` is still `false`.
 
 > **AMENDMENT — the debit moved from completion to ACCEPT.** The owner reversed the implementer's
 > timing ruling the same day:
@@ -187,7 +197,10 @@ Worth the owner knowing when deciding: the frozen delivery state machine already
 - It does not backfill the 81 uncharged deliveries. 80 of them have no settlement row at all. That is
   owner-gated and untouched.
 - It does not move any real money: nothing was deployed and the gate is off.
-- It does not refund anything, ever. See the open question above.
+- ~~It does not refund anything, ever. See the open question above.~~ **SUPERSEDED by
+  [ADR-0012](0012-w5-fee-refund-on-cancel.md) (OD-P1, 2026-08-24):** a cancelled delivery now
+  refunds — hold release pre-capture, compensating credit (`refund:<requestId>`,
+  `tag: platform-fee-refund`) post-capture. Still nothing moves while the gate is off.
 - It does not make the mobile offer-composer copy true. *"$X is reserved from your wallet now ·
   charged only if you win · released if you're not picked"* and `fundingReserveBody` describe
   reserve-at-offer, which this ADR rejects. `JeebWalletProjection.ReservedNow` stays hard-coded `0`

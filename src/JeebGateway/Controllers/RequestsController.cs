@@ -47,6 +47,8 @@ public class RequestsController : ControllerBase
     // c1/W3 DECISION Op 3: a pre-accept cancel kills every live bid on the request, so the
     // bidders' commission holds must be aborted or their funds stay frozen indefinitely.
     private readonly JeebGateway.Financials.Holds.IHoldManager? _holds;
+    // W5/OD-P1: this legacy route can kill an ACCEPTED request, so a captured fee needs reversing.
+    private readonly JeebGateway.Financials.Refunds.IFeeRefunder? _refunder;
     private readonly ILogger<RequestsController> _logger;
 
     public RequestsController(
@@ -57,7 +59,8 @@ public class RequestsController : ControllerBase
         IOptions<ScheduledDeliveryOptions> scheduledOptions,
         CreateModerationEvaluator moderationEvaluator,
         ILogger<RequestsController> logger,
-        JeebGateway.Financials.Holds.IHoldManager? holds = null)
+        JeebGateway.Financials.Holds.IHoldManager? holds = null,
+        JeebGateway.Financials.Refunds.IFeeRefunder? refunder = null)
     {
         _store = store;
         _tiers = tiers;
@@ -66,6 +69,7 @@ public class RequestsController : ControllerBase
         _scheduledOptions = scheduledOptions.Value;
         _moderationEvaluator = moderationEvaluator;
         _holds = holds;
+        _refunder = refunder;
         _logger = logger;
     }
 
@@ -449,19 +453,37 @@ public class RequestsController : ControllerBase
         JeebGateway.Financials.CommissionRetention.Observe(
             _logger, requestId, existing.JeeberId, existing.AcceptedFee, "legacy-delete");
 
-        // DECISION Op 3 — the cancel is already durable, so this is fire-and-log: a failed
-        // abort keeps the intent record and the hold sweeper retries it.
+        // DECISION Op 3 — the cancel is already durable, so this is fire-and-log on a DETACHED token:
+        // a failed abort keeps the intent record and the hold sweeper retries it.
         if (_holds is not null)
         {
             try
             {
-                await _holds.ReleaseForRequestAsync(requestId, "request-cancelled", ct);
+                await _holds.ReleaseForRequestAsync(
+                    requestId, "request-cancelled", CancellationToken.None);
             }
-            catch (Exception ex) when (!ct.IsCancellationRequested)
+            catch (Exception ex)
             {
                 _logger.LogWarning(ex,
                     "Request {RequestId} was cancelled but releasing its offer holds failed; "
                     + "the hold sweeper will retry.", requestId);
+            }
+        }
+
+        // W5/OD-P1 — same detached fire-and-log contract: a client disconnect after the commit must
+        // not strand a captured fee, and a refund fault can never turn the cancel into an error.
+        if (_refunder is not null)
+        {
+            try
+            {
+                await _refunder.RefundOnCancelAsync(
+                    requestId, existing.JeeberId, "legacy-delete", CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex,
+                    "Request {RequestId} was cancelled but refunding its captured fee failed; "
+                    + "the refund sweeper will retry.", requestId);
             }
         }
 

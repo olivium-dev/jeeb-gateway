@@ -73,8 +73,14 @@ public sealed class FakeHoldIntentStore : IHoldIntentStore
     public Task<HoldIntent?> GetAsync(string offerId, CancellationToken ct)
         => Task.FromResult(Peek(offerId));
 
+    /// <summary>Prefix-scan outage: the HOLD pass must skip, and the refund pass must still run.</summary>
+    public bool FailEnumeration { get; set; }
+
     public Task<IReadOnlyList<HoldIntent>> ListAllAsync(CancellationToken ct)
-        => Task.FromResult(Snapshot());
+        => FailEnumeration
+            ? Task.FromException<IReadOnlyList<HoldIntent>>(
+                new InvalidOperationException("simulated hold-intent enumeration failure"))
+            : Task.FromResult(Snapshot());
 
     public Task CloseAsync(string offerId, CancellationToken ct)
     {

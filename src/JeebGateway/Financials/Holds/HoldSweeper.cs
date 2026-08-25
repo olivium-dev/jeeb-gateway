@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using JeebGateway.Availability;
+using JeebGateway.Financials.Refunds;
 using JeebGateway.Notifications;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
@@ -84,6 +85,10 @@ public class HoldSweeper : BackgroundService
         var pushes = sp.GetRequiredService<IOfferPushNotifier>();
         var guard = sp.GetRequiredService<IWalletSufficiencyGuard>();
 
+        // Two independent ledgers: refunds run FIRST and unconditionally, so a hold prefix-scan
+        // outage can never also stall owed credits (W5-F2).
+        await SweepRefundsAsync(sp, ct);
+
         IReadOnlyList<HoldIntent> records;
         try
         {
@@ -92,7 +97,7 @@ public class HoldSweeper : BackgroundService
         catch (Exception ex) when (!ct.IsCancellationRequested)
         {
             // The intent records ARE the map. Without them the only alternative is guessing
-            // at live money, so the whole pass is skipped and retried next interval.
+            // at live money, so the HOLD pass is skipped and retried next interval.
             _logger.LogWarning(ex,
                 "event={event} reason={reason}", "hold.sweep.skipped", "intent-enumeration-failed");
             return;
@@ -125,6 +130,79 @@ public class HoldSweeper : BackgroundService
                 _logger.LogWarning(ex,
                     "event={event} jeeberId={jeeberId} reason={reason}",
                     "hold.sweep.skipped", group.Key, "jeeber-pass-faulted");
+            }
+        }
+    }
+
+    /// <summary>W5 §4 — re-drives open refund intents on the same cadence and re-reports
+    /// conflicts. The intent is written BEFORE any credit, so a lost completion lands here.</summary>
+    /// <remarks>Optional by design: a provider without the refund services sweeps holds exactly
+    /// as before, and the ledger pre-checks make every replay converge instead of double-paying.</remarks>
+    private async Task SweepRefundsAsync(IServiceProvider sp, CancellationToken ct)
+    {
+        var intentStore = sp.GetService<IRefundIntentStore>();
+        var refunder = sp.GetService<IFeeRefunder>();
+        if (intentStore is null || refunder is null)
+        {
+            _logger.LogDebug(
+                "event={event} reason={reason}", "fee.refund.sweep.skipped", "unwired");
+            return;
+        }
+
+        IReadOnlyList<RefundIntent> records;
+        try
+        {
+            records = await intentStore.ListAllAsync(ct) ?? Array.Empty<RefundIntent>();
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            // Refunds are a separate ledger from holds: an unreadable one is retried next
+            // interval and must never stop the hold pass that runs after it.
+            _logger.LogWarning(ex,
+                "event={event} reason={reason}",
+                "fee.refund.sweep.skipped", "intent-enumeration-failed");
+            return;
+        }
+
+        foreach (var intent in records)
+        {
+            if (intent is null)
+            {
+                continue;
+            }
+
+            ct.ThrowIfCancellationRequested();
+
+            if (intent.State == RefundIntentState.Conflict)
+            {
+                // Same key, different money: an operator has to reconcile it, so it is
+                // reported every pass and NEVER blind-retried into a second credit.
+                _logger.LogWarning(
+                    "event={event} requestId={requestId} amount={amount}",
+                    "fee.refund.conflict", intent.RequestId, intent.Amount);
+                continue;
+            }
+
+            if (intent.State != RefundIntentState.Open)
+            {
+                continue;
+            }
+
+            try
+            {
+                await refunder.TryRetryAsync(intent, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // Per-record resilience: one unreadable refund must not strand every other
+                // jeeber's owed money until the next pass.
+                _logger.LogWarning(ex,
+                    "event={event} requestId={requestId} reason={reason}",
+                    "fee.refund.sweep.skipped", intent.RequestId, "record-faulted");
             }
         }
     }

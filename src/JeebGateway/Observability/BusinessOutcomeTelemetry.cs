@@ -99,6 +99,20 @@ public static class BusinessOutcomeTelemetry
     public static readonly Counter<long> CommissionRetainedOnCancel =
         Meter.CreateCounter<long>("settlement.commission.retained_on_cancel", description: "Accepted deliveries later cancelled while the accept-time platform fee stays taken. NO refund policy is implemented; this counter exists so the retained amount is measurable rather than accidental, and is the input to the owner's refund decision.");
 
+    // OD-P1 (W5). The refund half of the commission counters: a post-capture cancel now gives the
+    // fee back, and every outcome is emitted — including the flag-off "nothing was ever captured" one.
+    public static readonly Counter<long> FeeRefundCredited =
+        Meter.CreateCounter<long>("fee.refund.credited",
+            description: "Captured platform fees credited back to a jeeber because the delivery they were taken for was cancelled. Pairs 1:1 with settlement.commission.collected rows that later died.");
+
+    public static readonly Counter<long> FeeRefundFailures =
+        Meter.CreateCounter<long>("fee.refund.failures",
+            description: "Refunds that could not be credited (ledger unreadable AND unrecorded, initiate rejected, execute deterministically refused, idempotency conflict, intent write failed). The durable refund intent stays open and the sweeper retries everything except a conflict.");
+
+    public static readonly Counter<long> FeeRefundSkipped =
+        Meter.CreateCounter<long>("fee.refund.skipped",
+            description: "Cancellations whose wallet ledger carried NO executed platform-fee capture, so no money was owed back and no wallet mutation was issued. This is the steady state while CommissionCollection:Enabled is false.");
+
     public static readonly Counter<long> CommissionStampFailures =
         Meter.CreateCounter<long>("settlement.commission.stamp_failures",
             description: "Fees that WERE collected but whose wallet transaction id could not be stamped onto the settlement row. Reconcile from the wallet ledger.");
