@@ -57,12 +57,12 @@ public class HandoverCodeInAppTests
     [Fact]
     public async Task Accept_OwnerResponse_Carries_FourDigit_HandoverCode()
     {
-        var offer = AcceptedOfferFake("offer-hc", "jeeber-win");
+        var offer = AcceptedOfferFake("offer-hc", "d40b8e57-31c9-4a26-95f0-6b2e7c1a8d43");
         var delivery = new FakeHandoverDeliveryClient();
         using var factory = NewFactory(offer, delivery, new FakeHandoverOtpClient());
 
         var requestId = await SeedRequestAsync(factory, "client-owner");
-        SeedRouting(factory, "offer-hc", requestId, "jeeber-win");
+        SeedRouting(factory, "offer-hc", requestId, "d40b8e57-31c9-4a26-95f0-6b2e7c1a8d43");
 
         var resp = await Actor(factory, "client-owner", "customer")
             .PostAsync("/v1/offers/offer-hc/accept", content: null);
@@ -80,7 +80,7 @@ public class HandoverCodeInAppTests
     [Fact]
     public async Task HandoverCode_IsOwnerScoped_Verifies_AtHandover_AndNeverLogged()
     {
-        var offer = AcceptedOfferFake("offer-e2e", "jeeber-win");
+        var offer = AcceptedOfferFake("offer-e2e", "d40b8e57-31c9-4a26-95f0-6b2e7c1a8d43");
         var delivery = new FakeHandoverDeliveryClient();
         // one-time-password REJECTS every code: the only way verify can succeed is via
         // the gateway-minted in-app code (verify-precedence). Proves the code the
@@ -90,7 +90,7 @@ public class HandoverCodeInAppTests
         using var factory = NewFactory(offer, delivery, otp, logs);
 
         const string owner = "client-owner";
-        const string jeeber = "jeeber-win";
+        const string jeeber = "d40b8e57-31c9-4a26-95f0-6b2e7c1a8d43";
         var requestId = await SeedRequestAsync(factory, owner, recipientPhone: "+9613123456");
         SeedRouting(factory, "offer-e2e", requestId, jeeber);
 
@@ -165,7 +165,7 @@ public class HandoverCodeInAppTests
     [Fact]
     public async Task Trigger_WithPhone_WhenSmsUpstream502_Returns200_WithInAppCode_ThenVerifies_ToDone()
     {
-        var offer = AcceptedOfferFake("offer-502", "jeeber-win");
+        var offer = AcceptedOfferFake("offer-502", "d40b8e57-31c9-4a26-95f0-6b2e7c1a8d43");
         var delivery = new FakeHandoverDeliveryClient();
         // SMS send throws a 502 (jeeb-otp/Twilio down). Verify still succeeds ONLY via the
         // gateway-local in-app code — RejectAll makes one-time-password reject every code, so
@@ -174,7 +174,7 @@ public class HandoverCodeInAppTests
         using var factory = NewFactory(offer, delivery, otp);
 
         const string owner = "client-owner";
-        const string jeeber = "jeeber-win";
+        const string jeeber = "d40b8e57-31c9-4a26-95f0-6b2e7c1a8d43";
         // A recipient phone IS on file, so the trigger takes the SMS (phone-present) path —
         // the exact path that used to 502 before the code was returned.
         var requestId = await SeedRequestAsync(factory, owner, recipientPhone: "+9613123456");

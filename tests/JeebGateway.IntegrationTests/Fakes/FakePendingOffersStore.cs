@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 
 using JeebGateway.Availability;
+using JeebGateway.Services.Clients;
 
 namespace JeebGateway.IntegrationTests.Fakes;
 
@@ -356,6 +357,18 @@ public class FakePendingOffersStore : IPendingOffersStore
             .ToArray();
         return Task.FromResult<IReadOnlyList<PendingOffer>>(snapshot);
     }
+
+    /// <summary>c2-2 test seam — when true the DISCRIMINATED read reports a degraded ledger
+    /// while the offers physically remain, so the accept fee guard's fail-mode is injectable.</summary>
+    public bool ForceListDegraded { get; set; }
+
+    /// <summary>Ok-by-default (the real snapshot) so the existing 402/409/auto-withdraw
+    /// tests stay green; only <see cref="ForceListDegraded"/> yields the degraded sentinel.</summary>
+    public async Task<OfferReadResult<PendingOffer>> TryListForRequestAsync(
+        string requestId, CancellationToken ct)
+        => ForceListDegraded
+            ? new OfferReadResult<PendingOffer>(true, Array.Empty<PendingOffer>())
+            : new OfferReadResult<PendingOffer>(false, await ListForRequestAsync(requestId, ct));
 
     /// <summary>
     /// F4 (JEBV4-301) — true batch: one pass over the offer snapshot tallies the count for

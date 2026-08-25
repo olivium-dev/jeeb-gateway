@@ -93,6 +93,32 @@ public sealed class JeeberWalletProvisioningWiringTests
         recorder.Ensured.Should().Equal(subject);
     }
 
+    [Fact]
+    public async Task Role_switch_to_jeeber_routed_through_the_container_reaches_the_provisioner()
+    {
+        var recorder = new RecordingProvisioner();
+        using var factory = Factory(services =>
+        {
+            services.RemoveAll<IJeeberWalletProvisioner>();
+            services.AddSingleton<IJeeberWalletProvisioner>(recorder);
+        });
+        using var scope = factory.Services.CreateScope();
+        var sut = scope.ServiceProvider.GetRequiredService<IUserManagementDualRoleClient>();
+        var subject = Guid.NewGuid();
+
+        // The inner re-issue is a live user-management call and is expected to fail here; the
+        // assertion is only about what happened BEFORE it.
+        await Swallow(() => sut.RoleSwitchAsync(subject.ToString("D"), Roles.Jeeber, default));
+
+        recorder.Ensured.Should().Equal(subject);
+
+        // Control: a switch back to the client role must NOT provision, so the assertion above
+        // cannot be satisfied by a recorder that records every switch.
+        await Swallow(() => sut.RoleSwitchAsync(Guid.NewGuid().ToString("D"), Roles.Client, default));
+
+        recorder.Ensured.Should().Equal(subject);
+    }
+
     private static async Task Swallow(Func<Task> call)
     {
         try { await call(); } catch { /* inner transport outcome is out of scope */ }

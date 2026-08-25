@@ -41,7 +41,8 @@ namespace JeebGateway.IntegrationTests;
 public class S03JeeberDeliveryListUpstreamAcceptTests
 {
     private const string ClientOwner = "client-nour";
-    private const string Winner = "jeeber-karim";
+    // c2-1: the accept guard resolves the winner to a wallet holder, so the winner is a GUID.
+    private const string Winner = "b7c4e1a2-5d33-4f18-9a60-2c8e7b1f4d05";
     private const double Lat = 33.5138;
     private const double Lng = 36.2765;
 
@@ -71,15 +72,33 @@ public class S03JeeberDeliveryListUpstreamAcceptTests
     }
 
     [Fact]
-    public async Task Accept_WhenEnvelopeHasJeeber_JeeberSeesDelivery()
+    public async Task Accept_WhenOnlyTheEnvelopeWouldHaveTheJeeber_Returns403_BeforeTheSaga()
     {
-        // Envelope carries the winner → used directly (index need not have it).
+        // c2-1: the balance re-check is PRE-accept, so an envelope-only winner is too late —
+        // the routing index must resolve the winner or the accept is denied, never forwarded.
         using var factory = NewFactory(envelopeJeeberId: Winner);
         var requestId = await SeedRequestAsync(factory, ClientOwner);
         SeedRouting(factory, "offer-x2", requestId); // 2-arg: no jeeber in the index
 
         var accept = await ClientActor(factory, ClientOwner)
             .PostAsync("/v1/offers/offer-x2/accept", content: null);
+        accept.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+
+        var deliveries = await JeeberActor(factory, Winner)
+            .GetFromJsonAsync<PagedEnvelope>("/v1/deliveries");
+        deliveries!.Items.Should().NotContain(i => i.Id == requestId);
+    }
+
+    [Fact]
+    public async Task Accept_WhenIndexAndEnvelopeBothCarryTheJeeber_JeeberSeesDelivery()
+    {
+        // The envelope value is what gets stamped; the index only has to satisfy c2-1.
+        using var factory = NewFactory(envelopeJeeberId: Winner);
+        var requestId = await SeedRequestAsync(factory, ClientOwner);
+        SeedRouting(factory, "offer-x2b", requestId, Winner);
+
+        var accept = await ClientActor(factory, ClientOwner)
+            .PostAsync("/v1/offers/offer-x2b/accept", content: null);
         accept.StatusCode.Should().Be(HttpStatusCode.OK);
 
         var deliveries = await JeeberActor(factory, Winner)
@@ -89,17 +108,17 @@ public class S03JeeberDeliveryListUpstreamAcceptTests
     }
 
     [Fact]
-    public async Task Accept_WhenNeitherEnvelopeNorIndexHasJeeber_ListStaysEmpty_AcceptStill200()
+    public async Task Accept_WhenNeitherEnvelopeNorIndexHasJeeber_Returns403_ListStaysEmpty()
     {
-        // Degrade: no winner resolvable anywhere → the local row's JeeberId is never blanked
-        // (no-op write), the jeeber list is empty, and the committed accept still returns 200.
+        // c2-1 (OD-C2-2) supersedes the old "accept still 200" shape: a winner that resolves
+        // nowhere cannot have its balance checked, so the accept is DENIED, never forwarded.
         using var factory = NewFactory(envelopeJeeberId: null);
         var requestId = await SeedRequestAsync(factory, ClientOwner);
         SeedRouting(factory, "offer-x3", requestId); // 2-arg: no jeeber recorded
 
         var accept = await ClientActor(factory, ClientOwner)
             .PostAsync("/v1/offers/offer-x3/accept", content: null);
-        accept.StatusCode.Should().Be(HttpStatusCode.OK);
+        accept.StatusCode.Should().Be(HttpStatusCode.Forbidden);
 
         var deliveries = await JeeberActor(factory, Winner)
             .GetFromJsonAsync<PagedEnvelope>("/v1/deliveries");

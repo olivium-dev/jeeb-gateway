@@ -143,7 +143,7 @@ public class RequestNotOpen409FidelityTests
         }
 
         var jeeber = factory.CreateClient();
-        jeeber.DefaultRequestHeaders.Add("X-User-Id", $"jeeber-{Guid.NewGuid()}");
+        jeeber.DefaultRequestHeaders.Add("X-User-Id", Guid.NewGuid().ToString());
         jeeber.DefaultRequestHeaders.Add("X-User-Roles", "driver");
 
         var resp = await jeeber.PostAsJsonAsync(
@@ -208,7 +208,7 @@ public class RequestNotOpen409FidelityTests
         }
 
         var jeeber = factory.CreateClient();
-        jeeber.DefaultRequestHeaders.Add("X-User-Id", $"jeeber-{Guid.NewGuid()}");
+        jeeber.DefaultRequestHeaders.Add("X-User-Id", Guid.NewGuid().ToString());
         jeeber.DefaultRequestHeaders.Add("X-User-Roles", "driver");
 
         var resp = await jeeber.PostAsJsonAsync(
@@ -244,7 +244,7 @@ public class RequestNotOpen409FidelityTests
                 });
             });
 
-        var jeeberId = $"jeeber-many-{Guid.NewGuid()}";
+        var jeeberId = Guid.NewGuid().ToString();
         var jeeber = factory.CreateClient();
         jeeber.DefaultRequestHeaders.Add("X-User-Id", jeeberId);
         jeeber.DefaultRequestHeaders.Add("X-User-Roles", "driver");
@@ -295,6 +295,8 @@ public class RequestNotOpen409FidelityTests
     // FakePendingOffersStore, which never calls IOfferServiceClient — these cases got 201, not 409.
     private static void UseRealUpstreamOfferStore(IServiceCollection services)
     {
+        // c2-1: the submit guard now runs for every GUID caller, so the wallet must be reachable.
+        Fakes.FundedWalletFixture.UseFundedWallet(services);
         services.RemoveAll<IPendingOffersStore>();
         services.AddSingleton<IPendingOffersStore>(sp => new UpstreamPendingOffersStore(
             sp.GetRequiredService<IOfferServiceClient>(),

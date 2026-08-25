@@ -202,7 +202,7 @@ public class ClientVisibilityAndReceiptTests
         using var factory = Factory(delivery, offers, offerService: offerService);
 
         var clientId = $"client-{Guid.NewGuid():N}";
-        var jeeberId = $"jeeber-{Guid.NewGuid():N}";
+        var jeeberId = Guid.NewGuid().ToString("N");
         const decimal agreedFee = 12.34m;
 
         var store = factory.Services.GetRequiredService<IRequestsStore>();
@@ -293,7 +293,7 @@ public class ClientVisibilityAndReceiptTests
         var offerService = new AcceptingOfferServiceClient();
 
         var clientId = $"client-{Guid.NewGuid():N}";
-        var jeeberId = $"jeeber-{Guid.NewGuid():N}";
+        var jeeberId = Guid.NewGuid().ToString("N");
         const string offerId = "up-offer-1";
         const decimal agreedFee = 15.50m;
 
@@ -395,6 +395,8 @@ public class ClientVisibilityAndReceiptTests
                 {
                     services.RemoveAll<IPendingOffersStore>();
                     services.AddSingleton(offersStore);
+                    // c2-1: the accept guard now runs, so the wallet must be reachable.
+                    Fakes.FundedWalletFixture.UseFundedWallet(services);
                 }
                 else
                 {

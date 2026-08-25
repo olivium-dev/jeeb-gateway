@@ -45,7 +45,7 @@ public class RequestOffersEndpointTests : IClassFixture<Fakes.FakeOfferStoreWebA
     public async Task Submit_Returns_201_With_Pending_Offer()
     {
         var (clientId, requestId) = await SeedRequestAsync();
-        var jeeberId = $"jeeber-{Guid.NewGuid()}";
+        var jeeberId = Guid.NewGuid().ToString();
         var jeeberClient = JeeberClient(jeeberId);
 
         var resp = await jeeberClient.PostAsJsonAsync(
@@ -74,7 +74,7 @@ public class RequestOffersEndpointTests : IClassFixture<Fakes.FakeOfferStoreWebA
     public async Task Submit_With_Fee_Below_Floor_Returns_400()
     {
         var (_, requestId) = await SeedRequestAsync();
-        var jeeberClient = JeeberClient($"jeeber-{Guid.NewGuid()}");
+        var jeeberClient = JeeberClient(Guid.NewGuid().ToString());
 
         var resp = await jeeberClient.PostAsJsonAsync(
             $"/requests/{requestId}/offers",
@@ -89,7 +89,7 @@ public class RequestOffersEndpointTests : IClassFixture<Fakes.FakeOfferStoreWebA
     public async Task Submit_At_Exactly_One_Dollar_Succeeds()
     {
         var (_, requestId) = await SeedRequestAsync();
-        var jeeberClient = JeeberClient($"jeeber-{Guid.NewGuid()}");
+        var jeeberClient = JeeberClient(Guid.NewGuid().ToString());
 
         var resp = await jeeberClient.PostAsJsonAsync(
             $"/requests/{requestId}/offers",
@@ -102,7 +102,7 @@ public class RequestOffersEndpointTests : IClassFixture<Fakes.FakeOfferStoreWebA
     public async Task Submit_Without_Eta_Returns_400()
     {
         var (_, requestId) = await SeedRequestAsync();
-        var jeeberClient = JeeberClient($"jeeber-{Guid.NewGuid()}");
+        var jeeberClient = JeeberClient(Guid.NewGuid().ToString());
 
         var resp = await jeeberClient.PostAsJsonAsync(
             $"/requests/{requestId}/offers",
@@ -116,7 +116,7 @@ public class RequestOffersEndpointTests : IClassFixture<Fakes.FakeOfferStoreWebA
     [Fact]
     public async Task Submit_For_Unknown_Request_Returns_404()
     {
-        var jeeberClient = JeeberClient($"jeeber-{Guid.NewGuid()}");
+        var jeeberClient = JeeberClient(Guid.NewGuid().ToString());
         var resp = await jeeberClient.PostAsJsonAsync(
             $"/requests/{Guid.NewGuid()}/offers",
             new { fee = 5m, etaMinutes = 20 });
@@ -160,7 +160,7 @@ public class RequestOffersEndpointTests : IClassFixture<Fakes.FakeOfferStoreWebA
     public async Task Submit_Twice_From_Same_Jeeber_Without_Withdraw_Returns_409()
     {
         var (_, requestId) = await SeedRequestAsync();
-        var jeeberId = $"jeeber-{Guid.NewGuid()}";
+        var jeeberId = Guid.NewGuid().ToString();
         var jeeberClient = JeeberClient(jeeberId);
 
         var first = await jeeberClient.PostAsJsonAsync(
@@ -183,14 +183,14 @@ public class RequestOffersEndpointTests : IClassFixture<Fakes.FakeOfferStoreWebA
 
         for (var i = 0; i < 20; i++)
         {
-            var jeeber = JeeberClient($"jeeber-{i}-{Guid.NewGuid()}");
+            var jeeber = JeeberClient(Guid.NewGuid().ToString());
             var ok = await jeeber.PostAsJsonAsync(
                 $"/requests/{requestId}/offers",
                 new { fee = 5m, etaMinutes = 20 });
             ok.StatusCode.Should().Be(HttpStatusCode.Created, $"bid {i} should land");
         }
 
-        var twentyFirst = JeeberClient($"jeeber-21-{Guid.NewGuid()}");
+        var twentyFirst = JeeberClient(Guid.NewGuid().ToString());
         var resp = await twentyFirst.PostAsJsonAsync(
             $"/requests/{requestId}/offers",
             new { fee = 5m, etaMinutes = 20 });
@@ -204,7 +204,7 @@ public class RequestOffersEndpointTests : IClassFixture<Fakes.FakeOfferStoreWebA
     public async Task Withdraw_Returns_204_And_Allows_Re_Offer()
     {
         var (_, requestId) = await SeedRequestAsync();
-        var jeeberId = $"jeeber-{Guid.NewGuid()}";
+        var jeeberId = Guid.NewGuid().ToString();
         var jeeberClient = JeeberClient(jeeberId);
 
         var firstSubmit = await jeeberClient.PostAsJsonAsync(
@@ -235,7 +235,7 @@ public class RequestOffersEndpointTests : IClassFixture<Fakes.FakeOfferStoreWebA
     public async Task Withdraw_Twice_Returns_409()
     {
         var (_, requestId) = await SeedRequestAsync();
-        var jeeberClient = JeeberClient($"jeeber-{Guid.NewGuid()}");
+        var jeeberClient = JeeberClient(Guid.NewGuid().ToString());
         var submit = await jeeberClient.PostAsJsonAsync(
             $"/requests/{requestId}/offers",
             new { fee = 5m, etaMinutes = 20 });
@@ -255,13 +255,13 @@ public class RequestOffersEndpointTests : IClassFixture<Fakes.FakeOfferStoreWebA
     public async Task Withdraw_By_Different_Jeeber_Returns_403()
     {
         var (_, requestId) = await SeedRequestAsync();
-        var owner = JeeberClient($"jeeber-owner-{Guid.NewGuid()}");
+        var owner = JeeberClient(Guid.NewGuid().ToString());
         var submit = await owner.PostAsJsonAsync(
             $"/requests/{requestId}/offers",
             new { fee = 5m, etaMinutes = 20 });
         var offer = (await submit.Content.ReadFromJsonAsync<OfferDto>())!;
 
-        var thief = JeeberClient($"jeeber-thief-{Guid.NewGuid()}");
+        var thief = JeeberClient(Guid.NewGuid().ToString());
         var resp = await thief.DeleteAsync(
             $"/requests/{requestId}/offers/{offer.Id}");
 
@@ -274,7 +274,7 @@ public class RequestOffersEndpointTests : IClassFixture<Fakes.FakeOfferStoreWebA
     public async Task Withdraw_Unknown_Offer_Returns_404()
     {
         var (_, requestId) = await SeedRequestAsync();
-        var jeeberClient = JeeberClient($"jeeber-{Guid.NewGuid()}");
+        var jeeberClient = JeeberClient(Guid.NewGuid().ToString());
 
         var resp = await jeeberClient.DeleteAsync(
             $"/requests/{requestId}/offers/{Guid.NewGuid()}");
@@ -285,7 +285,7 @@ public class RequestOffersEndpointTests : IClassFixture<Fakes.FakeOfferStoreWebA
     public async Task Submit_When_Request_Already_Accepted_Returns_409()
     {
         var (_, requestId) = await SeedRequestAsync();
-        var existingJeeber = $"jeeber-existing-{Guid.NewGuid()}";
+        var existingJeeber = Guid.NewGuid().ToString();
 
         // Move the request out of the pre-acceptance set by binding it to
         // another Jeeber. The submit endpoint must refuse new bids.
@@ -298,7 +298,7 @@ public class RequestOffersEndpointTests : IClassFixture<Fakes.FakeOfferStoreWebA
             accepted.Should().NotBeNull();
         }
 
-        var lateJeeber = JeeberClient($"jeeber-late-{Guid.NewGuid()}");
+        var lateJeeber = JeeberClient(Guid.NewGuid().ToString());
         var resp = await lateJeeber.PostAsJsonAsync(
             $"/requests/{requestId}/offers",
             new { fee = 5m, etaMinutes = 20 });
@@ -325,7 +325,7 @@ public class RequestOffersEndpointTests : IClassFixture<Fakes.FakeOfferStoreWebA
     public async Task Submit_With_Oversize_Note_Returns_400()
     {
         var (_, requestId) = await SeedRequestAsync();
-        var jeeberClient = JeeberClient($"jeeber-{Guid.NewGuid()}");
+        var jeeberClient = JeeberClient(Guid.NewGuid().ToString());
         var hugeNote = new string('x', 501);
 
         var resp = await jeeberClient.PostAsJsonAsync(

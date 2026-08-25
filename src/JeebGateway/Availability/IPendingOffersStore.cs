@@ -1,3 +1,5 @@
+using JeebGateway.Services.Clients;
+
 namespace JeebGateway.Availability;
 
 /// <summary>
@@ -140,6 +142,11 @@ public interface IPendingOffersStore
     /// </summary>
     Task<IReadOnlyList<PendingOffer>> ListForRequestAsync(
         string requestId, CancellationToken ct);
+
+    /// <summary>c2-2: same read, DISCRIMINATED — Degraded separates "could not read the ledger"
+    /// from "no offers", so the accept fee guard stops reading a blip as fee 0. Default = not degraded.</summary>
+    async Task<OfferReadResult<PendingOffer>> TryListForRequestAsync(string requestId, CancellationToken ct)
+        => new(false, await ListForRequestAsync(requestId, ct));
 
     /// <summary>
     /// F4 (JEBV4-301) — batched offer-count lookup for the client Orders list. Returns a

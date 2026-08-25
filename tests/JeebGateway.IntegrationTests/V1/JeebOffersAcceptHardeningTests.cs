@@ -34,6 +34,9 @@ namespace JeebGateway.IntegrationTests.V1;
 /// </summary>
 public class JeebOffersAcceptHardeningTests
 {
+    // c2-1: the accept guard resolves the winner to a wallet holder, so every jeeber id
+    // below is a GUID (a non-GUID winner is now a hard 403 before BR-1 ever runs).
+
     // F5 — genuine self-offer: the accepting client IS the jeeber who bid this offer.
     [Fact]
     public async Task V1Accept_Genuine_Self_Offer_Returns_409_BR1_Before_Saga()
@@ -45,9 +48,9 @@ public class JeebOffersAcceptHardeningTests
         };
         using var factory = NewUpstreamFactory(fake);
         // The offer's recorded bidder IS the same user who is now accepting.
-        SeedRouting(factory, offerId: "offer-self", requestId: "req-self", jeeberId: "dual-role-dana");
+        SeedRouting(factory, offerId: "offer-self", requestId: "req-self", jeeberId: "9d21c7b4-6e05-4a3f-8c92-1f7b0d5e3a68");
 
-        var resp = await ClientActor(factory, "dual-role-dana")
+        var resp = await ClientActor(factory, "9d21c7b4-6e05-4a3f-8c92-1f7b0d5e3a68")
             .PostAsync("/v1/offers/offer-self/accept", content: null);
 
         resp.StatusCode.Should().Be(HttpStatusCode.Conflict);
@@ -71,13 +74,13 @@ public class JeebOffersAcceptHardeningTests
                 Envelope = new OfferAcceptWire
                 {
                     AcceptedOfferId = "offer-legit",
-                    JeeberId = "jeeber-other",
+                    JeeberId = "4a8f2e10-3b7c-4d59-9e06-5c1a8f2b7d34",
                     RejectedOfferIds = Array.Empty<string>()
                 }
             }
         };
         using var factory = NewUpstreamFactory(fake);
-        SeedRouting(factory, offerId: "offer-legit", requestId: "req-legit", jeeberId: "jeeber-other");
+        SeedRouting(factory, offerId: "offer-legit", requestId: "req-legit", jeeberId: "4a8f2e10-3b7c-4d59-9e06-5c1a8f2b7d34");
 
         var resp = await ClientActor(factory, "client-owner")
             .PostAsync("/v1/offers/offer-legit/accept", content: null);
@@ -100,13 +103,13 @@ public class JeebOffersAcceptHardeningTests
                 Envelope = new OfferAcceptWire
                 {
                     AcceptedOfferId = "offer-idem",
-                    JeeberId = "jeeber-idem",
+                    JeeberId = "c5e93a7d-8f21-4b06-a3d5-7e2f9c14b806",
                     RejectedOfferIds = Array.Empty<string>()
                 }
             }
         };
         using var factory = NewUpstreamFactory(fake);
-        SeedRouting(factory, offerId: "offer-idem", requestId: "req-idem", jeeberId: "jeeber-idem");
+        SeedRouting(factory, offerId: "offer-idem", requestId: "req-idem", jeeberId: "c5e93a7d-8f21-4b06-a3d5-7e2f9c14b806");
 
         // No Idempotency-Key header on the request.
         var resp = await ClientActor(factory, "client-idem")

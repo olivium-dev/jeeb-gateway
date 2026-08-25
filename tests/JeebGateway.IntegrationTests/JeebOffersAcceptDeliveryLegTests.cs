@@ -45,12 +45,12 @@ public class JeebOffersAcceptDeliveryLegTests
     [Fact]
     public async Task Accept_OnSagaSuccess_AssignsWinningJeeberOntoDeliveryRow()
     {
-        var offerFake = AcceptedFake("offer-leg", "jeeber-win");
+        var offerFake = AcceptedFake("offer-leg", "2f6d8b31-47ac-4e59-90b7-8d1c5a03e274");
         var deliveryFake = new RecordingDeliveryClient();
         using var factory = NewFactory(offerFake, deliveryFake);
 
         var requestId = await SeedRequestAsync(factory, "client-owner");
-        SeedRouting(factory, "offer-leg", requestId, "jeeber-win");
+        SeedRouting(factory, "offer-leg", requestId, "2f6d8b31-47ac-4e59-90b7-8d1c5a03e274");
 
         var resp = await ClientActor(factory, "client-owner")
             .PostAsync("/v1/offers/offer-leg/accept", content: null);
@@ -59,7 +59,7 @@ public class JeebOffersAcceptDeliveryLegTests
 
         // The DELIVERED leg was synced: a create-row call carried the winning jeeber,
         // the SAME row id (deliveryId == requestId), and the request's tier + pickup.
-        var assignment = deliveryFake.Calls.SingleOrDefault(c => c.JeeberId == "jeeber-win");
+        var assignment = deliveryFake.Calls.SingleOrDefault(c => c.JeeberId == "2f6d8b31-47ac-4e59-90b7-8d1c5a03e274");
         assignment.Should().NotBeNull("the accepted delivery must be assigned to the winning jeeber");
         assignment!.Id.Should().Be(requestId);
         assignment.ClientId.Should().Be("client-owner");
@@ -72,14 +72,14 @@ public class JeebOffersAcceptDeliveryLegTests
     [Fact]
     public async Task Accept_WhenDeliveryServiceFaults_StaysHttp200_DegradeDoNotFail()
     {
-        var offerFake = AcceptedFake("offer-blip", "jeeber-win");
+        var offerFake = AcceptedFake("offer-blip", "2f6d8b31-47ac-4e59-90b7-8d1c5a03e274");
         // Faults ONLY on the post-accept assignment (JeeberId set); create-time seed
         // (JeeberId null) succeeds so the request row is established normally.
         var deliveryFake = new RecordingDeliveryClient { ThrowOnJeeberAssignment = true };
         using var factory = NewFactory(offerFake, deliveryFake);
 
         var requestId = await SeedRequestAsync(factory, "client-owner");
-        SeedRouting(factory, "offer-blip", requestId, "jeeber-win");
+        SeedRouting(factory, "offer-blip", requestId, "2f6d8b31-47ac-4e59-90b7-8d1c5a03e274");
 
         var resp = await ClientActor(factory, "client-owner")
             .PostAsync("/v1/offers/offer-blip/accept", content: null);
@@ -90,11 +90,10 @@ public class JeebOffersAcceptDeliveryLegTests
     }
 
     [Fact]
-    public async Task Accept_WhenEnvelopeOmitsJeeber_DoesNotAttemptAssignment_StaysHttp200()
+    public async Task Accept_WhenEnvelopeOmitsJeeber_Returns403_AndNeverAssigns()
     {
-        // Saga committed but the winner is unresolvable anywhere — the envelope carried no
-        // jeeber id AND the routing index recorded none (2-arg submit) — so the gateway must
-        // never write a blank jeeber onto the delivery row; the accept still succeeds.
+        // c2-1 (OD-C2-2): a winner unresolvable anywhere — no envelope id AND no index row —
+        // cannot have its balance checked, so the accept is DENIED and nothing is assigned.
         // (The envelope-omits-BUT-index-has-it case — where the P0 fix resolves the winner
         // from the index and DOES assign — is covered in S03JeeberDeliveryListUpstreamAcceptTests.)
         var offerFake = AcceptedFake("offer-nojeeber", winningJeeberId: null);
@@ -108,7 +107,7 @@ public class JeebOffersAcceptDeliveryLegTests
         var resp = await ClientActor(factory, "client-owner")
             .PostAsync("/v1/offers/offer-nojeeber/accept", content: null);
 
-        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
         deliveryFake.Calls.Should().NotContain(c => c.JeeberId != null);
     }
 
@@ -118,12 +117,12 @@ public class JeebOffersAcceptDeliveryLegTests
     [Fact]
     public async Task Accept_WhenWinningJeeberHasTwoActiveDeliveries_ProceedsHttp200()
     {
-        var offerFake = AcceptedFake("offer-cap", "jeeber-busy");
+        var offerFake = AcceptedFake("offer-cap", "6b0e35c9-1d84-4a72-bf13-9e57c2a806d1");
         var deliveryFake = new RecordingDeliveryClient { ActiveDeliveryCount = 2 };
         using var factory = NewFactory(offerFake, deliveryFake);
 
         var requestId = await SeedRequestAsync(factory, "client-owner");
-        SeedRouting(factory, "offer-cap", requestId, "jeeber-busy");
+        SeedRouting(factory, "offer-cap", requestId, "6b0e35c9-1d84-4a72-bf13-9e57c2a806d1");
 
         var resp = await ClientActor(factory, "client-owner")
             .PostAsync("/v1/offers/offer-cap/accept", content: null);
@@ -131,18 +130,18 @@ public class JeebOffersAcceptDeliveryLegTests
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         deliveryFake.LastCountedJeeberId.Should().BeNull();
         offerFake.AcceptCallCount.Should().Be(1);
-        deliveryFake.Calls.Should().Contain(c => c.JeeberId == "jeeber-busy");
+        deliveryFake.Calls.Should().Contain(c => c.JeeberId == "6b0e35c9-1d84-4a72-bf13-9e57c2a806d1");
     }
 
     [Fact]
     public async Task Accept_WhenWinningJeeberHasOneActiveDelivery_ProceedsHttp200()
     {
-        var offerFake = AcceptedFake("offer-under", "jeeber-ok");
+        var offerFake = AcceptedFake("offer-under", "8c73d21f-905b-4e60-a4d8-31f7b6c50e92");
         var deliveryFake = new RecordingDeliveryClient { ActiveDeliveryCount = 1 };
         using var factory = NewFactory(offerFake, deliveryFake);
 
         var requestId = await SeedRequestAsync(factory, "client-owner");
-        SeedRouting(factory, "offer-under", requestId, "jeeber-ok");
+        SeedRouting(factory, "offer-under", requestId, "8c73d21f-905b-4e60-a4d8-31f7b6c50e92");
 
         var resp = await ClientActor(factory, "client-owner")
             .PostAsync("/v1/offers/offer-under/accept", content: null);

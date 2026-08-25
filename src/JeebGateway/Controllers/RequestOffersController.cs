@@ -210,34 +210,38 @@ public class RequestOffersController : ControllerBase
             });
         }
 
-        // F1 guard 1 — wallet must cover the offer's commission. Skips only on an
-        // invalid caller guid (never expected post-auth), never on the fee compare.
-        if (Guid.TryParse(jeeberId, out var jeeberGuid))
+        // F1 guard 1 — a caller that does not resolve to a wallet-holder GUID is DENIED
+        // (fail-closed), never skipped; the guard body below then runs unconditionally.
+        if (!Guid.TryParse(jeeberId, out var jeeberGuid))
         {
-            var required = WalletGuardContract.RequiredCommission(body.Fee.Value);
-            var guard = await _walletGuard.CheckAsync(jeeberGuid, required, ct);
-            if (!guard.Allowed)
-            {
-                if (guard.DegradedByUpstreamFailure)
-                {
-                    return StatusCode(StatusCodes.Status503ServiceUnavailable,
-                        WalletGuardContract.WalletUnavailableProblem());
-                }
+            return StatusCode(StatusCodes.Status403Forbidden,
+                WalletGuardContract.WalletHolderUnresolvedProblem());
+        }
 
-                return StatusCode(StatusCodes.Status402PaymentRequired, new ProblemDetails
-                {
-                    Title = "Wallet balance does not cover the offer's commission.",
-                    Status = StatusCodes.Status402PaymentRequired,
-                    Type = "https://jeeb.dev/errors/insufficient-wallet-balance",
-                    Extensions =
-                    {
-                        // Correction 5: top-level, matching DioOfferSubmissionRepository._parseBalance.
-                        ["needed"] = guard.Required,
-                        ["available"] = guard.Available,
-                        ["currency"] = guard.Currency,
-                    }
-                });
+        // F1 guard 1 — wallet must cover the offer's commission.
+        var required = WalletGuardContract.RequiredCommission(body.Fee.Value);
+        var guard = await _walletGuard.CheckAsync(jeeberGuid, required, ct);
+        if (!guard.Allowed)
+        {
+            if (guard.DegradedByUpstreamFailure)
+            {
+                return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                    WalletGuardContract.WalletUnavailableProblem());
             }
+
+            return StatusCode(StatusCodes.Status402PaymentRequired, new ProblemDetails
+            {
+                Title = "Wallet balance does not cover the offer's commission.",
+                Status = StatusCodes.Status402PaymentRequired,
+                Type = "https://jeeb.dev/errors/insufficient-wallet-balance",
+                Extensions =
+                {
+                    // Correction 5: top-level, matching DioOfferSubmissionRepository._parseBalance.
+                    ["needed"] = guard.Required,
+                    ["available"] = guard.Available,
+                    ["currency"] = guard.Currency,
+                }
+            });
         }
 
         // D2: hiding an out-of-radius request from the feed is not enough — the offer route

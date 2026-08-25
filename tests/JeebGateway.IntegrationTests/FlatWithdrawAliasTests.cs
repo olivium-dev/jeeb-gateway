@@ -28,7 +28,7 @@ public class FlatWithdrawAliasTests
         using var factory = new Fakes.FakeOfferStoreWebApplicationFactory();
 
         var (clientId, requestId) = await SeedRequestAsync(factory);
-        var jeeber = JeeberClient(factory, $"jeeber-{Guid.NewGuid()}");
+        var jeeber = JeeberClient(factory, Guid.NewGuid().ToString());
 
         // Submit records the offerId → (requestId, jeeberId) pairing in the routing index.
         var submit = await jeeber.PostAsJsonAsync(
@@ -47,7 +47,7 @@ public class FlatWithdrawAliasTests
     public async Task FlatWithdraw_UnknownOffer_Is404()
     {
         using var factory = new Fakes.FakeOfferStoreWebApplicationFactory();
-        var jeeber = JeeberClient(factory, $"jeeber-{Guid.NewGuid()}");
+        var jeeber = JeeberClient(factory, Guid.NewGuid().ToString());
 
         // Never submitted → not in the routing index → phantom offer → 404.
         var resp = await jeeber.DeleteAsync($"/v1/offers/{Guid.NewGuid()}");

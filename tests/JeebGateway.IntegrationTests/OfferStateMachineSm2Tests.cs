@@ -107,7 +107,7 @@ public class OfferStateMachineSm2Tests : IClassFixture<Fakes.FakeOfferStoreWebAp
     public async Task Edit_FlagOff_Returns_503_And_Does_Not_Mutate_Store()
     {
         var clientId = $"client-{Guid.NewGuid()}";
-        var jeeberId = $"jeeber-edit-{Guid.NewGuid()}";
+        var jeeberId = Guid.NewGuid().ToString();
 
         var requestId = await SeedRequestAsync(clientId);
         var offerId = await SubmitOfferViaHttpAsync(jeeberId, requestId, fee: 10m, eta: 30);
@@ -130,7 +130,7 @@ public class OfferStateMachineSm2Tests : IClassFixture<Fakes.FakeOfferStoreWebAp
     public async Task Edit_FlagOff_With_All_Fields_Still_Returns_503_And_Applies_Nothing()
     {
         var clientId = $"client-{Guid.NewGuid()}";
-        var jeeberId = $"jeeber-edit2-{Guid.NewGuid()}";
+        var jeeberId = Guid.NewGuid().ToString();
 
         var requestId = await SeedRequestAsync(clientId);
         var offerId = await SubmitOfferViaHttpAsync(jeeberId, requestId, fee: 8m, eta: 25);
@@ -155,12 +155,12 @@ public class OfferStateMachineSm2Tests : IClassFixture<Fakes.FakeOfferStoreWebAp
         // no longer owns the in-memory edit rule); the L2 capability gate (offer.edit.own,
         // keyed {jeeber}) still admits any jeeber-role caller, so this is 503, not 403.
         var clientId = $"client-{Guid.NewGuid()}";
-        var ownerJeeber = $"jeeber-owner-{Guid.NewGuid()}";
+        var ownerJeeber = Guid.NewGuid().ToString();
 
         var requestId = await SeedRequestAsync(clientId);
         var offerId = await SubmitOfferViaHttpAsync(ownerJeeber, requestId, fee: 7m, eta: 20);
 
-        var intruder = JeeberClient($"jeeber-intruder-{Guid.NewGuid()}");
+        var intruder = JeeberClient(Guid.NewGuid().ToString());
         var resp = await intruder.PutAsJsonAsync($"/v1/offers/{offerId}", new { fee = 99m });
         resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
 
@@ -174,7 +174,7 @@ public class OfferStateMachineSm2Tests : IClassFixture<Fakes.FakeOfferStoreWebAp
         // The empty-body 400 guard runs BEFORE the flag check, so it is unaffected by
         // the flag-OFF→503 contract drift and still asserts the original behaviour.
         var clientId = $"client-{Guid.NewGuid()}";
-        var jeeberId = $"jeeber-empty-{Guid.NewGuid()}";
+        var jeeberId = Guid.NewGuid().ToString();
 
         var requestId = await SeedRequestAsync(clientId);
         var offerId = await SubmitOfferViaHttpAsync(jeeberId, requestId, fee: 6m, eta: 18);
@@ -190,7 +190,7 @@ public class OfferStateMachineSm2Tests : IClassFixture<Fakes.FakeOfferStoreWebAp
         // Even on an already-accepted (auction-closed) offer, flag-OFF edit is 503 —
         // the not-pending guard lives upstream now, not in the gateway's flag-OFF path.
         var clientId = $"client-{Guid.NewGuid()}";
-        var jeeberId = $"jeeber-acc-{Guid.NewGuid()}";
+        var jeeberId = Guid.NewGuid().ToString();
 
         var requestId = await SeedRequestAsync(clientId);
         var offerId = await SubmitOfferViaHttpAsync(jeeberId, requestId, fee: 5m, eta: 15);

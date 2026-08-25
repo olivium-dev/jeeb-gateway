@@ -44,7 +44,7 @@ public sealed class RequestOffersSeatTests
         using var factory = MakeFactory(fake, chatEnabled: true);
         var (clientId, requestId) = await SeedRequestWithConversationAsync(factory, "conv-on-ledger");
 
-        var jeeberId = $"jeeber-{Guid.NewGuid()}";
+        var jeeberId = Guid.NewGuid().ToString();
         var resp = await JeeberClient(factory, jeeberId).PostAsJsonAsync(
             $"/requests/{requestId}/offers",
             new { fee = 5m, etaMinutes = 20 });
@@ -69,7 +69,7 @@ public sealed class RequestOffersSeatTests
         using var factory = MakeFactory(fake, chatEnabled: true);
         var (_, requestId) = await SeedRequestAsync(factory); // ConversationId left null
 
-        var jeeberId = $"jeeber-{Guid.NewGuid()}";
+        var jeeberId = Guid.NewGuid().ToString();
         var resp = await JeeberClient(factory, jeeberId).PostAsJsonAsync(
             $"/requests/{requestId}/offers",
             new { fee = 9m, etaMinutes = 15 });
@@ -97,7 +97,7 @@ public sealed class RequestOffersSeatTests
         using var factory = MakeFactory(fake, chatEnabled: true);
         var (_, requestId) = await SeedRequestAsync(factory);
 
-        var resp = await JeeberClient(factory, $"jeeber-{Guid.NewGuid()}").PostAsJsonAsync(
+        var resp = await JeeberClient(factory, Guid.NewGuid().ToString()).PostAsJsonAsync(
             $"/requests/{requestId}/offers",
             new { fee = 5m, etaMinutes = 20 });
 
@@ -113,7 +113,7 @@ public sealed class RequestOffersSeatTests
         using var factory = MakeFactory(fake, chatEnabled: false);
         var (_, requestId) = await SeedRequestWithConversationAsync(factory, "conv-x");
 
-        var resp = await JeeberClient(factory, $"jeeber-{Guid.NewGuid()}").PostAsJsonAsync(
+        var resp = await JeeberClient(factory, Guid.NewGuid().ToString()).PostAsJsonAsync(
             $"/requests/{requestId}/offers",
             new { fee = 5m, etaMinutes = 20 });
 

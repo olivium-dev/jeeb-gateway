@@ -383,15 +383,23 @@ public sealed class OfferServiceClient : IOfferServiceClient
         }
     }
 
+    /// <summary>DEGRADE-DON'T-FAIL (contract-freeze §3.6): any blip yields an EMPTY annotation set, so the
+    /// feed returns <c>myOffer:null</c> not 5xx. Flattening view of <see cref="TryListOffersForJeeberAsync"/>.</summary>
     public async Task<IReadOnlyList<JeeberFeedOffer>> ListOffersForJeeberAsync(
         string jeeberId,
         string? status,
         CancellationToken ct)
+        => (await TryListOffersForJeeberAsync(jeeberId, status, ct)).Items;
+
+    /// <summary>c2-2 — DISCRIMINATED read backing <see cref="ListOffersForJeeberAsync"/>: a blip is
+    /// <c>Degraded:true</c> + empty (edit-path FailMode); a healthy empty 2xx stays a benign skip.</summary>
+    public async Task<OfferReadResult<JeeberFeedOffer>> TryListOffersForJeeberAsync(
+        string jeeberId,
+        string? status,
+        CancellationToken ct)
     {
-        // GAP-2 (contract-freeze §4): GET /api/v1/jeebers/{jeeberId}/offers — the jeeber's own
-        // offers, used by the feed ONLY to annotate myOffer. offer-service requires the
-        // x-user-id header to EQUAL the path :jeeber_id (else 403), so both are the jeeber's sub.
-        // The "api/v1/" prefix is REQUIRED (BaseAddress = Services:Offer:BaseUrl is host:port, no path).
+        // GAP-2 (contract-freeze §4): offer-service requires x-user-id to EQUAL the path :jeeber_id
+        // (else 403). The "api/v1/" prefix is REQUIRED (BaseAddress is host:port, no path).
         try
         {
             var path = $"api/v1/jeebers/{Uri.EscapeDataString(jeeberId)}/offers";
@@ -404,17 +412,13 @@ public sealed class OfferServiceClient : IOfferServiceClient
             SetUser(request, jeeberId); // x-user-id == path :jeeber_id
 
             using var response = await _http.SendAsync(request, ct);
-
-            // DEGRADE-DON'T-FAIL (contract-freeze §3.6): any non-2xx (incl. 403 id-mismatch,
-            // 404, 5xx) yields an EMPTY annotation set so the feed still returns its pending
-            // requests with myOffer:null — a feed read must never 5xx on an offer-service blip.
             if (!response.IsSuccessStatusCode)
             {
-                return Array.Empty<JeeberFeedOffer>();
+                return new OfferReadResult<JeeberFeedOffer>(true, Array.Empty<JeeberFeedOffer>());
             }
 
             var wires = await ReadFeedOffersAsync(response, ct);
-            return wires
+            var items = wires
                 .Where(w => !string.IsNullOrEmpty(w.Id) && !string.IsNullOrEmpty(w.RequestId))
                 .Select(w => new JeeberFeedOffer
                 {
@@ -427,6 +431,8 @@ public sealed class OfferServiceClient : IOfferServiceClient
                     CreatedAt = w.CreatedAt,
                 })
                 .ToList();
+
+            return new OfferReadResult<JeeberFeedOffer>(false, items);
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -434,20 +440,22 @@ public sealed class OfferServiceClient : IOfferServiceClient
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException or NotSupportedException or OperationCanceledException)
         {
-            // Transport / decode / timeout blip → empty annotation (myOffer degrades to null).
-            return Array.Empty<JeeberFeedOffer>();
+            // Transport / decode / timeout blip → degraded, empty (myOffer degrades to null).
+            return new OfferReadResult<JeeberFeedOffer>(true, Array.Empty<JeeberFeedOffer>());
         }
     }
 
-    /// <summary>
-    /// BUG-3 (customer offers-read 500) — GET /api/v1/requests/{requestId}/offers. offer-service grew
-    /// this owner-scoped list route after <see cref="UpstreamPendingOffersStore"/>'s stale comment was
-    /// written; the gateway proxies it for the client's accept sheet. <paramref name="actingUserId"/> is
-    /// sent as <c>x-user-id</c> and MUST equal the request owner (offer-service 403s otherwise).
-    /// DEGRADE-DON'T-FAIL: any non-2xx / empty / transport / decode blip yields an EMPTY list so the
-    /// offers-read never 5xxs (mirrors <see cref="ListOffersForJeeberAsync"/>).
-    /// </summary>
+    /// <summary>BUG-3 — owner-scoped GET requests/{requestId}/offers (<paramref name="actingUserId"/> is the
+    /// <c>x-user-id</c> owner). DEGRADE-DON'T-FAIL flattening view of <see cref="TryListForRequestAsync"/>.</summary>
     public async Task<IReadOnlyList<OfferWire>> ListForRequestAsync(
+        string actingUserId,
+        string requestId,
+        CancellationToken ct)
+        => (await TryListForRequestAsync(actingUserId, requestId, ct)).Items;
+
+    /// <summary>c2-2 — DISCRIMINATED read backing <see cref="ListForRequestAsync"/>: a blip is
+    /// <c>Degraded:true</c> + empty (accept-path FailMode); a healthy empty 2xx stays a benign skip.</summary>
+    public async Task<OfferReadResult<OfferWire>> TryListForRequestAsync(
         string actingUserId,
         string requestId,
         CancellationToken ct)
@@ -461,10 +469,10 @@ public sealed class OfferServiceClient : IOfferServiceClient
             using var response = await _http.SendAsync(request, ct);
             if (!response.IsSuccessStatusCode)
             {
-                return Array.Empty<OfferWire>();
+                return new OfferReadResult<OfferWire>(true, Array.Empty<OfferWire>());
             }
 
-            return await ReadRequestOffersAsync(response, ct);
+            return new OfferReadResult<OfferWire>(false, await ReadRequestOffersAsync(response, ct));
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
@@ -472,7 +480,7 @@ public sealed class OfferServiceClient : IOfferServiceClient
         }
         catch (Exception ex) when (ex is HttpRequestException or JsonException or NotSupportedException or OperationCanceledException)
         {
-            return Array.Empty<OfferWire>();
+            return new OfferReadResult<OfferWire>(true, Array.Empty<OfferWire>());
         }
     }
 

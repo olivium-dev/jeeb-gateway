@@ -113,7 +113,7 @@ public class W35a_OfferRealtimeNotifierDeletedTests
 
         var (clientId, requestId) = await SeedRequestAsync(factory);
         var jeeber = factory.CreateClient();
-        jeeber.DefaultRequestHeaders.Add("X-User-Id", $"jeeber-{Guid.NewGuid()}");
+        jeeber.DefaultRequestHeaders.Add("X-User-Id", Guid.NewGuid().ToString());
         jeeber.DefaultRequestHeaders.Add("X-User-Roles", "driver");
 
         var resp = await jeeber.PostAsJsonAsync(

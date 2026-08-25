@@ -38,8 +38,20 @@ public sealed record WalletGuardResult(
     string? Currency,
     bool DegradedByUpstreamFailure);
 
+/// <summary>Discriminates a degraded fee lookup from a genuine absent/zero fee, so
+/// callers route degrade through FailMode instead of silently skipping the guard.</summary>
+public readonly record struct FeeResolution(bool Degraded, decimal? Fee)
+{
+    public static FeeResolution Failed { get; } = new(true, null);
+
+    public static FeeResolution Ok(decimal? fee) => new(false, fee);
+}
+
 public interface IWalletSufficiencyGuard
 {
+    /// <summary>Lets the call sites resolve an upstream degrade the same way this guard does.</summary>
+    bool IsFailOpen { get; }
+
     /// <summary>Never throws — a wallet-service failure resolves via <see cref="WalletGuardOptions.FailMode"/>.</summary>
     Task<WalletGuardResult> CheckAsync(Guid holderId, decimal requiredFee, CancellationToken ct);
 }
@@ -58,6 +70,24 @@ public static class WalletGuardContract
         Title = "Wallet service is unavailable; the balance check could not run.",
         Status = StatusCodes.Status503ServiceUnavailable,
         Type = "https://jeeb.dev/errors/wallet-service-unavailable",
+    };
+
+    /// <summary>E3 — a caller that is not a wallet-holder GUID is a HARD deny,
+    /// independent of FailMode: never skipped, never forwarded, no auto-withdraw.</summary>
+    public static Microsoft.AspNetCore.Mvc.ProblemDetails WalletHolderUnresolvedProblem() => new()
+    {
+        Title = "Your account could not be resolved to a wallet holder; the balance check could not run.",
+        Status = StatusCodes.Status403Forbidden,
+        Type = "https://jeeb.dev/errors/wallet-holder-unresolved",
+    };
+
+    /// <summary>E4 — fee lookup degraded under fail-closed; distinct from E6 so ops
+    /// can tell which upstream degraded.</summary>
+    public static Microsoft.AspNetCore.Mvc.ProblemDetails OfferFeeUnresolvableProblem() => new()
+    {
+        Title = "The offer fee could not be resolved; the balance check could not run.",
+        Status = StatusCodes.Status503ServiceUnavailable,
+        Type = "https://jeeb.dev/errors/offer-fee-unresolvable",
     };
 }
 
@@ -86,6 +116,8 @@ public sealed class WalletSufficiencyGuard : IWalletSufficiencyGuard
         _feeCurrencyCode = feeCurrency.Value.CurrencyCode;
         _logger = logger;
     }
+
+    public bool IsFailOpen => _options.IsFailOpen;
 
     public async Task<WalletGuardResult> CheckAsync(Guid holderId, decimal requiredFee, CancellationToken ct)
     {

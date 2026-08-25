@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Standalone console tool, NOT wired into any CI/deploy step; owner-run only. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>WalletHolderBackfill</RootNamespace>
+    <AssemblyName>WalletHolderBackfill</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Every wallet WRITE goes over the wallet HTTP API (OD-C2-1 note); Npgsql is read-only,
+         used only by the optional um-connection SELECT that enumerates user ids. -->
+    <ProjectReference Include="..\..\src\JeebGateway\JeebGateway.csproj" />
+    <PackageReference Include="Npgsql" Version="8.0.5" />
+  </ItemGroup>
+
+</Project>

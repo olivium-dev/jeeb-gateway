@@ -251,34 +251,35 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
             "implementation until offer-service grows GET /api/v1/offers/{id} (tracked fast-follow, " +
             "JEBV4-148). GW3 deleted the in-memory offer store an earlier wording of this message named.");
 
-    /// <summary>
-    /// BUG-3 fix (customer offers-read 500). offer-service GREW
-    /// <c>GET /api/v1/requests/{id}/offers</c> after the original "tracked fast-follow" comment was
-    /// written, so the old unconditional <see cref="NotSupportedException"/> surfaced as a hard 500 on
-    /// the live upstream wire (<c>UseUpstream:Offer=true</c>) — the customer could never list/accept the
-    /// jeeber's offer (Core Flow step 4). We now proxy that owner-scoped route: offer-service authorizes
-    /// on <c>x-user-id == owner</c> (else 403), and the owner is the in-request authenticated caller
-    /// whose ownership the controller (<c>JeebRequestsController.ListOffers/ListOffersFlat</c> and
-    /// <c>JeebOrdersListController</c>) has ALREADY verified before reaching this store. Money (cents→
-    /// dollars) and the status vocabulary are mapped via <see cref="ToPendingOffer"/>; the
-    /// degrade-don't-fail (a blip → empty list, never a 500) lives in the client.
-    /// </summary>
+    /// <summary>BUG-3 fix: proxies offer-service's owner-scoped <c>GET /api/v1/requests/{id}/offers</c>
+    /// (ownership is controller-verified first). Delegates to the discriminated read; blips → empty.</summary>
     public async Task<IReadOnlyList<PendingOffer>> ListForRequestAsync(string requestId, CancellationToken ct)
+        => (await TryListForRequestAsync(requestId, ct)).Items;
+
+    /// <summary>c2-2: same upstream read, but no acting identity or a client blip is reported as
+    /// Degraded instead of collapsing to an empty list the accept fee guard would read as "fee 0".</summary>
+    public async Task<OfferReadResult<PendingOffer>> TryListForRequestAsync(string requestId, CancellationToken ct)
     {
         var actingUserId = ResolveOwnerId();
         if (string.IsNullOrWhiteSpace(actingUserId))
         {
             // No in-request identity to authorize the upstream read (not expected on the controller
-            // path, which is always authenticated). Return empty rather than 500 — the offers-read
-            // must never crash the customer's accept sheet.
-            return Array.Empty<PendingOffer>();
+            // path, which is always authenticated) — unreadable, not "no offers".
+            return new OfferReadResult<PendingOffer>(true, Array.Empty<PendingOffer>());
         }
 
-        var wires = await _client.ListForRequestAsync(actingUserId!, requestId, ct);
-        return wires
-            .Where(w => !string.IsNullOrWhiteSpace(w.Id))
-            .Select(ToPendingOffer)
-            .ToList();
+        var res = await _client.TryListForRequestAsync(actingUserId!, requestId, ct);
+        if (res.Degraded)
+        {
+            return new OfferReadResult<PendingOffer>(true, Array.Empty<PendingOffer>());
+        }
+
+        return new OfferReadResult<PendingOffer>(
+            false,
+            res.Items
+                .Where(w => !string.IsNullOrWhiteSpace(w.Id))
+                .Select(ToPendingOffer)
+                .ToList());
     }
 
     /// <summary>

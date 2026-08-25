@@ -34,7 +34,8 @@ public class D15DoorOtpSharedVerifierBypassTests
     private const string LoginMockFixedCode = "1234";
 
     private const string Owner  = "client-owner-d15";
-    private const string Jeeber = "jeeber-d15";
+    // c2-1: the accept guard resolves the winner to a wallet holder, so this id is a GUID.
+    private const string Jeeber = "5e1a9c74-2b38-4d06-8f95-c3a7e04b1d62";
 
     // ---- flag-OFF leg (gateway owns the attempt counter) ---------------------
 

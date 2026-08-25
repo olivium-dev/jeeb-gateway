@@ -137,6 +137,120 @@ public sealed class JeeberWalletProvisioningTests
         inner.AppendCalls.Should().Be(0);
     }
 
+    [Fact]
+    public async Task PhoneFindOrCreate_EnsuresWallets_ForResolvedUser()
+    {
+        var events = new List<string>();
+        var wallet = new StubProvisioner(events);
+        var inner = new StubDualRole(events) { PhoneUserId = HolderId.ToString("D") };
+        var sut = NewGuard(inner, wallet);
+
+        var result = await sut.PhoneFindOrCreateAsync("+9613000077", CancellationToken.None);
+
+        result.UserId.Should().Be(HolderId.ToString("D"));
+        // Identity resolves first, then the wallet inventory for exactly that subject, once.
+        events.Should().Equal("phone", "wallet");
+        wallet.HolderIds.Should().Equal(HolderId);
+    }
+
+    [Fact]
+    public async Task PhoneFindOrCreate_Succeeds_WhenWalletEnsureFails()
+    {
+        var events = new List<string>();
+        var wallet = new StubProvisioner(events) { Failure = new IOException("wallet down") };
+        var inner = new StubDualRole(events) { PhoneUserId = HolderId.ToString("D") };
+        var sut = NewGuard(inner, wallet);
+
+        var result = await sut.PhoneFindOrCreateAsync("+9613000077", CancellationToken.None);
+
+        // Best-effort: a missed ensure degrades to an honest 402 at submit, never a blocked login.
+        result.UserId.Should().Be(HolderId.ToString("D"));
+        result.ActiveRole.Should().Be(Roles.Client);
+        events.Should().Equal("phone", "wallet");
+        inner.PhoneCalls.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task PhoneFindOrCreate_Skips_Ensure_For_A_NonHolder_Subject_Without_Failing_Login()
+    {
+        var events = new List<string>();
+        var wallet = new StubProvisioner(events);
+        var sut = NewGuard(new StubDualRole(events) { PhoneUserId = "legacy-user" }, wallet);
+
+        var result = await sut.PhoneFindOrCreateAsync("+9613000077", CancellationToken.None);
+
+        result.UserId.Should().Be("legacy-user");
+        events.Should().Equal("phone");
+        wallet.HolderIds.Should().BeEmpty();
+
+        // Control: the all-zero system id is equally not a wallet holder, and equally not fatal.
+        var systemEvents = new List<string>();
+        var systemWallet = new StubProvisioner(systemEvents);
+        var systemSut = NewGuard(
+            new StubDualRole(systemEvents) { PhoneUserId = Guid.Empty.ToString("D") }, systemWallet);
+
+        (await systemSut.PhoneFindOrCreateAsync("+9613000078", CancellationToken.None))
+            .UserId.Should().Be(Guid.Empty.ToString("D"));
+        systemEvents.Should().Equal("phone");
+        systemWallet.HolderIds.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task RoleSwitch_ToJeeber_EnsuresWallets()
+    {
+        var events = new List<string>();
+        var wallet = new StubProvisioner(events);
+        var inner = new StubDualRole(events);
+        var sut = NewGuard(inner, wallet);
+
+        var result = await sut.RoleSwitchAsync(HolderId.ToString("D"), Roles.Jeeber, CancellationToken.None);
+
+        // Ordering is the assertion: the wallet exists before the token says 'driver'.
+        result.ActiveRole.Should().Be(Roles.Jeeber);
+        events.Should().Equal("wallet", "switch");
+        wallet.HolderIds.Should().Equal(HolderId);
+
+        // Control: switching back to the client role provisions nothing.
+        await sut.RoleSwitchAsync(HolderId.ToString("D"), Roles.Client, CancellationToken.None);
+
+        events.Should().Equal("wallet", "switch", "switch");
+        wallet.HolderIds.Should().Equal(HolderId);
+    }
+
+    [Fact]
+    public async Task RoleSwitch_ToJeeber_Succeeds_WhenWalletEnsureFails()
+    {
+        var events = new List<string>();
+        var wallet = new StubProvisioner(events) { Failure = new IOException("wallet down") };
+        var inner = new StubDualRole(events);
+        var sut = NewGuard(inner, wallet);
+
+        var result = await sut.RoleSwitchAsync(HolderId.ToString("D"), Roles.Jeeber, CancellationToken.None);
+
+        // Same best-effort direction as signup: the switch is not a new availability coupling.
+        result.ActiveRole.Should().Be(Roles.Jeeber);
+        events.Should().Equal("wallet", "switch");
+        inner.SwitchCalls.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task AppendJeeberRole_StillFailsClosed_WhenEnsureFails()
+    {
+        var events = new List<string>();
+        var wallet = new StubProvisioner(events) { Failure = new IOException("wallet down") };
+        var inner = new StubDualRole(events);
+        var sut = NewGuard(inner, wallet);
+
+        await sut.Invoking(value => value.AppendAvailableRoleAsync(
+                HolderId.ToString("D"), Roles.Jeeber, CancellationToken.None))
+            .Should().ThrowAsync<UserManagementCallException>()
+            .Where(error => error.StatusCode == 502);
+
+        // The GRANT seam stays fail-closed even though signup and role-switch turned best-effort.
+        events.Should().Equal("wallet");
+        inner.AppendCalls.Should().Be(0);
+    }
+
     private static WalletServiceJeeberWalletProvisioner NewProvisioner(HttpMessageHandler handler)
     {
         var http = new HttpClient(handler) { BaseAddress = new Uri("http://wallet.test/") };
@@ -240,6 +354,11 @@ public sealed class JeeberWalletProvisioningTests
     private sealed class StubDualRole(List<string> events) : IUserManagementDualRoleClient
     {
         public int AppendCalls { get; private set; }
+        public int PhoneCalls { get; private set; }
+        public int SwitchCalls { get; private set; }
+
+        /// <summary>The id user-management resolves the phone to; not every subject is a holder GUID.</summary>
+        public string PhoneUserId { get; init; } = HolderId.ToString("D");
 
         public Task<RoleGrantResult> AppendAvailableRoleAsync(
             string userId,
@@ -251,14 +370,24 @@ public sealed class JeeberWalletProvisioningTests
             return Task.FromResult(new RoleGrantResult(userId, new[] { opaqueRole }, added));
         }
 
-        public Task<PhoneFindOrCreateResult> PhoneFindOrCreateAsync(string phone, CancellationToken ct) =>
-            throw new NotImplementedException();
+        public Task<PhoneFindOrCreateResult> PhoneFindOrCreateAsync(string phone, CancellationToken ct)
+        {
+            events.Add("phone");
+            var isNew = PhoneCalls++ == 0;
+            return Task.FromResult(new PhoneFindOrCreateResult(
+                PhoneUserId, isNew, new[] { Roles.Client }, Roles.Client));
+        }
 
         public Task<RoleSwitchReissueResult> RoleSwitchAsync(
             string userId,
             string opaqueRole,
-            CancellationToken ct) =>
-            throw new NotImplementedException();
+            CancellationToken ct)
+        {
+            events.Add("switch");
+            SwitchCalls++;
+            return Task.FromResult(new RoleSwitchReissueResult(
+                userId, "access-token", "refresh-token", opaqueRole));
+        }
 
         public Task<RoleGrantResult> RemoveAvailableRoleAsync(
             string userId,

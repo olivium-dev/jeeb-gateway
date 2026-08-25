@@ -1,5 +1,9 @@
 namespace JeebGateway.Services.Clients;
 
+/// <summary>c2-2 — discriminated offer read: <c>Degraded</c> marks an upstream blip (non-2xx /
+/// transport / decode), distinct from the genuine empty 2xx the tolerant reads flatten.</summary>
+public readonly record struct OfferReadResult<T>(bool Degraded, IReadOnlyList<T> Items);
+
 /// <summary>
 /// Typed client over the real offer-service (Elixir/Phoenix, host port 10063,
 /// liveness <c>/health</c>). The offer-service is the canonical owner of the
@@ -210,6 +214,14 @@ public interface IOfferServiceClient
         CancellationToken ct)
         => Task.FromResult<IReadOnlyList<JeeberFeedOffer>>(Array.Empty<JeeberFeedOffer>());
 
+    /// <summary>c2-2 — DISCRIMINATED <see cref="ListOffersForJeeberAsync"/>: a blip is <c>Degraded:true</c>
+    /// + empty for FailMode (E4), not a silent skip. Default method delegates to the tolerant read.</summary>
+    async Task<OfferReadResult<JeeberFeedOffer>> TryListOffersForJeeberAsync(
+        string jeeberId,
+        string? status,
+        CancellationToken ct)
+        => new(false, await ListOffersForJeeberAsync(jeeberId, status, ct));
+
     /// <summary>
     /// BUG-3 (customer offers-read 500) — GET /api/v1/requests/{requestId}/offers — the offers on a
     /// request, for the request-OWNING client's accept sheet / bid review. offer-service authorizes on
@@ -230,6 +242,14 @@ public interface IOfferServiceClient
         string requestId,
         CancellationToken ct)
         => Task.FromResult<IReadOnlyList<OfferWire>>(Array.Empty<OfferWire>());
+
+    /// <summary>c2-2 — DISCRIMINATED <see cref="ListForRequestAsync"/>: a blip is <c>Degraded:true</c> +
+    /// empty for the accept-path FailMode (E4). Default method delegates to the tolerant read.</summary>
+    async Task<OfferReadResult<OfferWire>> TryListForRequestAsync(
+        string actingUserId,
+        string requestId,
+        CancellationToken ct)
+        => new(false, await ListForRequestAsync(actingUserId, requestId, ct));
 }
 
 /// <summary>

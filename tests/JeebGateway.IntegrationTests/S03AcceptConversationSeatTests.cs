@@ -54,7 +54,8 @@ namespace JeebGateway.IntegrationTests;
 public class S03AcceptConversationSeatTests
 {
     private const string ClientOwner = "client-owner";
-    private const string Winner = "jeeber-win";
+    // c2-1: the accept guard resolves the winner to a wallet holder, so this id is a GUID.
+    private const string Winner = "0a5f37e6-8c14-4b92-a7d3-51e9026bf48c";
 
     [Fact]
     public async Task Accept_WhenNoConversation_CreatesIt_LinksId_AndSeatsWinner()

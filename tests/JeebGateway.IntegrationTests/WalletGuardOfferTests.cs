@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http.Json;
+using System.Runtime.CompilerServices;
 using FluentAssertions;
 using JeebGateway.Availability;
 using JeebGateway.Financials;
@@ -467,6 +468,253 @@ public class WalletGuardOfferTests
         offerService.EditCalled.Should().BeTrue();
     }
 
+    // c2-1 (E3) — a non-GUID caller/winner is a HARD 403: structural, NOT FailMode-governed,
+    // since an id that can never be balance-checked has no desirable skip configuration.
+
+    [Fact]
+    public async Task Submit_Returns403_WhenCallerIdIsNotGuid()
+    {
+        await using var factory = NewFactory(new FakeWalletClient { Balance = 10.0 });
+        var (_, requestId) = await SeedRequestAsync(factory);
+
+        var resp = await JeeberClient(factory, "not-a-guid").PostAsJsonAsync(
+            $"/requests/{requestId}/offers", new { fee = 100m, etaMinutes = 30, note = (string?)null });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        var body = JObject.Parse(await resp.Content.ReadAsStringAsync());
+        body["type"]!.Value<string>().Should().Be("https://jeeb.dev/errors/wallet-holder-unresolved");
+
+        var offers = await factory.Services.GetRequiredService<FakePendingOffersStore>()
+            .ListForRequestAsync(requestId, CancellationToken.None);
+        offers.Should().BeEmpty("the deny fires BEFORE the mint — an unguarded offer must not exist");
+    }
+
+    [Fact]
+    public async Task Submit_Returns201_WhenCallerIdIsGuid()
+    {
+        // Regression pin: the hard deny must not swallow the healthy path.
+        await using var factory = NewFactory(new FakeWalletClient { Balance = 10.0 });
+        var (_, requestId) = await SeedRequestAsync(factory);
+
+        var resp = await JeeberClient(factory, Guid.NewGuid().ToString()).PostAsJsonAsync(
+            $"/requests/{requestId}/offers", new { fee = 100m, etaMinutes = 30, note = (string?)null });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Created);
+    }
+
+    [Fact]
+    public async Task Edit_Returns403_WhenActorIdNotGuid_OnRaise()
+    {
+        var wallet = new FakeWalletClient { Balance = 1_000.0 }; // balance is never the question here
+        var offerService = new RecordingOfferServiceClient();
+        await using var factory = NewFactory(wallet, offerService: offerService);
+
+        var (_, requestId) = await SeedRequestAsync(factory);
+        offerService.JeeberFeed.Add(new JeeberFeedOffer
+        {
+            OfferId = "offer-403", RequestId = requestId, Status = "pending", FeeCents = 100_00,
+        });
+        SeedRoutingIndex(factory, "offer-403", requestId);
+
+        var resp = await JeeberClient(factory, "not-a-guid").PutAsJsonAsync(
+            "/v1/offers/offer-403", new { fee = 500m }); // a confirmed RAISE
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        var body = JObject.Parse(await resp.Content.ReadAsStringAsync());
+        body["type"]!.Value<string>().Should().Be("https://jeeb.dev/errors/wallet-holder-unresolved");
+        offerService.EditCalled.Should().BeFalse("the raise must never reach offer-service unguarded");
+    }
+
+    [Fact]
+    public async Task Accept_Returns403_WhenWinningJeeberIdBlank()
+    {
+        var offerService = new RecordingOfferServiceClient();
+        await using var factory = NewFactory(new FakeWalletClient { Balance = 10.0 }, offerService: offerService);
+
+        var (clientId, requestId) = await SeedRequestAsync(factory);
+        var offers = factory.Services.GetRequiredService<FakePendingOffersStore>();
+        var offer = offers.EnqueueForTest(Guid.NewGuid().ToString(), requestId);
+        SeedRoutingIndex(factory, offer.Id, requestId); // winner recorded as null
+
+        var resp = await ClientActor(factory, clientId).PostAsync(
+            $"/v1/offers/{offer.Id}/accept", content: null);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        var body = JObject.Parse(await resp.Content.ReadAsStringAsync());
+        body["type"]!.Value<string>().Should().Be("https://jeeb.dev/errors/wallet-holder-unresolved");
+        offerService.AcceptWithStatusCalled.Should().BeFalse();
+
+        var reread = (await offers.ListForRequestAsync(requestId, CancellationToken.None))
+            .Single(o => o.Id == offer.Id);
+        reread.Status.Should().Be(PendingOfferStatus.Pending, "an unresolvable winner must not withdraw the bid");
+    }
+
+    [Fact]
+    public async Task Accept_Returns403_WhenWinningJeeberIdNotGuid()
+    {
+        var offerService = new RecordingOfferServiceClient();
+        await using var factory = NewFactory(new FakeWalletClient { Balance = 10.0 }, offerService: offerService);
+
+        var (clientId, requestId) = await SeedRequestAsync(factory);
+        var offers = factory.Services.GetRequiredService<FakePendingOffersStore>();
+        var offer = offers.EnqueueForTest("not-a-guid", requestId);
+        SeedRoutingIndex(factory, offer.Id, requestId, "not-a-guid");
+
+        var resp = await ClientActor(factory, clientId).PostAsync(
+            $"/v1/offers/{offer.Id}/accept", content: null);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
+        var body = JObject.Parse(await resp.Content.ReadAsStringAsync());
+        body["type"]!.Value<string>().Should().Be("https://jeeb.dev/errors/wallet-holder-unresolved");
+        offerService.AcceptWithStatusCalled.Should().BeFalse("a non-GUID winner must never be forwarded");
+
+        var reread = (await offers.ListForRequestAsync(requestId, CancellationToken.None))
+            .Single(o => o.Id == offer.Id);
+        reread.Status.Should().Be(PendingOfferStatus.Pending);
+    }
+
+    // c2-2 (E4) — a DEGRADED fee lookup routes through the ONE FailMode knob, exactly like a
+    // wallet-service outage; a genuine 2xx that simply carries no fee stays a benign skip.
+
+    [Fact]
+    public async Task Edit_Returns503_WhenCurrentFeeLookupDegraded_FailClosed()
+    {
+        var offerService = new RecordingOfferServiceClient { JeeberFeedDegraded = true };
+        await using var factory = NewFactory(new FakeWalletClient { Balance = 1_000.0 }, offerService: offerService);
+
+        var (_, requestId) = await SeedRequestAsync(factory);
+        offerService.JeeberFeed.Add(new JeeberFeedOffer
+        {
+            OfferId = "offer-degraded", RequestId = requestId, Status = "pending", FeeCents = 100_00,
+        });
+        SeedRoutingIndex(factory, "offer-degraded", requestId);
+
+        var resp = await JeeberClient(factory, Guid.NewGuid().ToString()).PutAsJsonAsync(
+            "/v1/offers/offer-degraded", new { fee = 500m });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        var body = JObject.Parse(await resp.Content.ReadAsStringAsync());
+        body["type"]!.Value<string>().Should().Be("https://jeeb.dev/errors/offer-fee-unresolvable");
+        offerService.EditCalled.Should().BeFalse("a lookup that could not run must not admit the raise");
+    }
+
+    [Fact]
+    public async Task Edit_Proceeds_WhenCurrentFeeLookupDegraded_FailOpen()
+    {
+        var offerService = new RecordingOfferServiceClient { JeeberFeedDegraded = true };
+        await using var factory = NewFactory(
+            new FakeWalletClient { Balance = 0 }, failMode: "fail-open", offerService: offerService);
+
+        var (_, requestId) = await SeedRequestAsync(factory);
+        offerService.JeeberFeed.Add(new JeeberFeedOffer
+        {
+            OfferId = "offer-failopen", RequestId = requestId, Status = "pending", FeeCents = 100_00,
+        });
+        SeedRoutingIndex(factory, "offer-failopen", requestId);
+
+        var resp = await JeeberClient(factory, Guid.NewGuid().ToString()).PutAsJsonAsync(
+            "/v1/offers/offer-failopen", new { fee = 500m });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        offerService.EditCalled.Should().BeTrue("fail-open proceeds unchecked, with a WARN");
+    }
+
+    [Fact]
+    public async Task Accept_Returns503_WhenFeeLookupDegraded_FailClosed_AndDoesNotWithdraw()
+    {
+        var leg = await RunAcceptWithDegradedDependencyAsync(
+            DegradedDependency.OfferFeeRead, failMode: "fail-closed");
+
+        leg.Status.Should().Be(HttpStatusCode.ServiceUnavailable);
+        leg.ProblemType.Should().Be("https://jeeb.dev/errors/offer-fee-unresolvable");
+        leg.Forwarded.Should().BeFalse();
+        leg.OfferStatus.Should().Be(PendingOfferStatus.Pending,
+            "insufficiency was never confirmed — a degrade must not withdraw the offer");
+    }
+
+    [Fact]
+    public async Task Accept_Proceeds_WhenFeeLookupDegraded_FailOpen()
+    {
+        var leg = await RunAcceptWithDegradedDependencyAsync(
+            DegradedDependency.OfferFeeRead, failMode: "fail-open");
+
+        leg.Forwarded.Should().BeTrue("fail-open proceeds unchecked, with a WARN");
+        leg.Status.Should().NotBe(HttpStatusCode.ServiceUnavailable);
+        leg.OfferStatus.Should().NotBe(PendingOfferStatus.Withdrawn);
+    }
+
+    [Fact]
+    public async Task Accept_Proceeds_WhenOfferGenuinelyAbsentFrom2xxRead_BenignSkip()
+    {
+        // CONTROL: a healthy 2xx read that simply does not carry the offer (a normal
+        // withdraw) leaves the fee unresolvable but NOT degraded — it must still forward.
+        var offerService = new RecordingOfferServiceClient();
+        await using var factory = NewFactory(new FakeWalletClient { Balance = 0 }, offerService: offerService);
+
+        var (clientId, requestId) = await SeedRequestAsync(factory);
+        SeedRoutingIndex(factory, "offer-gone", requestId, Guid.NewGuid().ToString());
+
+        var resp = await ClientActor(factory, clientId).PostAsync(
+            "/v1/offers/offer-gone/accept", content: null);
+
+        resp.StatusCode.Should().NotBe(HttpStatusCode.ServiceUnavailable,
+            "a benign absent offer must never be over-corrected into a fee-unresolvable 503");
+        offerService.AcceptWithStatusCalled.Should().BeTrue("nothing to enforce — the accept proceeds");
+    }
+
+    // c2-3 — the ONE FailMode knob, pinned symmetric across both faults.
+
+    [Fact]
+    public async Task Accept_FailClosed_DeniesSymmetrically_ForWalletOutageAndForFeeBlip()
+    {
+        var walletOutage = await RunAcceptWithDegradedDependencyAsync(
+            DegradedDependency.WalletService, failMode: "fail-closed");
+        var feeBlip = await RunAcceptWithDegradedDependencyAsync(
+            DegradedDependency.OfferFeeRead, failMode: "fail-closed");
+
+        // Same 503 deny + same absence of side effects; only the Type names the upstream.
+        walletOutage.Status.Should().Be(HttpStatusCode.ServiceUnavailable);
+        walletOutage.ProblemType.Should().Be("https://jeeb.dev/errors/wallet-service-unavailable");
+        feeBlip.Status.Should().Be(HttpStatusCode.ServiceUnavailable);
+        feeBlip.ProblemType.Should().Be("https://jeeb.dev/errors/offer-fee-unresolvable");
+
+        walletOutage.Forwarded.Should().BeFalse();
+        feeBlip.Forwarded.Should().BeFalse();
+        walletOutage.OfferStatus.Should().Be(PendingOfferStatus.Pending);
+        feeBlip.OfferStatus.Should().Be(PendingOfferStatus.Pending);
+    }
+
+    [Fact]
+    public async Task Accept_FailOpen_ProceedsSymmetrically_ForWalletOutageAndForFeeBlip()
+    {
+        var walletOutage = await RunAcceptWithDegradedDependencyAsync(
+            DegradedDependency.WalletService, failMode: "fail-open");
+        var feeBlip = await RunAcceptWithDegradedDependencyAsync(
+            DegradedDependency.OfferFeeRead, failMode: "fail-open");
+
+        // The knob flips BOTH branches together — neither fault denies under fail-open.
+        walletOutage.Forwarded.Should().BeTrue();
+        feeBlip.Forwarded.Should().BeTrue();
+        walletOutage.Status.Should().NotBe(HttpStatusCode.ServiceUnavailable);
+        feeBlip.Status.Should().NotBe(HttpStatusCode.ServiceUnavailable);
+        walletOutage.OfferStatus.Should().NotBe(PendingOfferStatus.Withdrawn);
+        feeBlip.OfferStatus.Should().NotBe(PendingOfferStatus.Withdrawn);
+    }
+
+    [Fact]
+    public void Config_Default_FailMode_IsFailClosed()
+    {
+        var config = new ConfigurationBuilder()
+            .AddJsonFile(Path.Combine(FindRepoRoot(), "src", "JeebGateway", "appsettings.json"))
+            .Build();
+
+        var options = new WalletGuardOptions();
+        config.GetSection(WalletGuardOptions.SectionName).Bind(options);
+
+        options.FailMode.Should().Be("fail-closed");
+        options.IsFailOpen.Should().BeFalse("the SHIPPED default must never silently flip to fail-open");
+    }
+
     // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
@@ -515,11 +763,71 @@ public class WalletGuardOfferTests
     }
 
     /// <summary>Guard 3's edit route resolves requestId from the routing index, learned
-    /// at submit — seed it directly since these tests fabricate the offerId.</summary>
-    private static void SeedRoutingIndex(WebApplicationFactory<Program> factory, string offerId, string requestId)
+    /// at submit — seed it directly since these tests fabricate the offerId. The optional
+    /// jeeberId is the accept path's winner (null = the pre-c2-1 blank-winner shape).</summary>
+    private static void SeedRoutingIndex(
+        WebApplicationFactory<Program> factory, string offerId, string requestId, string? jeeberId = null)
     {
         var index = factory.Services.GetRequiredService<IOfferRequestIndex>();
-        index.Record(offerId, requestId, null);
+        index.Record(offerId, requestId, jeeberId);
+    }
+
+    /// <summary>Locates the repo root from THIS source file so a test can read the SHIPPED
+    /// appsettings.json (not the copy staged into the test bin folder).</summary>
+    private static string FindRepoRoot([CallerFilePath] string thisFile = "")
+    {
+        var dir = new FileInfo(thisFile).Directory!;
+        while (dir is not null && !Directory.Exists(Path.Combine(dir.FullName, "src", "JeebGateway")))
+            dir = dir.Parent!;
+
+        (dir is not null).Should().BeTrue("could not locate repo root from the test source file path");
+        return dir!.FullName;
+    }
+
+    /// <summary>Which single dependency degrades on an accept leg. Both faults mean "the
+    /// balance check could not run", so the ONE FailMode knob must treat them identically.</summary>
+    private enum DegradedDependency
+    {
+        WalletService,
+        OfferFeeRead,
+    }
+
+    private sealed record AcceptLeg(
+        HttpStatusCode Status, string? ProblemType, bool Forwarded, string? OfferStatus);
+
+    /// <summary>Submits a real offer, degrades exactly ONE dependency, then accepts — so the
+    /// two fault legs are compared through byte-identical arrange/act code.</summary>
+    private static async Task<AcceptLeg> RunAcceptWithDegradedDependencyAsync(
+        DegradedDependency dependency, string failMode)
+    {
+        var wallet = new FakeWalletClient { Balance = 10.0 }; // sufficient at submit
+        var offerService = new RecordingOfferServiceClient();
+        await using var factory = NewFactory(wallet, failMode, offerService);
+
+        var (clientId, requestId) = await SeedRequestAsync(factory);
+        var jeeberId = Guid.NewGuid().ToString();
+
+        var submitResp = await JeeberClient(factory, jeeberId).PostAsJsonAsync(
+            $"/requests/{requestId}/offers", new { fee = 100m, etaMinutes = 30, note = (string?)null });
+        submitResp.StatusCode.Should().Be(HttpStatusCode.Created);
+        var offerId = (await submitResp.Content.ReadFromJsonAsync<OfferDto>())!.Id;
+
+        var offers = factory.Services.GetRequiredService<FakePendingOffersStore>();
+        if (dependency == DegradedDependency.WalletService) wallet.Unreachable = true;
+        else offers.ForceListDegraded = true;
+
+        var acceptResp = await ClientActor(factory, clientId).PostAsync(
+            $"/v1/offers/{offerId}/accept", content: null);
+
+        var problemType = acceptResp.IsSuccessStatusCode
+            ? null
+            : JObject.Parse(await acceptResp.Content.ReadAsStringAsync())["type"]?.Value<string>();
+
+        // The toggle only degrades the DISCRIMINATED read; this ledger re-read is undegraded.
+        var offer = (await offers.ListForRequestAsync(requestId, CancellationToken.None))
+            .Single(o => o.Id == offerId);
+        return new AcceptLeg(
+            acceptResp.StatusCode, problemType, offerService.AcceptWithStatusCalled, offer.Status);
     }
 
     private static HttpClient JeeberClient(WebApplicationFactory<Program> factory, string jeeberId)
@@ -611,6 +919,10 @@ public class WalletGuardOfferTests
         public bool EditCalled { get; private set; }
         public List<JeeberFeedOffer> JeeberFeed { get; } = new();
 
+        /// <summary>c2-2 test seam — an offer-service non-2xx blip, distinct from
+        /// "the offer is genuinely absent from a healthy 2xx read".</summary>
+        public bool JeeberFeedDegraded { get; set; }
+
         public Task<OfferAcceptResult> AcceptWithStatusAsync(
             string actingUserId, string requestId, string offerId, string idempotencyKey, CancellationToken ct)
         {
@@ -629,6 +941,14 @@ public class WalletGuardOfferTests
         public Task<IReadOnlyList<JeeberFeedOffer>> ListOffersForJeeberAsync(
             string jeeberId, string? status, CancellationToken ct)
             => Task.FromResult<IReadOnlyList<JeeberFeedOffer>>(JeeberFeed);
+
+        /// <summary>Ok-by-default (the seeded feed) so the existing 402/skip edit tests stay
+        /// green; only <see cref="JeeberFeedDegraded"/> yields the degraded sentinel.</summary>
+        public Task<OfferReadResult<JeeberFeedOffer>> TryListOffersForJeeberAsync(
+            string jeeberId, string? status, CancellationToken ct)
+            => Task.FromResult(JeeberFeedDegraded
+                ? new OfferReadResult<JeeberFeedOffer>(true, Array.Empty<JeeberFeedOffer>())
+                : new OfferReadResult<JeeberFeedOffer>(false, JeeberFeed.ToList()));
 
         public Task<OfferAcceptWire> AcceptAsync(
             string actingUserId, string requestId, string offerId, string idempotencyKey, CancellationToken ct)

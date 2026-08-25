@@ -281,14 +281,14 @@ public class OfferAcceptLifecyclePushTests
                 Envelope = new OfferAcceptWire
                 {
                     AcceptedOfferId = "v1-offer-win",
-                    JeeberId = "v1-jeeber-winner",
+                    JeeberId = "e3b8471d-0c26-4a95-b8f3-72d0a951c6e4",
                     RejectedOfferIds = new[] { "v1-loser-a" }
                 }
             }
         };
         using var factory = NewFactory(fake, push);
         var index = factory.Services.GetRequiredService<IOfferRequestIndex>();
-        index.Record("v1-offer-win", "v1-req", "v1-jeeber-winner");
+        index.Record("v1-offer-win", "v1-req", "e3b8471d-0c26-4a95-b8f3-72d0a951c6e4");
         index.Record("v1-loser-a", "v1-req", "v1-jeeber-loser-a");
 
         var resp = await ClientActor(factory, "v1-client").PostAsync("/v1/offers/v1-offer-win/accept", null);
@@ -297,7 +297,7 @@ public class OfferAcceptLifecyclePushTests
 
         push.Sends.Should().HaveCount(2);
         var winner = push.Sends.Single(s => TypeOf(s) == "offer_accepted");
-        winner.UserId.Should().Be("v1-jeeber-winner");
+        winner.UserId.Should().Be("e3b8471d-0c26-4a95-b8f3-72d0a951c6e4");
         var loser = push.Sends.Single(s => TypeOf(s) == "offer_lost");
         loser.UserId.Should().Be("v1-jeeber-loser-a");
         PayloadOf(loser)["offerId"].Should().Be("v1-loser-a");
@@ -321,7 +321,7 @@ public class OfferAcceptLifecyclePushTests
                 Envelope = new OfferAcceptWire
                 {
                     AcceptedOfferId = "v1-offer-win2",
-                    JeeberId = "v1-jeeber-winner2",
+                    JeeberId = "a1f0d63c-9b45-4e28-8d71-06c2f5b3a947",
                     // One resolvable loser, one NOT recorded in the index.
                     RejectedOfferIds = new[] { "v1-offer-known", "v1-offer-unknown" }
                 }
@@ -329,7 +329,7 @@ public class OfferAcceptLifecyclePushTests
         };
         using var factory = NewFactory(fake, push);
         var index = factory.Services.GetRequiredService<IOfferRequestIndex>();
-        index.Record("v1-offer-win2", "v1-req-2", "v1-jeeber-winner2");
+        index.Record("v1-offer-win2", "v1-req-2", "a1f0d63c-9b45-4e28-8d71-06c2f5b3a947");
         index.Record("v1-offer-known", "v1-req-2", "v1-jeeber-known");
         // v1-offer-unknown intentionally NOT recorded.
 
@@ -364,14 +364,14 @@ public class OfferAcceptLifecyclePushTests
                 Envelope = new OfferAcceptWire
                 {
                     AcceptedOfferId = "v1-offer-boom",
-                    JeeberId = "v1-jeeber-boom",
+                    JeeberId = "7f2c65b8-4a19-4d03-9e6c-b81f30d75a26",
                     RejectedOfferIds = new[] { "v1-offer-loser-boom" }
                 }
             }
         };
         using var factory = NewFactory(fake, push);
         var index = factory.Services.GetRequiredService<IOfferRequestIndex>();
-        index.Record("v1-offer-boom", "v1-req-boom", "v1-jeeber-boom");
+        index.Record("v1-offer-boom", "v1-req-boom", "7f2c65b8-4a19-4d03-9e6c-b81f30d75a26");
         index.Record("v1-offer-loser-boom", "v1-req-boom", "v1-jeeber-loser-boom");
 
         var resp = await ClientActor(factory, "v1-client-boom")

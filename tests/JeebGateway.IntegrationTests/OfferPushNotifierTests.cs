@@ -303,7 +303,7 @@ public class OfferPushNotifierTests
         using var factory = NewFactory(push);
 
         var (clientId, requestId) = await SeedRequestAsync(factory);
-        var jeeber = JeeberClient(factory, $"jeeber-{Guid.NewGuid()}");
+        var jeeber = JeeberClient(factory, Guid.NewGuid().ToString());
 
         var resp = await jeeber.PostAsJsonAsync(
             $"/requests/{requestId}/offers",
@@ -331,7 +331,7 @@ public class OfferPushNotifierTests
         using var factory = NewFactory(push);
 
         var (_, requestId) = await SeedRequestAsync(factory);
-        var jeeber = JeeberClient(factory, $"jeeber-{Guid.NewGuid()}");
+        var jeeber = JeeberClient(factory, Guid.NewGuid().ToString());
 
         var resp = await jeeber.PostAsJsonAsync(
             $"/requests/{requestId}/offers",

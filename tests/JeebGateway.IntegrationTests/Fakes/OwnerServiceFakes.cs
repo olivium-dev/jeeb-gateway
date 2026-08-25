@@ -132,10 +132,11 @@ internal sealed class TestUserManagementDualRoleClient : IUserManagementDualRole
         string phone, CancellationToken ct)
     {
         var isNew = false;
+        // A bare GUID, like live user-management: c2-1 resolves this id to a wallet holder.
         var userId = _usersByPhone.GetOrAdd(phone, _ =>
         {
             isNew = true;
-            return $"test-user-{Guid.NewGuid():N}";
+            return Guid.NewGuid().ToString("D");
         });
         var roles = _rolesByUser.GetOrAdd(
             userId,

@@ -49,8 +49,8 @@ public class JeeberOfferTerminalVisibilityTests
         using var factory = InMemoryFactory();
 
         var (_, requestId) = await SeedRequestAsync(factory);
-        var jeeberA = $"jeeber-a-{Guid.NewGuid():N}";
-        var jeeberB = $"jeeber-b-{Guid.NewGuid():N}";
+        var jeeberA = Guid.NewGuid().ToString("N");
+        var jeeberB = Guid.NewGuid().ToString("N");
 
         var offerA = await SubmitOfferAsync(factory, jeeberA, requestId, fee: 9m);
         var offerB = await SubmitOfferAsync(factory, jeeberB, requestId, fee: 8m);
@@ -89,7 +89,7 @@ public class JeeberOfferTerminalVisibilityTests
         using var factory = InMemoryFactory();
 
         var (clientId, requestId) = await SeedRequestAsync(factory);
-        var jeeber = $"jeeber-{Guid.NewGuid():N}";
+        var jeeber = Guid.NewGuid().ToString("N");
 
         var offerId = await SubmitOfferAsync(factory, jeeber, requestId, fee: 7m);
 
@@ -127,8 +127,8 @@ public class JeeberOfferTerminalVisibilityTests
         using var factory = UpstreamFactory(fake);
 
         var (clientId, requestId) = await SeedRequestAsync(factory);
-        var jeeberA = $"jeeber-a-{Guid.NewGuid():N}";
-        var jeeberB = $"jeeber-b-{Guid.NewGuid():N}";
+        var jeeberA = Guid.NewGuid().ToString("N");
+        var jeeberB = Guid.NewGuid().ToString("N");
         const string offerA = "up-offer-a";
         const string offerB = "up-offer-b";
 
@@ -182,7 +182,7 @@ public class JeeberOfferTerminalVisibilityTests
         using var factory = UpstreamFactory(fake);
 
         var (clientId, requestId) = await SeedRequestAsync(factory);
-        var jeeber = $"jeeber-{Guid.NewGuid():N}";
+        var jeeber = Guid.NewGuid().ToString("N");
         const string offerId = "up-offer-direct";
 
         var index = factory.Services.GetRequiredService<IOfferRequestIndex>();

@@ -167,39 +167,59 @@ public sealed class JeebOffersController : ControllerBase
         // Retired BR-10 active-delivery cap: do not pre-count delivery-service
         // assignments here. Offer-service still owns real accept conflicts below.
 
-        // F1 guard 2 — re-check the winning jeeber's balance before forwarding accept.
-        // Skips (never 500s) when bidder/fee are unresolvable, mirroring BR-1 below.
-        if (!string.IsNullOrWhiteSpace(winningJeeberId) && Guid.TryParse(winningJeeberId, out var winningJeeberGuid))
+        // F1 guard 2 — the winning jeeber must resolve to a wallet-holder GUID or the
+        // re-check cannot run; a blank / non-GUID winner is DENIED, never forwarded.
+        if (string.IsNullOrWhiteSpace(winningJeeberId)
+            || !Guid.TryParse(winningJeeberId, out var winningJeeberGuid))
         {
-            var offerFee = await ResolveAcceptedFeeAsync(requestId, offerId, ct);
-            if (offerFee is > 0m)
+            return StatusCode(StatusCodes.Status403Forbidden,
+                WalletGuardContract.WalletHolderUnresolvedProblem());
+        }
+
+        var feeRes = await ResolveAcceptedFeeAsync(requestId, offerId, ct);
+        if (feeRes.Degraded)
+        {
+            // A degraded fee read routes through the ONE FailMode knob, symmetric with a
+            // wallet-service outage. NO auto-withdraw: insufficiency was never confirmed.
+            if (_walletGuard.IsFailOpen)
             {
-                var required = WalletGuardContract.RequiredCommission(offerFee.Value);
-                var guard = await _walletGuard.CheckAsync(winningJeeberGuid, required, ct);
-                if (!guard.Allowed)
+                _logger.LogWarning(
+                    "F1 guard 2: accepted-fee lookup degraded; FailMode=fail-open, accept proceeds unchecked for offer {OfferId}.",
+                    offerId);
+            }
+            else
+            {
+                return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                    WalletGuardContract.OfferFeeUnresolvableProblem());
+            }
+        }
+        else if (feeRes.Fee is > 0m)
+        {
+            var required = WalletGuardContract.RequiredCommission(feeRes.Fee.Value);
+            var guard = await _walletGuard.CheckAsync(winningJeeberGuid, required, ct);
+            if (!guard.Allowed)
+            {
+                // An outage is NOT insufficiency: 503, and never withdraw the offer.
+                if (guard.DegradedByUpstreamFailure)
                 {
-                    // An outage is NOT insufficiency: 503, and never withdraw the offer.
-                    if (guard.DegradedByUpstreamFailure)
-                    {
-                        return StatusCode(StatusCodes.Status503ServiceUnavailable,
-                            WalletGuardContract.WalletUnavailableProblem());
-                    }
-
-                    await AutoWithdrawInsufficientBalanceOfferAsync(offerId, requestId, winningJeeberId, ct);
-
-                    return Conflict(new ProblemDetails
-                    {
-                        Title = "The winning jeeber's wallet balance no longer covers the offer's commission.",
-                        Status = StatusCodes.Status409Conflict,
-                        Type = "https://jeeb.dev/errors/offer-jeeber-insufficient-balance",
-                        Extensions =
-                        {
-                            ["needed"] = guard.Required,
-                            ["available"] = guard.Available,
-                            ["currency"] = guard.Currency,
-                        }
-                    });
+                    return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                        WalletGuardContract.WalletUnavailableProblem());
                 }
+
+                await AutoWithdrawInsufficientBalanceOfferAsync(offerId, requestId, winningJeeberId, ct);
+
+                return Conflict(new ProblemDetails
+                {
+                    Title = "The winning jeeber's wallet balance no longer covers the offer's commission.",
+                    Status = StatusCodes.Status409Conflict,
+                    Type = "https://jeeb.dev/errors/offer-jeeber-insufficient-balance",
+                    Extensions =
+                    {
+                        ["needed"] = guard.Required,
+                        ["available"] = guard.Available,
+                        ["currency"] = guard.Currency,
+                    }
+                });
             }
         }
 
@@ -449,7 +469,9 @@ public sealed class JeebOffersController : ControllerBase
         decimal? acceptedFee = null;
         try
         {
-            acceptedFee = await ResolveAcceptedFeeAsync(requestId, offerId, ct);
+            // A degraded read yields a null Fee here, so the snapshot is simply skipped —
+            // never a 5xx on this path (the saga already committed upstream).
+            acceptedFee = (await ResolveAcceptedFeeAsync(requestId, offerId, ct)).Fee;
             if (acceptedFee is > 0m
                 && await _requests.TrySetAcceptedFeeAsync(requestId, acceptedFee.Value, ct))
             {
@@ -893,19 +915,14 @@ public sealed class JeebOffersController : ControllerBase
     // next reader from looking.
     // -----------------------------------------------------------------------
 
-    /// <summary>
-    /// fix/client-visibility (run-22 P1): resolves the accepted offer's fee for the
-    /// accept-time snapshot. The caller is the request OWNER at this point, so the
-    /// owner-scoped offers list read is authorized against whichever
-    /// <c>IPendingOffersStore</c> is registered (in src/ that is the thin-BFF
-    /// offer-service adapter; a test may supply a double). Matches the accepted offer
-    /// by id; null when the offer cannot be resolved (the snapshot is then skipped,
-    /// never guessed).
-    /// </summary>
-    private async Task<decimal?> ResolveAcceptedFeeAsync(string requestId, string offerId, CancellationToken ct)
+    /// <summary>Resolves the accepted offer's fee via the owner-scoped list read (caller IS the owner).
+    /// <c>Failed</c> = the READ degraded (fail-mode at the guard); <c>Ok(null)</c> = 2xx with no fee.</summary>
+    private async Task<FeeResolution> ResolveAcceptedFeeAsync(string requestId, string offerId, CancellationToken ct)
     {
-        var offers = await _offers.ListForRequestAsync(requestId, ct);
-        return offers.FirstOrDefault(o => string.Equals(o.Id, offerId, StringComparison.Ordinal))?.Fee;
+        var res = await _offers.TryListForRequestAsync(requestId, ct);
+        if (res.Degraded) return FeeResolution.Failed;
+        return FeeResolution.Ok(
+            res.Items.FirstOrDefault(o => string.Equals(o.Id, offerId, StringComparison.Ordinal))?.Fee);
     }
 
     /// <summary>F1 guard 2, best-effort: withdraw the unaffordable offer + reuse the lost

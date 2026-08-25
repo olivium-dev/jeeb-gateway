@@ -7,6 +7,8 @@ namespace JeebGateway.Users;
 /// same subject has a complete wallet inventory. Provisioning is ordered first because an orphan
 /// zero-balance holder is safe, while a driver role without a settlement wallet is not.
 /// </summary>
+/// <remarks>Signup and a jeeber role-switch also ensure wallets, but BEST-EFFORT: a wallet blip
+/// must never fail a login, and the WalletHolderBackfill tool converges whatever was missed.</remarks>
 public sealed class WalletProvisioningDualRoleClient : IUserManagementDualRoleClient
 {
     private readonly IUserManagementDualRoleClient _inner;
@@ -23,14 +25,31 @@ public sealed class WalletProvisioningDualRoleClient : IUserManagementDualRoleCl
         _log = log;
     }
 
-    public Task<PhoneFindOrCreateResult> PhoneFindOrCreateAsync(string phone, CancellationToken ct) =>
-        _inner.PhoneFindOrCreateAsync(phone, ct);
+    public async Task<PhoneFindOrCreateResult> PhoneFindOrCreateAsync(string phone, CancellationToken ct)
+    {
+        var result = await _inner.PhoneFindOrCreateAsync(phone, ct);
+        if (Guid.TryParse(result.UserId, out var holderId) && holderId != Guid.Empty)
+        {
+            await TryEnsureWalletsAsync(holderId, ct);
+        }
 
-    public Task<RoleSwitchReissueResult> RoleSwitchAsync(
+        return result;
+    }
+
+    public async Task<RoleSwitchReissueResult> RoleSwitchAsync(
         string userId,
         string opaqueRole,
-        CancellationToken ct) =>
-        _inner.RoleSwitchAsync(userId, opaqueRole, ct);
+        CancellationToken ct)
+    {
+        if (string.Equals(opaqueRole, Roles.Jeeber, StringComparison.OrdinalIgnoreCase)
+            && Guid.TryParse(userId, out var holderId)
+            && holderId != Guid.Empty)
+        {
+            await TryEnsureWalletsAsync(holderId, ct);
+        }
+
+        return await _inner.RoleSwitchAsync(userId, opaqueRole, ct);
+    }
 
     public async Task<RoleGrantResult> AppendAvailableRoleAsync(
         string userId,
@@ -75,4 +94,24 @@ public sealed class WalletProvisioningDualRoleClient : IUserManagementDualRoleCl
 
     public Task<UserRolesResult?> GetUserRolesAsync(string userId, CancellationToken ct) =>
         _inner.GetUserRolesAsync(userId, ct);
+
+    /// <summary>Best-effort ensure for the non-grant seams: a missed wallet degrades to an honest
+    /// 402 at offer submit, whereas failing here would couple login to wallet-service uptime.</summary>
+    private async Task TryEnsureWalletsAsync(Guid holderId, CancellationToken ct)
+    {
+        try
+        {
+            await _wallet.EnsureAsync(holderId, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex,
+                "Signup wallet provisioning failed for userId={UserId}; backfill tool will converge.",
+                holderId);
+        }
+    }
 }

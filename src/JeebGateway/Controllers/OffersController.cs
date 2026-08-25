@@ -145,11 +145,35 @@ public class OffersController : ControllerBase
 
         // F1 guard 3 (API-only hardening — mobile never calls this route). Only a RAISED
         // fee needs a re-check; a lowered/unchanged fee needs no more balance than before.
-        if (feeCents is long newFeeCents && Guid.TryParse(actorId, out var jeeberGuid))
+        if (feeCents is long newFeeCents)
         {
-            var currentFeeCents = await ResolveCurrentFeeCentsAsync(actorId, offerId, ct);
-            if (currentFeeCents is long cur && newFeeCents > cur)
+            var currentFee = await ResolveCurrentFeeCentsAsync(actorId, offerId, ct);
+            if (currentFee.Degraded)
             {
+                // A degraded fee read routes through the ONE FailMode knob, symmetric
+                // with a wallet-service outage: fail-open warns, fail-closed 503s.
+                if (_walletGuard.IsFailOpen)
+                {
+                    _logger.LogWarning(
+                        "F1 guard 3: current-fee lookup degraded; FailMode=fail-open, edit proceeds unchecked for offer {OfferId}.",
+                        offerId);
+                }
+                else
+                {
+                    return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                        WalletGuardContract.OfferFeeUnresolvableProblem());
+                }
+            }
+            else if (currentFee.FeeCents is long cur && newFeeCents > cur)
+            {
+                // A confirmed RAISE by a caller that does not resolve to a wallet-holder
+                // GUID is DENIED (fail-closed), never skipped.
+                if (!Guid.TryParse(actorId, out var jeeberGuid))
+                {
+                    return StatusCode(StatusCodes.Status403Forbidden,
+                        WalletGuardContract.WalletHolderUnresolvedProblem());
+                }
+
                 var required = WalletGuardContract.RequiredCommission(newFeeCents / 100m);
                 var guard = await _walletGuard.CheckAsync(jeeberGuid, required, ct);
                 if (!guard.Allowed)
@@ -192,11 +216,15 @@ public class OffersController : ControllerBase
     }
 
     /// <summary>F1 guard 3: the offer's current fee, read via the jeeber-scoped feed list
-    /// (the actor here IS the jeeber). Null when unresolvable — the guard then skips.</summary>
-    private async Task<long?> ResolveCurrentFeeCentsAsync(string jeeberId, string offerId, CancellationToken ct)
+    /// (the actor here IS the jeeber). Degraded=true means the READ failed (fail-mode
+    /// governed); Degraded=false with a null fee is a genuine 2xx miss (benign skip).</summary>
+    private async Task<(bool Degraded, long? FeeCents)> ResolveCurrentFeeCentsAsync(
+        string jeeberId, string offerId, CancellationToken ct)
     {
-        var offers = await _offerService.ListOffersForJeeberAsync(jeeberId, status: null, ct);
-        return offers.FirstOrDefault(o => string.Equals(o.OfferId, offerId, StringComparison.Ordinal))?.FeeCents;
+        var res = await _offerService.TryListOffersForJeeberAsync(jeeberId, status: null, ct);
+        if (res.Degraded) return (true, null);
+        return (false, res.Items
+            .FirstOrDefault(o => string.Equals(o.OfferId, offerId, StringComparison.Ordinal))?.FeeCents);
     }
 
     // GW3 follow-up (2026-08-01): the flag-OFF in-memory offer edit helper
