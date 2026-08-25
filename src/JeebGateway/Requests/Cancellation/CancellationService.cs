@@ -164,19 +164,42 @@ public sealed class CancellationService : ICancellationService
     private readonly TimeProvider _clock;
     private readonly CancellationPolicyOptions _policy;
     private readonly ILogger<CancellationService> _log;
+    private readonly JeebGateway.Financials.Holds.IHoldManager? _holds;
 
     public CancellationService(
         IRequestsStore store,
         IJeeberRestrictionStore restrictions,
         TimeProvider clock,
         IOptions<CancellationPolicyOptions> policy,
-        ILogger<CancellationService>? logger = null)
+        ILogger<CancellationService>? logger = null,
+        JeebGateway.Financials.Holds.IHoldManager? holds = null)
     {
         _store = store;
         _restrictions = restrictions;
         _clock = clock;
         _policy = policy.Value;
         _log = logger ?? NullLogger<CancellationService>.Instance;
+        _holds = holds;
+    }
+
+    /// <summary>DECISION Op 3 "request cancelled pre-accept" — the CANONICAL cancel path, so every
+    /// bidder's hold is freed here rather than stranded until the sweeper's orphan grace.</summary>
+    private async Task ReleaseBidderHoldsAsync(string requestId, CancellationToken ct)
+    {
+        if (_holds is null) return;
+
+        try
+        {
+            await _holds.ReleaseForRequestAsync(requestId, "request-cancelled", ct);
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            // The cancel is already durable: a failed abort keeps the intent record and the
+            // hold sweeper retries it, but it must never fail the client's cancel.
+            _log.LogWarning(ex,
+                "Request {RequestId} was cancelled but releasing its offer holds failed; "
+                + "the hold sweeper will retry.", requestId);
+        }
     }
 
     /// <summary>O1: cancelling never refunds the accept-time fee. Counted, not reversed.</summary>
@@ -304,6 +327,7 @@ public sealed class CancellationService : ICancellationService
                 }
 
                 ObserveRetainedCommission(storeResult.Request, "client");
+                await ReleaseBidderHoldsAsync(deliveryId, ct);
 
                 return new CancellationResult(
                     CancellationOutcome.CancelledImmediately,

@@ -44,6 +44,9 @@ public class RequestsController : ControllerBase
     private readonly TimeProvider _clock;
     private readonly ScheduledDeliveryOptions _scheduledOptions;
     private readonly CreateModerationEvaluator _moderationEvaluator;
+    // c1/W3 DECISION Op 3: a pre-accept cancel kills every live bid on the request, so the
+    // bidders' commission holds must be aborted or their funds stay frozen indefinitely.
+    private readonly JeebGateway.Financials.Holds.IHoldManager? _holds;
     private readonly ILogger<RequestsController> _logger;
 
     public RequestsController(
@@ -53,7 +56,8 @@ public class RequestsController : ControllerBase
         TimeProvider clock,
         IOptions<ScheduledDeliveryOptions> scheduledOptions,
         CreateModerationEvaluator moderationEvaluator,
-        ILogger<RequestsController> logger)
+        ILogger<RequestsController> logger,
+        JeebGateway.Financials.Holds.IHoldManager? holds = null)
     {
         _store = store;
         _tiers = tiers;
@@ -61,6 +65,7 @@ public class RequestsController : ControllerBase
         _clock = clock;
         _scheduledOptions = scheduledOptions.Value;
         _moderationEvaluator = moderationEvaluator;
+        _holds = holds;
         _logger = logger;
     }
 
@@ -443,6 +448,22 @@ public class RequestsController : ControllerBase
         // fee would otherwise be invisible on exactly the path with the fewest guards.
         JeebGateway.Financials.CommissionRetention.Observe(
             _logger, requestId, existing.JeeberId, existing.AcceptedFee, "legacy-delete");
+
+        // DECISION Op 3 — the cancel is already durable, so this is fire-and-log: a failed
+        // abort keeps the intent record and the hold sweeper retries it.
+        if (_holds is not null)
+        {
+            try
+            {
+                await _holds.ReleaseForRequestAsync(requestId, "request-cancelled", ct);
+            }
+            catch (Exception ex) when (!ct.IsCancellationRequested)
+            {
+                _logger.LogWarning(ex,
+                    "Request {RequestId} was cancelled but releasing its offer holds failed; "
+                    + "the hold sweeper will retry.", requestId);
+            }
+        }
 
         return NoContent();
     }

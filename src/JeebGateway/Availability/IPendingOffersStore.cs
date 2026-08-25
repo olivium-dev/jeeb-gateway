@@ -210,6 +210,11 @@ public interface IPendingOffersStore
         string jeeberId, CancellationToken ct)
         => Task.FromResult<IReadOnlyList<PendingOffer>>(Array.Empty<PendingOffer>());
 
+    /// <summary>c1 STRICT enumeration (OD-C1-3): same read, DISCRIMINATED — Degraded separates "could not
+    /// list" from "no offers" (E5). Default = not degraded; the upstream store overrides it.</summary>
+    async Task<OfferReadResult<PendingOffer>> TryListForJeeberAsync(string jeeberId, CancellationToken ct)
+        => new(false, await ListForJeeberAsync(jeeberId, ct));
+
     /// <summary>
     /// T-backend-028 follow-up — close every still-live (<see cref="PendingOfferStatus.Pending"/>)
     /// offer on <paramref name="requestId"/> when the request itself reaches a terminal

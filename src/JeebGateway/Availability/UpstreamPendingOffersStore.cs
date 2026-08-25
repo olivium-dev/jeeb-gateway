@@ -374,6 +374,117 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
             .ToList();
     }
 
+    /// <summary>c1 STRICT enumeration (OD-C1-3) — the fail-CLOSED twin of <see cref="ListForJeeberAsync"/>:
+    /// every read that could hide a live bid yields <c>Degraded</c> (E5), never a short list.</summary>
+    /// <remarks>A clean empty set is a normal non-degraded result; only this discriminated variant is
+    /// strict — the my-offers read keeps its degrade-don't-fail contract.</remarks>
+    public async Task<OfferReadResult<PendingOffer>> TryListForJeeberAsync(
+        string jeeberId, CancellationToken ct)
+    {
+        // No jeeber, no reverse index, or no request read-model = the bids cannot be listed at all.
+        if (string.IsNullOrWhiteSpace(jeeberId) || _offerIndex is null || _requests is null)
+        {
+            return Unresolvable();
+        }
+
+        IReadOnlyList<string> offerIds;
+        try
+        {
+            offerIds = _offerIndex.ListOfferIdsForJeeber(jeeberId);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Reverse-index (durable KV) read fault — unlistable, never "no offers".
+            return Unresolvable();
+        }
+
+        if (offerIds.Count == 0)
+        {
+            return new OfferReadResult<PendingOffer>(false, Array.Empty<PendingOffer>());
+        }
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var requestIds = new List<string>(offerIds.Count);
+        foreach (var offerId in offerIds)
+        {
+            string? requestId;
+            try
+            {
+                requestId = _offerIndex.ResolveRequestId(offerId);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return Unresolvable();
+            }
+
+            // A recorded offer whose request pairing is gone would go uncounted: strictly unresolvable.
+            if (string.IsNullOrWhiteSpace(requestId))
+            {
+                return Unresolvable();
+            }
+
+            if (seen.Add(requestId!))
+            {
+                requestIds.Add(requestId!);
+            }
+        }
+
+        var mine = new List<PendingOffer>();
+        foreach (var requestId in requestIds)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            DeliveryRequest? request;
+            try
+            {
+                request = await _requests.GetAsync(requestId, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return Unresolvable();
+            }
+
+            // Without the request OWNER, offer-service's owner-scoped list cannot be read for this
+            // request, so its bids would silently drop out of the exposure sum.
+            if (request is null || string.IsNullOrWhiteSpace(request.ClientId))
+            {
+                return Unresolvable();
+            }
+
+            OfferReadResult<OfferWire> wires;
+            try
+            {
+                wires = await _client.TryListForRequestAsync(request.ClientId, requestId, ct);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                return Unresolvable();
+            }
+
+            if (wires.Degraded)
+            {
+                return Unresolvable();
+            }
+
+            foreach (var wire in wires.Items)
+            {
+                if (string.IsNullOrWhiteSpace(wire.Id)) continue;
+                if (!string.Equals(wire.JeeberId, jeeberId, StringComparison.Ordinal)) continue;
+
+                mine.Add(ToOwnPendingOffer(wire));
+            }
+        }
+
+        return new OfferReadResult<PendingOffer>(
+            false,
+            mine.OrderByDescending(o => o.CreatedAt).ToList());
+    }
+
+    /// <summary>E5 sentinel: unreadable exposure, reported as Degraded with no items (never a partial
+    /// list a caller could mistake for the jeeber's full live set).</summary>
+    private static OfferReadResult<PendingOffer> Unresolvable()
+        => new(true, Array.Empty<PendingOffer>());
+
     /// <summary>
     /// FR-6.6 nudge guard on the upstream wire. MUST override the interface default: that
     /// default routes through <see cref="ListForRequestAsync"/>, which resolves the acting

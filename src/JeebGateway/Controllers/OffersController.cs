@@ -1,6 +1,7 @@
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Availability;
 using JeebGateway.Financials;
+using JeebGateway.Financials.Holds;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using JeebGateway.Users;
@@ -61,6 +62,11 @@ public class OffersController : ControllerBase
     private readonly IOfferServiceClient _offerService;
     private readonly IOfferRequestIndex _offerRequestIndex;
     private readonly IWalletSufficiencyGuard _walletGuard;
+    // c1 holds: a raise must be reserved BEFORE it propagates upstream, and a declined
+    // bid is terminal, so its hold goes straight back (DECISION Op 2 / Op 3).
+    private readonly JeeberSubmitSerializer _serializer;
+    private readonly IHoldManager _holds;
+    private readonly HoldOptions _holdOptions;
     private readonly UpstreamFeatureFlags _flags;
     private readonly ILogger<OffersController> _logger;
 
@@ -68,12 +74,18 @@ public class OffersController : ControllerBase
         IOfferServiceClient offerService,
         IOfferRequestIndex offerRequestIndex,
         IWalletSufficiencyGuard walletGuard,
+        JeeberSubmitSerializer serializer,
+        IHoldManager holds,
+        IOptions<HoldOptions> holdOptions,
         IOptions<UpstreamFeatureFlags> flags,
         ILogger<OffersController> logger)
     {
         _offerService = offerService;
         _offerRequestIndex = offerRequestIndex;
         _walletGuard = walletGuard;
+        _serializer = serializer;
+        _holds = holds;
+        _holdOptions = holdOptions.Value;
         _flags = flags.Value;
         _logger = logger;
     }
@@ -147,8 +159,14 @@ public class OffersController : ControllerBase
         // fee needs a re-check; a lowered/unchanged fee needs no more balance than before.
         if (feeCents is long newFeeCents)
         {
-            var currentFee = await ResolveCurrentFeeCentsAsync(actorId, offerId, ct);
-            if (currentFee.Degraded)
+            // c1-F2 / DECISION I5 — ONE per-jeeber critical section spans the feed read, the
+            // exposure sum and the hold raise, so a concurrent submit cannot interleave.
+            using var gate = await _serializer.AcquireAsync(actorId, ct);
+
+            // The SINGLE jeeber-scoped read that serves BOTH the offer's current fee and this
+            // jeeber's exposure — the actor here IS the jeeber (c2-2 discriminated).
+            var feed = await _offerService.TryListOffersForJeeberAsync(actorId, status: null, ct);
+            if (feed.Degraded)
             {
                 // A degraded fee read routes through the ONE FailMode knob, symmetric
                 // with a wallet-service outage: fail-open warns, fail-closed 503s.
@@ -160,11 +178,13 @@ public class OffersController : ControllerBase
                 }
                 else
                 {
+                    // E4, frozen precedence: the one feed read serves fee AND exposure, so its
+                    // degrade stays offer-fee-unresolvable — never E5 on the edit surface.
                     return StatusCode(StatusCodes.Status503ServiceUnavailable,
                         WalletGuardContract.OfferFeeUnresolvableProblem());
                 }
             }
-            else if (currentFee.FeeCents is long cur && newFeeCents > cur)
+            else if (CurrentFeeCents(feed.Items, offerId) is long cur && newFeeCents > cur)
             {
                 // A confirmed RAISE by a caller that does not resolve to a wallet-holder
                 // GUID is DENIED (fail-closed), never skipped.
@@ -174,28 +194,21 @@ public class OffersController : ControllerBase
                         WalletGuardContract.WalletHolderUnresolvedProblem());
                 }
 
-                var required = WalletGuardContract.RequiredCommission(newFeeCents / 100m);
-                var guard = await _walletGuard.CheckAsync(jeeberGuid, required, ct);
-                if (!guard.Allowed)
-                {
-                    if (guard.DegradedByUpstreamFailure)
-                    {
-                        return StatusCode(StatusCodes.Status503ServiceUnavailable,
-                            WalletGuardContract.WalletUnavailableProblem());
-                    }
+                var thisOffer = WalletGuardContract.RequiredCommission(newFeeCents / 100m);
 
-                    return StatusCode(StatusCodes.Status402PaymentRequired, new ProblemDetails
-                    {
-                        Title = "Wallet balance does not cover the raised offer's commission.",
-                        Status = StatusCodes.Status402PaymentRequired,
-                        Type = "https://jeeb.dev/errors/insufficient-wallet-balance",
-                        Extensions =
-                        {
-                            ["needed"] = guard.Required,
-                            ["available"] = guard.Available,
-                            ["currency"] = guard.Currency,
-                        }
-                    });
+                // c1-F1 (OD-C1-4) — exposure comes from the SAME read; the edited offer is
+                // excluded because thisOffer already carries its NEW commission.
+                var outstanding = JeeberExposureCalculator.SumLiveCommission(
+                    feed.Items.Select(o => new ExposureLeg(o.OfferId, o.RequestId, o.FeeCents / 100m, o.Status)),
+                    excludeOfferId: offerId);
+
+                var denial = _holdOptions.Enabled
+                    ? await RaiseHoldForEditAsync(
+                        jeeberGuid, actorId, offerId, requestId, thisOffer, outstanding, ct)
+                    : await CheckEditExposureAsync(jeeberGuid, thisOffer, outstanding, ct);
+                if (denial is not null)
+                {
+                    return denial;
                 }
             }
         }
@@ -215,16 +228,109 @@ public class OffersController : ControllerBase
         return MapMutation(result, "edit");
     }
 
-    /// <summary>F1 guard 3: the offer's current fee, read via the jeeber-scoped feed list
-    /// (the actor here IS the jeeber). Degraded=true means the READ failed (fail-mode
-    /// governed); Degraded=false with a null fee is a genuine 2xx miss (benign skip).</summary>
-    private async Task<(bool Degraded, long? FeeCents)> ResolveCurrentFeeCentsAsync(
-        string jeeberId, string offerId, CancellationToken ct)
+    /// <summary>F1 guard 3: the edited offer's CURRENT fee inside the already-read feed. Null is a
+    /// genuine 2xx miss (benign skip) — a failed READ is the caller's Degraded branch.</summary>
+    private static long? CurrentFeeCents(IReadOnlyList<JeeberFeedOffer> feed, string offerId)
+        => feed.FirstOrDefault(o => string.Equals(o.OfferId, offerId, StringComparison.Ordinal))?.FeeCents;
+
+    /// <summary>Layer A (<c>Holds:Enabled=false</c>) — aggregate admission on the raise: the NEW
+    /// commission plus every other live offer's. Null = allowed.</summary>
+    private async Task<IActionResult?> CheckEditExposureAsync(
+        Guid jeeberGuid, decimal thisOffer, decimal outstanding, CancellationToken ct)
     {
-        var res = await _offerService.TryListOffersForJeeberAsync(jeeberId, status: null, ct);
-        if (res.Degraded) return (true, null);
-        return (false, res.Items
-            .FirstOrDefault(o => string.Equals(o.OfferId, offerId, StringComparison.Ordinal))?.FeeCents);
+        var guard = await _walletGuard.CheckAsync(jeeberGuid, thisOffer + outstanding, ct);
+        if (guard.Allowed) return null;
+
+        if (guard.DegradedByUpstreamFailure)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                WalletGuardContract.WalletUnavailableProblem());
+        }
+
+        return StatusCode(StatusCodes.Status402PaymentRequired,
+            InsufficientBalanceProblem(thisOffer, outstanding, guard));
+    }
+
+    /// <summary>Layer B (DECISION Op 2) — raise this offer's hold set to the NEW commission BEFORE
+    /// the edit propagates upstream; a delta ≤ 0 places nothing (over-hold is safe). Null = allowed.</summary>
+    private async Task<IActionResult?> RaiseHoldForEditAsync(
+        Guid jeeberGuid, string jeeberId, string offerId, string requestId,
+        decimal thisOffer, decimal outstanding, CancellationToken ct)
+    {
+        HoldPlacement raise;
+        try
+        {
+            raise = await _holds.RaiseDeltaAsync(
+                jeeberGuid, jeeberId, offerId, requestId, thisOffer, ct);
+        }
+        catch (System.Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "event={event} offerId={OfferId} jeeberId={JeeberId}",
+                "hold.edit.raise_failed", offerId, jeeberId);
+            return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                WalletGuardContract.WalletUnavailableProblem());
+        }
+
+        if (raise.Insufficient)
+        {
+            // Figures ONLY — the hold set, never this pending-netted read, decided the admission.
+            var balance = await _walletGuard.CheckAsync(jeeberGuid, thisOffer, ct);
+            return StatusCode(StatusCodes.Status402PaymentRequired,
+                InsufficientBalanceProblem(thisOffer, outstanding, balance));
+        }
+
+        if (raise.Unavailable || raise.ExposureUnresolvable)
+        {
+            // E5 is not an edit surface (CONTRACT §2), so a hold failure that is NOT
+            // insufficiency surfaces as E6 wallet-service-unavailable.
+            return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                WalletGuardContract.WalletUnavailableProblem());
+        }
+
+        return null;
+    }
+
+    /// <summary>E1 402 body (CONTRACT §2): AGGREGATE <c>needed</c> = the raised offer's commission
+    /// plus the jeeber's other live outstanding commission; <c>currency</c> is never null.</summary>
+    private ProblemDetails InsufficientBalanceProblem(
+        decimal thisOffer, decimal outstanding, WalletGuardResult guard)
+    {
+        // DESIGN §3.7: holds make the wallet read pending-netted, so `available` is reported GROSS
+        // (netted + held outstanding) to keep needed>available and mobile's top-up delta exact.
+        var available = _holdOptions.Enabled && guard.Available is decimal netted
+            ? netted + outstanding
+            : guard.Available;
+
+        return new ProblemDetails
+        {
+            Title = "Insufficient wallet balance to cover the platform fee.",
+            Status = StatusCodes.Status402PaymentRequired,
+            Type = "https://jeeb.dev/errors/insufficient-wallet-balance",
+            Extensions =
+            {
+                ["needed"] = thisOffer + outstanding,
+                ["thisOffer"] = thisOffer,
+                ["outstanding"] = outstanding,
+                ["available"] = available,
+                ["currency"] = guard.Currency,
+            }
+        };
+    }
+
+    /// <summary>Op 3 release. Unconditional (not gated on <c>Holds:Enabled</c>) so a rollback to the
+    /// flag-off mode still releases holds placed while it was on; never throws, never blocks.</summary>
+    private async Task ReleaseHoldAsync(string offerId, string reason, CancellationToken ct)
+    {
+        try
+        {
+            await _holds.ReleaseForOfferAsync(offerId, reason, ct);
+        }
+        catch (System.Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "event={event} offerId={OfferId} reason={Reason}",
+                "hold.release.failed", offerId, reason);
+        }
     }
 
     // GW3 follow-up (2026-08-01): the flag-OFF in-memory offer edit helper
@@ -286,6 +392,13 @@ public class OffersController : ControllerBase
         {
             _logger.LogWarning(ex, "offer-service reject for offer {OfferId} failed.", offerId);
             return OfferUpstreamUnavailable("reject");
+        }
+
+        if (result.Status == OfferMutationStatus.Ok)
+        {
+            // Op 3 release trigger, only on an UPSTREAM-CONFIRMED decline: the bid is terminal,
+            // so its hold goes back at once. Fire-and-log — never blocks the client's 200.
+            await ReleaseHoldAsync(offerId, "declined", ct);
         }
 
         return MapMutation(result, "reject");

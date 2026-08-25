@@ -85,6 +85,16 @@ public interface IOfferPushNotifier
         string requestId,
         string offerId,
         CancellationToken ct);
+
+    /// <summary>c1/W3 (CONTRACT §3) — best-effort: their offer was withdrawn because the wallet no
+    /// longer covers the 10% fee. Wire <c>type=offer_withdrawn_insufficient_balance</c>, <c>jeeb://wallet</c>.</summary>
+    /// <remarks>Both emitters (sweeper forced withdraw, accept auto-withdraw) call THIS method so
+    /// their payloads cannot drift. Never throws; blank recipient = no-op.</remarks>
+    Task NotifyOfferWithdrawnInsufficientBalanceAsync(
+        string jeeberId,
+        string requestId,
+        string offerId,
+        CancellationToken ct);
 }
 
 /// <inheritdoc />
@@ -460,6 +470,37 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
     /// </summary>
     internal const string RetiredOfferLostTemplateKey = "jeeb.offer_rejected";
 
+    /// <summary>CONTRACT §3 wire discriminator — mobile routes on THIS, never on `category`.</summary>
+    internal const string OfferWithdrawnInsufficientBalanceType =
+        "offer_withdrawn_insufficient_balance";
+
+    /// <summary>Opaque generic-event envelope; deliberately NOT a catalog TemplateKey
+    /// (this push has no notification-centre route, exactly like offer_lost).</summary>
+    internal const string OfferWithdrawnInsufficientBalanceEventType =
+        "jeeb.offer_withdrawn_insufficient_balance";
+
+    /// <summary>CONTRACT §3: the top-up destination, not the (now dead) offer.</summary>
+    internal const string WalletDeepLink = "jeeb://wallet";
+
+    /// <summary>CONTRACT §5 rows P-1/P-2, EN — these BYTES are the contract: an older build shows them
+    /// verbatim, so they must match the mobile l10n copy. Gateway-rendered, no locale; AR is mobile-side.</summary>
+    internal static readonly NotificationTemplate OfferWithdrawnInsufficientBalanceTemplate = new(
+        "Offer withdrawn — top up to keep bidding",
+        "Your winning offer was withdrawn because your wallet no longer covers the 10% platform fee. Tap to top up.");
+
+    // Reuses the lifecycle send helper verbatim: same CTS budget, same flat payload, same
+    // never-throws contract — only recipient, copy, type, deep link and category differ.
+    public Task NotifyOfferWithdrawnInsufficientBalanceAsync(
+        string jeeberId, string requestId, string offerId, CancellationToken ct)
+        => SendLifecycleAsync(
+            jeeberId, requestId, offerId,
+            templateKey: OfferWithdrawnInsufficientBalanceEventType,
+            type: OfferWithdrawnInsufficientBalanceType, ct,
+            renderedTemplate: OfferWithdrawnInsufficientBalanceTemplate,
+            deepLinkOverride: WalletDeepLink,
+            genericEventType: OfferWithdrawnInsufficientBalanceEventType,
+            genericEventCategory: PushSilencePolicy.CategoryWallet);
+
     private async Task SendLifecycleAsync(
         string recipientId,
         string requestId,
@@ -469,7 +510,9 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
         CancellationToken ct,
         NotificationTemplate? renderedTemplate = null,
         string? notificationCorrelationId = null,
-        string? deepLinkOverride = null)
+        string? deepLinkOverride = null,
+        string? genericEventType = null,
+        string? genericEventCategory = null)
     {
         try
         {
@@ -506,19 +549,25 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
                 payload["notification_id"] = notificationCorrelationId;
             }
 
-            // offer_lost has no notification-centre route, so the generic seam is the only way
-            // it survives the gateway ceasing to be a push producer.
-            if (string.Equals(templateKey, RetiredOfferLostTemplateKey, StringComparison.Ordinal))
+            // Types with no notification-centre route (offer_lost; the c1 wallet withdraw) take
+            // the generic seam — the only way they survive the gateway ceasing to be a producer.
+            var eventType = genericEventType
+                ?? (string.Equals(templateKey, RetiredOfferLostTemplateKey, StringComparison.Ordinal)
+                    ? JeebGenericEventTypes.OfferLostEventType
+                    : null);
+            if (eventType is not null)
             {
                 var handover = await _events.DispatchAsync(
-                    JeebGenericEventTypes.OfferLostEventType,
+                    eventType,
                     recipientId,
                     offerId,
                     template.Title,
                     template.Body,
                     payload.ToDictionary(
                         kv => kv.Key, kv => kv.Value?.ToString() ?? string.Empty, StringComparer.Ordinal),
-                    PushSilencePolicy.CategoryOfferLost,
+                    // GenericEventDispatcher.BuildRecord overwrites data["category"] with this, so
+                    // the upstream route carries `wallet` while the direct fallback keeps `delivery`.
+                    genericEventCategory ?? PushSilencePolicy.CategoryOfferLost,
                     ct);
 
                 if (handover.Classification

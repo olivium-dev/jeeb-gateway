@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Net.Http;
@@ -49,6 +50,24 @@ public sealed class WalletCommissionDebitException : Exception
         string.Equals(ProblemType, IdempotencyConflictType, StringComparison.Ordinal);
 }
 
+/// <summary>One wallet-service transaction header sharing a hold's external reference: its status
+/// and the summed amount of its legs.</summary>
+public readonly record struct HoldHeader(Guid TxId, string? Status, decimal Amount)
+{
+    /// <summary>THE single pending predicate (placer AND reconciler). Numeric or name-shaped; an
+    /// ABSENT status counts as held, so an unclassifiable header never triggers a second hold.</summary>
+    public bool IsPending
+    {
+        get
+        {
+            var value = Status?.Trim();
+            return string.IsNullOrEmpty(value)
+                   || string.Equals(value, "pending", StringComparison.OrdinalIgnoreCase)
+                   || string.Equals(value, "-1", StringComparison.Ordinal);
+        }
+    }
+}
+
 /// <summary>
 /// O1 — the narrow wallet-service surface the commission debit needs. Hand-rolled because the
 /// generated <c>ServiceWalletClient</c> carries no <c>Idempotency-Key</c> parameter, and that header
@@ -68,9 +87,27 @@ public interface IWalletCommissionDebitClient
         Guid sourceWalletId, Guid destinationWalletId, decimal amount,
         string tag, string notes, string idempotencyKey, string externalReference, CancellationToken ct);
 
+    /// <summary>Same call with the leg's <c>isAdditionalFees</c> chosen by the caller: holds place
+    /// <c>false</c> legs, the capture debit keeps <c>true</c>.</summary>
+    Task<Guid> InitiateAsync(
+        Guid sourceWalletId, Guid destinationWalletId, decimal amount,
+        string tag, string notes, string idempotencyKey, string externalReference,
+        bool isAdditionalFees, CancellationToken ct)
+        // Default keeps pre-holds implementors (test fakes) compiling; the real client overrides it.
+        => InitiateAsync(
+            sourceWalletId, destinationWalletId, amount, tag, notes, idempotencyKey, externalReference, ct);
+
     /// <summary>GET Transaction/by-external-reference/{ref} — a pure READ that links a settlement row
     /// back to the accept-time debit. Null when no debit carries the reference.</summary>
     Task<Guid?> FindByExternalReferenceAsync(string externalReference, CancellationToken ct);
+
+    /// <summary>The FULL header set under one external reference (a hold's base + raise deltas),
+    /// each with its status and summed leg amount; empty when the reference is unknown.</summary>
+    Task<IReadOnlyList<HoldHeader>> ListByExternalReferenceAsync(
+        string externalReference, CancellationToken ct)
+        // Fails loud rather than reporting a fabricated (and therefore unreleasable) empty hold set.
+        => throw new NotSupportedException(
+            $"{GetType().Name} does not implement ListByExternalReferenceAsync.");
 
     /// <summary>POST Transaction/{id}/execute. Idempotent upstream on the transaction id.</summary>
     Task ExecuteAsync(Guid transactionId, CancellationToken ct);
@@ -107,9 +144,18 @@ public sealed class WalletCommissionDebitClient : IWalletCommissionDebitClient
         return PickWallet(system?.Wallets, requireSpendable: false);
     }
 
-    public async Task<Guid> InitiateAsync(
+    public Task<Guid> InitiateAsync(
         Guid sourceWalletId, Guid destinationWalletId, decimal amount,
         string tag, string notes, string idempotencyKey, string externalReference, CancellationToken ct)
+        // The capture debit's wire stays byte-identical: this overload is the old call, flag pinned true.
+        => InitiateAsync(
+            sourceWalletId, destinationWalletId, amount, tag, notes, idempotencyKey, externalReference,
+            isAdditionalFees: true, ct);
+
+    public async Task<Guid> InitiateAsync(
+        Guid sourceWalletId, Guid destinationWalletId, decimal amount,
+        string tag, string notes, string idempotencyKey, string externalReference,
+        bool isAdditionalFees, CancellationToken ct)
     {
         var body = new InitiateWire(
             ServiceName: "jeeb-gateway",
@@ -119,7 +165,7 @@ public sealed class WalletCommissionDebitClient : IWalletCommissionDebitClient
             // The caller supplies the complete accounting entry; wallet-service must not append
             // its own configured fee leg on top of a fee.
             ApplyConfiguredFees: false,
-            Transactions: [new LegWire(sourceWalletId, destinationWalletId, amount, IsAdditionalFees: true)]);
+            Transactions: [new LegWire(sourceWalletId, destinationWalletId, amount, isAdditionalFees)]);
 
         using var request = new HttpRequestMessage(HttpMethod.Post, "Transaction/initiate")
         {
@@ -147,6 +193,35 @@ public sealed class WalletCommissionDebitClient : IWalletCommissionDebitClient
             $"Transaction/by-external-reference/{Uri.EscapeDataString(externalReference)}", ct);
         var txId = found?.FirstOrDefault()?.TransactionHeader?.TxId;
         return txId is null || txId == Guid.Empty ? null : txId;
+    }
+
+    public async Task<IReadOnlyList<HoldHeader>> ListByExternalReferenceAsync(
+        string externalReference, CancellationToken ct)
+    {
+        var found = await GetAsync<List<TransactionWire>>(
+            $"Transaction/by-external-reference/{Uri.EscapeDataString(externalReference)}", ct);
+        if (found is null || found.Count == 0) return Array.Empty<HoldHeader>();
+
+        var headers = new List<HoldHeader>(found.Count);
+        foreach (var transaction in found)
+        {
+            var header = transaction?.TransactionHeader;
+            if (header is null) continue;
+
+            var amount = 0m;
+            var legs = transaction.TransactionDetails;
+            if (legs is not null)
+            {
+                foreach (var leg in legs)
+                {
+                    if (leg is not null) amount += leg.Amount;
+                }
+            }
+
+            headers.Add(new HoldHeader(header.TxId, DescribeStatus(header.Status), amount));
+        }
+
+        return headers;
     }
 
     public async Task ExecuteAsync(Guid transactionId, CancellationToken ct)
@@ -250,6 +325,26 @@ public sealed class WalletCommissionDebitClient : IWalletCommissionDebitClient
         }
     }
 
+    /// <summary>wallet-service serializes status as the numeric enum value (-1/0/-2); map it to its
+    /// name so callers compare one vocabulary, and pass anything else through verbatim.</summary>
+    private static string? DescribeStatus(JsonElement? status)
+    {
+        if (status is not { } value) return null;
+
+        return value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString(),
+            JsonValueKind.Number when value.TryGetInt32(out var code) => code switch
+            {
+                -1 => "Pending",
+                0 => "Executed",
+                -2 => "Aborted",
+                _ => code.ToString(CultureInfo.InvariantCulture),
+            },
+            _ => null,
+        };
+    }
+
     private static string Truncate(string body) => body.Length <= 300 ? body : body[..300];
 
     // ── wire shapes (wallet-service DTOs; opaque strings, no jeeb vocabulary leaves the gateway) ──
@@ -271,11 +366,22 @@ public sealed class WalletCommissionDebitClient : IWalletCommissionDebitClient
     private sealed class TransactionWire
     {
         public TransactionHeaderWire? TransactionHeader { get; set; }
+
+        /// <summary>The header's legs; nullable so every pre-holds read stays untouched.</summary>
+        public IReadOnlyList<TransactionLegWire?>? TransactionDetails { get; set; }
     }
 
     private sealed class TransactionHeaderWire
     {
         public Guid TxId { get; set; }
+
+        /// <summary>Numeric on the wire; nullable so a body without it deserializes as before.</summary>
+        public JsonElement? Status { get; set; }
+    }
+
+    private sealed class TransactionLegWire
+    {
+        public decimal Amount { get; set; }
     }
 
     private sealed class HolderWalletsWire

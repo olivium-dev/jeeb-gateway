@@ -2,6 +2,7 @@ using JeebGateway.Auth.Capabilities;
 using JeebGateway.Availability;
 using JeebGateway.Conversations;
 using JeebGateway.Financials;
+using JeebGateway.Financials.Holds;
 using JeebGateway.Observability;
 using JeebGateway.Notifications;
 using JeebGateway.Requests;
@@ -52,6 +53,13 @@ public sealed class JeebOffersController : ControllerBase
     private readonly IDetachedPushDispatcher _detachedPush;
     private readonly IWalletSufficiencyGuard _walletGuard;
     private readonly ICommissionCollector _commission;
+    // c1 holds: the winner's own hold is the accept-time guarantee, and the losers'
+    // holds are released the moment the auction closes (DECISION Op 3 / Op 4).
+    private readonly JeeberSubmitSerializer _serializer;
+    private readonly IHoldManager _holds;
+    private readonly IWalletCommissionDebitClient _holdLedger;
+    private readonly HoldOptions _holdOptions;
+    private readonly CommissionCollectionOptions _commissionOptions;
     private readonly IHandoverCodeStore _handoverCodes;
     private readonly UpstreamFeatureFlags _flags;
     private readonly DeliveryClientOptions _deliveryOptions;
@@ -71,6 +79,11 @@ public sealed class JeebOffersController : ControllerBase
         IDetachedPushDispatcher detachedPush,
         IWalletSufficiencyGuard walletGuard,
         ICommissionCollector commission,
+        JeeberSubmitSerializer serializer,
+        IHoldManager holds,
+        IWalletCommissionDebitClient holdLedger,
+        IOptions<HoldOptions> holdOptions,
+        IOptions<CommissionCollectionOptions> commissionOptions,
         IHandoverCodeStore handoverCodes,
         IOptions<UpstreamFeatureFlags> flags,
         IOptions<DeliveryClientOptions> deliveryOptions,
@@ -88,6 +101,11 @@ public sealed class JeebOffersController : ControllerBase
         _detachedPush = detachedPush;
         _walletGuard = walletGuard;
         _commission = commission;
+        _serializer = serializer;
+        _holds = holds;
+        _holdLedger = holdLedger;
+        _holdOptions = holdOptions.Value;
+        _commissionOptions = commissionOptions.Value;
         _handoverCodes = handoverCodes;
         _flags = flags.Value;
         _deliveryOptions = deliveryOptions.Value;
@@ -176,6 +194,10 @@ public sealed class JeebOffersController : ControllerBase
                 WalletGuardContract.WalletHolderUnresolvedProblem());
         }
 
+        // Named so a saga that does NOT commit can drop the leg the revalidation placed:
+        // nothing downstream would ever release it (B1 — frozen commission).
+        var revalidateTxId = Guid.Empty;
+
         var feeRes = await ResolveAcceptedFeeAsync(requestId, offerId, ct);
         if (feeRes.Degraded)
         {
@@ -195,31 +217,60 @@ public sealed class JeebOffersController : ControllerBase
         }
         else if (feeRes.Fee is > 0m)
         {
-            var required = WalletGuardContract.RequiredCommission(feeRes.Fee.Value);
-            var guard = await _walletGuard.CheckAsync(winningJeeberGuid, required, ct);
-            if (!guard.Allowed)
+            var thisOffer = WalletGuardContract.RequiredCommission(feeRes.Fee.Value);
+
+            // E5 (OD-C1-3) — STRICT enumeration of the WINNER's offers. A degraded read BLOCKS
+            // the accept and NEVER auto-withdraws: insufficiency was not confirmed.
+            var mineRead = await _offers.TryListForJeeberAsync(winningJeeberId, ct);
+            if (mineRead.Degraded)
+            {
+                return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                    WalletGuardContract.OfferExposureUnresolvableProblem());
+            }
+
+            // C1-F4 — this request is the one being decided, so its own leg is excluded; every
+            // OTHER live offer of the winner is exposure that must still be covered.
+            var outstandingOthers = JeeberExposureCalculator.SumLiveCommission(
+                mineRead.Items.Select(o => new ExposureLeg(o.Id, o.RequestId, o.Fee, o.Status)),
+                excludeRequestId: requestId);
+
+            AcceptAdmission admission;
+            if (_holdOptions.Enabled)
+            {
+                var revalidated = await RevalidateWinnerHoldAsync(
+                    winningJeeberGuid, winningJeeberId, offerId, requestId, thisOffer, ct);
+                admission = revalidated.Admission;
+                revalidateTxId = revalidated.PlacedTxId;
+            }
+            else
+            {
+                admission = await CheckAggregateExposureAsync(
+                    winningJeeberGuid, thisOffer + outstandingOthers, ct);
+            }
+
+            switch (admission)
             {
                 // An outage is NOT insufficiency: 503, and never withdraw the offer.
-                if (guard.DegradedByUpstreamFailure)
-                {
+                case AcceptAdmission.WalletUnavailable:
                     return StatusCode(StatusCodes.Status503ServiceUnavailable,
                         WalletGuardContract.WalletUnavailableProblem());
-                }
 
-                await AutoWithdrawInsufficientBalanceOfferAsync(offerId, requestId, winningJeeberId, ct);
+                case AcceptAdmission.ExposureUnresolvable:
+                    return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                        WalletGuardContract.OfferExposureUnresolvableProblem());
 
-                return Conflict(new ProblemDetails
-                {
-                    Title = "The winning jeeber's wallet balance no longer covers the offer's commission.",
-                    Status = StatusCodes.Status409Conflict,
-                    Type = "https://jeeb.dev/errors/offer-jeeber-insufficient-balance",
-                    Extensions =
+                case AcceptAdmission.Insufficient:
+                    await AutoWithdrawInsufficientBalanceOfferAsync(
+                        offerId, requestId, winningJeeberId, "withdraw", ct);
+
+                    // E7 (OD-C4-2) — DE-LEAKED: the slug stays for machine telemetry, but the
+                    // jeeber's needed/available/currency figures never reach the CLIENT.
+                    return Conflict(new ProblemDetails
                     {
-                        ["needed"] = guard.Required,
-                        ["available"] = guard.Available,
-                        ["currency"] = guard.Currency,
-                    }
-                });
+                        Title = "This offer is no longer available.",
+                        Status = StatusCodes.Status409Conflict,
+                        Type = "https://jeeb.dev/errors/offer-jeeber-insufficient-balance",
+                    });
             }
         }
 
@@ -236,6 +287,7 @@ public sealed class JeebOffersController : ControllerBase
         if (!string.IsNullOrWhiteSpace(winningJeeberId)
             && string.Equals(winningJeeberId, actorId, StringComparison.Ordinal))
         {
+            await RollbackRevalidationHoldAsync(offerId, winningJeeberId, revalidateTxId, ct);
             return Conflict(new ProblemDetails
             {
                 Title = "Cannot accept your own delivery request (BR-1).",
@@ -255,6 +307,13 @@ public sealed class JeebOffersController : ControllerBase
             : idempotencyKey;
 
         var result = await _offerService.AcceptWithStatusAsync(actorId, requestId, offerId, key, ct);
+
+        if (result.Status != OfferAcceptStatus.Accepted)
+        {
+            // No winner means no capture and no close-of-auction release, so the leg the
+            // revalidation just placed would stay pending with nobody left to free it.
+            await RollbackRevalidationHoldAsync(offerId, winningJeeberId, revalidateTxId, ct);
+        }
 
         return result.Status switch
         {
@@ -286,6 +345,88 @@ public sealed class JeebOffersController : ControllerBase
                 Status = StatusCodes.Status502BadGateway
             })
         };
+    }
+
+    /// <summary>How the accept-time balance guarantee resolved, kept separate from the HTTP mapping
+    /// so holds-on and holds-off cannot drift into different caller contracts.</summary>
+    private enum AcceptAdmission { Allowed, Insufficient, WalletUnavailable, ExposureUnresolvable }
+
+    /// <summary>Layer A (<c>Holds:Enabled=false</c>) — the winner's whole live exposure, this
+    /// offer's commission plus every other live offer's, in ONE aggregate check.</summary>
+    private async Task<AcceptAdmission> CheckAggregateExposureAsync(
+        Guid jeeberGuid, decimal required, CancellationToken ct)
+    {
+        var guard = await _walletGuard.CheckAsync(jeeberGuid, required, ct);
+        if (guard.Allowed) return AcceptAdmission.Allowed;
+
+        return guard.DegradedByUpstreamFailure
+            ? AcceptAdmission.WalletUnavailable
+            : AcceptAdmission.Insufficient;
+    }
+
+    /// <summary>Layer B (DECISION Op 1) — the winner's OWN hold IS the guarantee, so the accept tops
+    /// that set up to the commission instead of re-checking an aggregate the holds already net out.</summary>
+    /// <remarks>Reports the leg it placed so a saga that does not commit can roll it back; a
+    /// short set is backfilled by the SHORTFALL only, never the full commission.</remarks>
+    private async Task<(AcceptAdmission Admission, Guid PlacedTxId)> RevalidateWinnerHoldAsync(
+        Guid jeeberGuid, string jeeberId, string offerId, string requestId,
+        decimal required, CancellationToken ct)
+    {
+        using (await _serializer.AcquireAsync(jeeberId, ct))
+        {
+            try
+            {
+                // Frozen naming: ONE external reference per offer carries its base + raise deltas.
+                var headers = await _holdLedger.ListByExternalReferenceAsync(
+                    HoldManager.ExternalReferenceFor(offerId), ct);
+                var held = headers.Where(h => h.IsPending).Sum(h => h.Amount);
+                if (held >= required) return (AcceptAdmission.Allowed, Guid.Empty);
+
+                // Shortfall, not `required`: a full re-place double-holds a partly-collateralised
+                // winner and can 402 a jeeber whose balance covers what is actually missing.
+                var placement = await _holds.PlaceOnSubmitAsync(
+                    jeeberGuid, jeeberId, offerId, requestId, required - held, ct);
+                if (placement.Placed) return (AcceptAdmission.Allowed, placement.TxId);
+                if (placement.Insufficient) return (AcceptAdmission.Insufficient, Guid.Empty);
+                if (placement.ExposureUnresolvable)
+                    return (AcceptAdmission.ExposureUnresolvable, Guid.Empty);
+
+                return (AcceptAdmission.WalletUnavailable, Guid.Empty);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // A hold-set read fault is an outage, not insufficiency — routed through the ONE
+                // FailMode knob, exactly like a wallet-service outage at the aggregate check.
+                _logger.LogWarning(ex,
+                    "event={event} offerId={OfferId} jeeberId={JeeberId} failOpen={FailOpen}",
+                    "hold.accept.revalidate_failed", offerId, jeeberId, _walletGuard.IsFailOpen);
+
+                return _walletGuard.IsFailOpen
+                    ? (AcceptAdmission.Allowed, Guid.Empty)
+                    : (AcceptAdmission.WalletUnavailable, Guid.Empty);
+            }
+        }
+    }
+
+    /// <summary>Drops the accept revalidation's own leg when the saga did not produce a winner —
+    /// the one placement in this flow with no downstream terminal transition to release it.</summary>
+    private async Task RollbackRevalidationHoldAsync(
+        string offerId, string? jeeberId, Guid txId, CancellationToken ct)
+    {
+        if (txId == Guid.Empty) return;
+
+        try
+        {
+            using (await _serializer.AcquireAsync(jeeberId ?? offerId, ct))
+            {
+                await _holds.RollbackLegAsync(offerId, txId, "accept-not-committed", ct);
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex,
+                "event={event} offerId={OfferId} txId={TxId}", "hold.accept.rollback_failed", offerId, txId);
+        }
     }
 
     /// <summary>
@@ -519,21 +660,34 @@ public sealed class JeebOffersController : ControllerBase
         // never throws; its outcome is counted and logged. Awaited, not detached, because money must
         // resolve inside the request that caused it rather than after the response.
         var billableFee = acceptedFee ?? req?.AcceptedFee;
-        if (!string.IsNullOrWhiteSpace(winningJeeberId) && billableFee is > 0m)
+        var billable = !string.IsNullOrWhiteSpace(winningJeeberId) && billableFee is > 0m;
+        if (billable)
         {
-            try
+            using (await _serializer.AcquireAsync(winningJeeberId!, ct))
             {
-                await _commission.CollectOnAcceptAsync(
-                    new CommissionCollectionCommand(requestId, winningJeeberId, billableFee.Value), ct);
-            }
-            catch (Exception ex)
-            {
-                // The collector is contracted never to throw; this is the belt for the day that
-                // contract breaks, because a closed auction must never surface as a 5xx.
-                BusinessOutcomeTelemetry.CommissionCollectionFailures.Add(1);
-                _logger.LogError(ex,
-                    "commission.accept.threw requestId={RequestId} jeeberId={JeeberId}; accept stays "
-                    + "200 and the fee is UNCOLLECTED.", requestId, winningJeeberId);
+                // DECISION Op 4 — capture BY CONVERSION: abort the winner's hold set, THEN the
+                // existing debit. Direct execute of a hold is FORBIDDEN.
+                if (_commissionOptions.Enabled)
+                {
+                    await AbortWinnerHoldSetAsync(offerId, ct);
+                }
+
+                try
+                {
+                    // The collector OWNS the Enabled flag: with it off it moves no money and
+                    // counts the skip (commission.accept.skipped), which O1 requires.
+                    await _commission.CollectOnAcceptAsync(
+                        new CommissionCollectionCommand(requestId, winningJeeberId!, billableFee!.Value), ct);
+                }
+                catch (Exception ex)
+                {
+                    // The collector is contracted never to throw; this is the belt for the day that
+                    // contract breaks, because a closed auction must never surface as a 5xx.
+                    BusinessOutcomeTelemetry.CommissionCollectionFailures.Add(1);
+                    _logger.LogError(ex,
+                        "commission.accept.threw requestId={RequestId} jeeberId={JeeberId}; accept stays "
+                        + "200 and the fee is UNCOLLECTED.", requestId, winningJeeberId);
+                }
             }
         }
         else
@@ -542,6 +696,13 @@ public sealed class JeebOffersController : ControllerBase
                 "commission.accept.no_basis requestId={RequestId} offerId={OfferId} jeeberId={JeeberId} "
                 + "fee={Fee}; the accept stands but there is nothing to bill against.",
                 requestId, offerId, winningJeeberId, billableFee);
+        }
+
+        if (!billable || !_commissionOptions.Enabled)
+        {
+            // DECISION Op 3 — collection is OFF (or there is no basis to bill), so nothing will
+            // EVER capture this hold: release it at the auction's close, not via the sweeper.
+            await ReleaseHoldAsync(offerId, "accept-collection-disabled", ct);
         }
 
         // S03 P1 — ensure the chat conversation EXISTS, then seat the winning jeeber.
@@ -570,6 +731,10 @@ public sealed class JeebOffersController : ControllerBase
         // internet connection" about an auction they successfully closed. Raising the cap is
         // only safe behind the response, so the fan-out moves behind it.
         DispatchAcceptLifecyclePushes(requestId, offerId, winningJeeberId, result.Envelope?.RejectedOfferIds);
+
+        // DECISION Op 3 — the same envelope names every bid that just lost: each is terminal, so
+        // its hold is released here rather than left for the sweeper's orphan branch.
+        await ReleaseSupersededHoldsAsync(result.Envelope?.RejectedOfferIds, ct);
 
         // Gap G4 (run-24 CHECK C) — mint the CUSTOMER's in-app handover code at accept
         // and ride it ONLY on this owner's accept response as `handoverCode`. The
@@ -925,10 +1090,55 @@ public sealed class JeebOffersController : ControllerBase
             res.Items.FirstOrDefault(o => string.Equals(o.Id, offerId, StringComparison.Ordinal))?.Fee);
     }
 
+    /// <summary>Op 3 release, per losing bid on the accepted request. Fire-and-log: a failed abort
+    /// keeps the intent record for the sweeper and never touches the committed accept.</summary>
+    private async Task ReleaseSupersededHoldsAsync(
+        IReadOnlyList<string>? rejectedOfferIds, CancellationToken ct)
+    {
+        if (rejectedOfferIds is null) return;
+
+        foreach (var rejectedOfferId in rejectedOfferIds)
+        {
+            if (string.IsNullOrWhiteSpace(rejectedOfferId)) continue;
+            await ReleaseHoldAsync(rejectedOfferId, "superseded", ct);
+        }
+    }
+
+    /// <summary>Op 3 release. Unconditional (not gated on <c>Holds:Enabled</c>) so a rollback to the
+    /// flag-off mode still releases holds placed while it was on; never throws, never blocks.</summary>
+    private async Task ReleaseHoldAsync(string offerId, string reason, CancellationToken ct)
+    {
+        try
+        {
+            await _holds.ReleaseForOfferAsync(offerId, reason, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "event={event} offerId={OfferId} reason={Reason}",
+                "hold.release.failed", offerId, reason);
+        }
+    }
+
+    /// <summary>Op 4 pre-capture step: the winner's own reservation is what would starve the debit,
+    /// so it is aborted first. Never throws — a failed abort degrades to the collector's telemetry.</summary>
+    private async Task AbortWinnerHoldSetAsync(string offerId, CancellationToken ct)
+    {
+        try
+        {
+            await _holds.AbortHoldSetForCaptureAsync(offerId, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "event={event} offerId={OfferId}", "hold.capture.abort_failed", offerId);
+        }
+    }
+
     /// <summary>F1 guard 2, best-effort: withdraw the unaffordable offer + reuse the lost
     /// push. Correction 7: NotPending (replay of accepted offer) is swallowed.</summary>
     private async Task AutoWithdrawInsufficientBalanceOfferAsync(
-        string offerId, string requestId, string jeeberId, CancellationToken ct)
+        string offerId, string requestId, string jeeberId, string reason, CancellationToken ct)
     {
         try
         {
@@ -937,6 +1147,10 @@ public sealed class JeebOffersController : ControllerBase
             {
                 return;
             }
+
+            // Op 3: the offer is terminal now, so its hold goes back under the CALLER's reason
+            // ("withdraw" here; a forced sweeper withdraw passes its own).
+            await ReleaseHoldAsync(offerId, reason, ct);
 
             _detachedPush.Dispatch(
                 "offer.insufficient_balance", recipientCount: 1, correlationId: requestId,

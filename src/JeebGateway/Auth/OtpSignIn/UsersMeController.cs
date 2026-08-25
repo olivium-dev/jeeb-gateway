@@ -76,6 +76,9 @@ public sealed class UsersMeController : ControllerBase
     private readonly ServiceWalletClient _wallet;
     private readonly IJeeberForceOfflineOnUnregister _forceOffline;
     private readonly IPendingOffersStore _pendingOffers;
+    // c1/W3 DECISION Op 3: unregistering retracts the jeeber's live offers, so their
+    // commission holds must be aborted or the funds stay frozen with nothing to capture.
+    private readonly JeebGateway.Financials.Holds.IHoldManager? _holds;
     private readonly IOptions<GatewayPublicOptions> _publicOptions;
     // OD-C3-5: the fee-currency pin for the unregister balance gate — the same
     // options the wallet guard and the commission debit read.
@@ -97,7 +100,8 @@ public sealed class UsersMeController : ControllerBase
         IPendingOffersStore pendingOffers,
         IOptions<GatewayPublicOptions> publicOptions,
         IOptions<CommissionCollectionOptions> feeCurrency,
-        ILogger<UsersMeController> log)
+        ILogger<UsersMeController> log,
+        JeebGateway.Financials.Holds.IHoldManager? holds = null)
     {
         _umProfile = umProfile;
         _users = users;
@@ -111,6 +115,7 @@ public sealed class UsersMeController : ControllerBase
         _wallet = wallet;
         _forceOffline = forceOffline;
         _pendingOffers = pendingOffers;
+        _holds = holds;
         _publicOptions = publicOptions;
         _feeCurrency = feeCurrency.Value;
         _log = log;
@@ -445,6 +450,22 @@ public sealed class UsersMeController : ControllerBase
         {
             _log.LogWarning(ex,
                 "v1/users/me/role/unregister: best-effort offer withdraw failed for {UserId}.", userId);
+        }
+
+        // DECISION Op 3 — AFTER both retract attempts, and only for offers they actually
+        // retired: an offer still live upstream must keep the collateral behind it.
+        if (_holds is not null)
+        {
+            try
+            {
+                await _holds.ReleaseWithdrawnForJeeberAsync(userId, "auto-offline", ct);
+            }
+            catch (Exception ex)
+            {
+                _log.LogWarning(ex,
+                    "v1/users/me/role/unregister: hold release failed for {UserId}; "
+                    + "the hold sweeper will retry.", userId);
+            }
         }
 
         // Deliberately NOT touched: push tokens (account-scoped; clearing worsens the

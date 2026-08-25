@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Standalone break-glass console tool, NOT wired into any CI/deploy step; owner-run only. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>HoldsAbort</RootNamespace>
+    <AssemblyName>HoldsAbort</AssemblyName>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+
+  <!-- No ProjectReference and no Npgsql on purpose (unlike WalletHolderBackfill): this is the
+       release path of last resort, so it must build when the gateway does not, and it never writes SQL. -->
+
+</Project>

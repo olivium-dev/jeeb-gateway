@@ -1,8 +1,13 @@
+using System;
+using System.Collections.Generic;
 using System.Linq;
 using JeebGateway.Availability;
+using JeebGateway.Financials;
+using JeebGateway.Financials.Holds;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using SwServiceWalletClient = JeebGateway.service.ServiceWallet.ServiceWalletClient;
@@ -53,6 +58,79 @@ public class FakeOfferStoreWebApplicationFactory : WebApplicationFactory<Program
         // D2 — same rationale as the wallet double: the new fail-closed range guard on offer
         // submit must not silently disable every unrelated offer test.
         InRangeGeoFixture.UseInRangePresence(services);
+
+        // W3 — same rationale as F1/D2, for holds (default ON): without the intent-KV and
+        // two-phase doubles every submit would fail closed on E5/E6 in unrelated tests.
+        FundedWalletFixture.UseHoldDoubles(services);
+    }
+
+    /// <summary>W3/T2 — the shared c1 exposure/holds host: ONE <see cref="FakeWalletHoldEngine"/>
+    /// ledger behind the hold client AND the netted balance read, plus the intent store.</summary>
+    /// <param name="engine">The ledger; also the default source of the wallet client.</param>
+    /// <param name="holdsEnabled"><c>Holds:Enabled</c> — Layer B admission when true, the Layer A
+    /// aggregate check when false (the rollout/rollback switch).</param>
+    /// <param name="maxLiveOffersPerJeeber">Overrides <c>Offers:MaxLiveOffersPerJeeber</c> so the
+    /// cap test does not have to submit 20 offers.</param>
+    /// <param name="commissionEnabled"><c>CommissionCollection:Enabled</c> — stays false except in
+    /// the capture-on-accept test; money movement is owner-gated (c1b).</param>
+    /// <param name="intentStore">Supply one to assert on intent records / drive FailNextWrite.</param>
+    /// <param name="walletClient">Supply the gated variant for the barrier tests; defaults to the
+    /// engine's own netted client.</param>
+    /// <param name="timeProvider">Replaces the host TimeProvider so sweeper tests stay wall-clock-free.</param>
+    public static WebApplicationFactory<Program> NewWalletGuardFactory(
+        FakeWalletHoldEngine engine,
+        bool holdsEnabled,
+        int? maxLiveOffersPerJeeber = null,
+        bool commissionEnabled = false,
+        FakeHoldIntentStore? intentStore = null,
+        SwServiceWalletClient? walletClient = null,
+        TimeProvider? timeProvider = null,
+        string failMode = "fail-closed",
+        IEnumerable<KeyValuePair<string, string?>>? extraConfig = null)
+    {
+        var wallet = walletClient ?? engine.NewWalletClient();
+        var intents = intentStore ?? new FakeHoldIntentStore();
+
+        var settings = new Dictionary<string, string?>(StringComparer.Ordinal)
+        {
+            { "WalletGuard:FailMode", failMode },
+            { "FeatureFlags:UseUpstream:Offer", "true" },
+            { "Holds:Enabled", holdsEnabled ? "true" : "false" },
+            { "CommissionCollection:Enabled", commissionEnabled ? "true" : "false" },
+        };
+        if (maxLiveOffersPerJeeber is int cap)
+        {
+            settings["Offers:MaxLiveOffersPerJeeber"] = cap.ToString();
+        }
+        if (extraConfig is not null)
+        {
+            foreach (var pair in extraConfig) settings[pair.Key] = pair.Value;
+        }
+
+        return new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+        {
+            builder.ConfigureAppConfiguration((_, cfg) => cfg.AddInMemoryCollection(settings));
+            builder.ConfigureTestServices(services =>
+            {
+                UseFakeOfferStore(services);
+
+                services.RemoveAll<SwServiceWalletClient>();
+                services.AddScoped<SwServiceWalletClient>(_ => wallet);
+
+                services.RemoveAll<IWalletCommissionDebitClient>();
+                services.AddSingleton<IWalletCommissionDebitClient>(engine);
+
+                services.RemoveAll<IHoldIntentStore>();
+                services.AddSingleton(intents);
+                services.AddSingleton<IHoldIntentStore>(sp => sp.GetRequiredService<FakeHoldIntentStore>());
+
+                if (timeProvider is not null)
+                {
+                    services.RemoveAll<TimeProvider>();
+                    services.AddSingleton(timeProvider);
+                }
+            });
+        });
     }
 }
 

@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
@@ -716,19 +717,272 @@ public class WalletGuardOfferTests
     }
 
     // -----------------------------------------------------------------
+    // c1 (G1) — AGGREGATE exposure, the per-jeeber live cap, STRICT enumeration.
+    // Layer A admission (Holds:Enabled=false, NewFactory's default): the balance is
+    // measured against the jeeber's WHOLE live offer set, never one isolated bid.
+    // -----------------------------------------------------------------
+
+    [Fact]
+    public async Task Submit_Returns402_WhenAggregateExposureExceedsBalance_AcrossTwoRequests()
+    {
+        // 10.0 covers exactly ONE $100 offer's 10%; the second bid must see the first's exposure.
+        await using var factory = NewFactory(new FakeWalletClient { Balance = 10.0 });
+        var (_, requestA) = await SeedRequestAsync(factory);
+        var (_, requestB) = await SeedRequestAsync(factory);
+        var jeeber = JeeberClient(factory, Guid.NewGuid().ToString());
+
+        var first = await jeeber.PostAsJsonAsync($"/requests/{requestA}/offers", OfferBody(100m));
+        first.StatusCode.Should().Be(HttpStatusCode.Created);
+
+        var second = await jeeber.PostAsJsonAsync($"/requests/{requestB}/offers", OfferBody(100m));
+
+        second.StatusCode.Should().Be(HttpStatusCode.PaymentRequired);
+        var body = JObject.Parse(await second.Content.ReadAsStringAsync());
+        body["type"]!.Value<string>().Should().Be("https://jeeb.dev/errors/insufficient-wallet-balance");
+        body["outstanding"]!.Value<decimal>().Should().Be(10m);
+        body["thisOffer"]!.Value<decimal>().Should().Be(10m);
+        body["needed"]!.Value<decimal>().Should().Be(20m, "needed is the AGGREGATE: this offer plus every live one");
+        body["available"]!.Value<decimal>().Should().Be(10m);
+        body["currency"]!.Value<string>().Should().Be("USD");
+    }
+
+    [Fact]
+    public async Task Submit_Returns201_WhenAggregateWithinBalance()
+    {
+        // Control: 20.0 covers BOTH $100 offers' 10% — aggregation must not over-block.
+        await using var factory = NewFactory(new FakeWalletClient { Balance = 20.0 });
+        var (_, requestA) = await SeedRequestAsync(factory);
+        var (_, requestB) = await SeedRequestAsync(factory);
+        var jeeber = JeeberClient(factory, Guid.NewGuid().ToString());
+
+        var first = await jeeber.PostAsJsonAsync($"/requests/{requestA}/offers", OfferBody(100m));
+        var second = await jeeber.PostAsJsonAsync($"/requests/{requestB}/offers", OfferBody(100m));
+
+        first.StatusCode.Should().Be(HttpStatusCode.Created);
+        second.StatusCode.Should().Be(HttpStatusCode.Created, "the aggregate lands exactly on the balance");
+    }
+
+    [Fact]
+    public async Task Submit_Returns409_WhenLiveOfferCapReached()
+    {
+        // Balance is never the question here — the cap denies on multiplicity alone.
+        await using var factory = NewFactory(
+            new FakeWalletClient { Balance = 1_000.0 }, maxLiveOffersPerJeeber: 2);
+        var (_, requestA) = await SeedRequestAsync(factory);
+        var (_, requestB) = await SeedRequestAsync(factory);
+        var (_, requestC) = await SeedRequestAsync(factory);
+        var jeeber = JeeberClient(factory, Guid.NewGuid().ToString());
+
+        (await jeeber.PostAsJsonAsync($"/requests/{requestA}/offers", OfferBody(100m)))
+            .StatusCode.Should().Be(HttpStatusCode.Created);
+        (await jeeber.PostAsJsonAsync($"/requests/{requestB}/offers", OfferBody(100m)))
+            .StatusCode.Should().Be(HttpStatusCode.Created);
+
+        var third = await jeeber.PostAsJsonAsync($"/requests/{requestC}/offers", OfferBody(100m));
+
+        third.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        var body = JObject.Parse(await third.Content.ReadAsStringAsync());
+        body["type"]!.Value<string>().Should().Be("https://jeeb.dev/errors/offer-live-limit-reached");
+        body["limit"]!.Value<int>().Should().Be(2);
+        body["live"]!.Value<int>().Should().Be(2);
+
+        var offers = await factory.Services.GetRequiredService<FakePendingOffersStore>()
+            .ListForRequestAsync(requestC, CancellationToken.None);
+        offers.Should().BeEmpty("the cap denies BEFORE the mint");
+    }
+
+    [Fact]
+    public async Task Submit_CapExcludesTerminalOffers()
+    {
+        // Two WITHDRAWN offers plus one live one, cap 2: only the live one may count.
+        await using var factory = NewFactory(
+            new FakeWalletClient { Balance = 1_000.0 }, maxLiveOffersPerJeeber: 2);
+        var (_, requestA) = await SeedRequestAsync(factory);
+        var (_, requestB) = await SeedRequestAsync(factory);
+        var (_, requestC) = await SeedRequestAsync(factory);
+        var (_, requestD) = await SeedRequestAsync(factory);
+        var jeeber = JeeberClient(factory, Guid.NewGuid().ToString());
+
+        var offerA = await SubmitOfferIdAsync(jeeber, requestA);
+        var offerB = await SubmitOfferIdAsync(jeeber, requestB);
+        (await jeeber.DeleteAsync($"/requests/{requestA}/offers/{offerA}"))
+            .StatusCode.Should().Be(HttpStatusCode.NoContent);
+        (await jeeber.DeleteAsync($"/requests/{requestB}/offers/{offerB}"))
+            .StatusCode.Should().Be(HttpStatusCode.NoContent);
+
+        (await jeeber.PostAsJsonAsync($"/requests/{requestC}/offers", OfferBody(100m)))
+            .StatusCode.Should().Be(HttpStatusCode.Created);
+
+        var fourth = await jeeber.PostAsJsonAsync($"/requests/{requestD}/offers", OfferBody(100m));
+
+        fourth.StatusCode.Should().Be(HttpStatusCode.Created,
+            "withdrawn offers are terminal — a cap that counted them would lock the jeeber out");
+    }
+
+    [Fact]
+    public async Task Submit_Returns503_OfferExposureUnresolvable_WhenEnumerationDegraded()
+    {
+        // OD-C1-3 STRICT: an unreadable offer set is never read as "no exposure".
+        await using var factory = NewFactory(new FakeWalletClient { Balance = 1_000.0 });
+        var (_, requestId) = await SeedRequestAsync(factory);
+        var offers = factory.Services.GetRequiredService<FakePendingOffersStore>();
+        offers.ForceListForJeeberDegraded = true;
+
+        var resp = await JeeberClient(factory, Guid.NewGuid().ToString()).PostAsJsonAsync(
+            $"/requests/{requestId}/offers", OfferBody(100m));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        var body = JObject.Parse(await resp.Content.ReadAsStringAsync());
+        body["type"]!.Value<string>().Should().Be("https://jeeb.dev/errors/offer-exposure-unresolvable");
+
+        offers.ForceListForJeeberDegraded = false; // the verification re-read must be undegraded
+        (await offers.ListForRequestAsync(requestId, CancellationToken.None))
+            .Should().BeEmpty("the bid is BLOCKED — nothing minted, nothing held");
+    }
+
+    [Fact]
+    public async Task Edit_Returns402_WhenRaisedFeePlusOutstandingExceedsBalance()
+    {
+        // The raise alone (15.0) fits in 20.0; the raise PLUS the sibling's 10.0 does not.
+        var offerService = new RecordingOfferServiceClient();
+        await using var factory = NewFactory(new FakeWalletClient { Balance = 20.0 }, offerService: offerService);
+
+        var (_, requestA) = await SeedRequestAsync(factory);
+        var (_, requestB) = await SeedRequestAsync(factory);
+        offerService.JeeberFeed.Add(new JeeberFeedOffer
+        {
+            OfferId = "offer-edit-agg", RequestId = requestA, Status = "pending", FeeCents = 100_00,
+        });
+        offerService.JeeberFeed.Add(new JeeberFeedOffer
+        {
+            OfferId = "offer-edit-sibling", RequestId = requestB, Status = "pending", FeeCents = 100_00,
+        });
+        SeedRoutingIndex(factory, "offer-edit-agg", requestA);
+
+        var resp = await JeeberClient(factory, Guid.NewGuid().ToString()).PutAsJsonAsync(
+            "/v1/offers/offer-edit-agg", new { fee = 150m });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.PaymentRequired);
+        var body = JObject.Parse(await resp.Content.ReadAsStringAsync());
+        body["type"]!.Value<string>().Should().Be("https://jeeb.dev/errors/insufficient-wallet-balance");
+        body["thisOffer"]!.Value<decimal>().Should().Be(15m, "thisOffer is the NEW fee's commission");
+        body["outstanding"]!.Value<decimal>().Should().Be(10m);
+        body["needed"]!.Value<decimal>().Should().Be(25m);
+        body["available"]!.Value<decimal>().Should().Be(20m);
+        body["currency"]!.Value<string>().Should().Be("USD");
+        offerService.EditCalled.Should().BeFalse("the raise must not reach offer-service unbacked");
+    }
+
+    [Fact]
+    public async Task Edit_ExcludesEditedOfferFromOutstanding()
+    {
+        // The edited offer's OLD commission must not be added to its NEW one: raising the
+        // only live offer to $200 needs exactly 20.0 — double-counting would need 30.0.
+        var offerService = new RecordingOfferServiceClient();
+        await using var factory = NewFactory(new FakeWalletClient { Balance = 20.0 }, offerService: offerService);
+
+        var (_, requestId) = await SeedRequestAsync(factory);
+        offerService.JeeberFeed.Add(new JeeberFeedOffer
+        {
+            OfferId = "offer-edit-solo", RequestId = requestId, Status = "pending", FeeCents = 100_00,
+        });
+        SeedRoutingIndex(factory, "offer-edit-solo", requestId);
+
+        var resp = await JeeberClient(factory, Guid.NewGuid().ToString()).PutAsJsonAsync(
+            "/v1/offers/offer-edit-solo", new { fee = 200m });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        offerService.EditCalled.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Accept_Returns409_WhenAggregateExposureExceedsBalance()
+    {
+        // Both bids were affordable at submit (20.0); the balance then drops to cover only one.
+        var wallet = new FakeWalletClient { Balance = 20.0 };
+        var offerService = new RecordingOfferServiceClient();
+        await using var factory = NewFactory(wallet, offerService: offerService);
+
+        var (clientId, requestA) = await SeedRequestAsync(factory);
+        var (_, requestB) = await SeedRequestAsync(factory);
+        var jeeber = JeeberClient(factory, Guid.NewGuid().ToString());
+
+        var offerA = await SubmitOfferIdAsync(jeeber, requestA);
+        await SubmitOfferIdAsync(jeeber, requestB);
+
+        wallet.Balance = 10.0; // the winner's own 10% still fits — the aggregate does not
+
+        var acceptResp = await ClientActor(factory, clientId).PostAsync(
+            $"/v1/offers/{offerA}/accept", content: null);
+
+        acceptResp.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        var body = JObject.Parse(await acceptResp.Content.ReadAsStringAsync());
+        body["type"]!.Value<string>().Should().Be("https://jeeb.dev/errors/offer-jeeber-insufficient-balance");
+        // E7 is DE-LEAKED (CONTRACT §7): the jeeber's figures never reach the client.
+        ShouldNotCarry(body, "needed", "available", "currency", "outstanding", "thisOffer");
+        offerService.AcceptWithStatusCalled.Should().BeFalse();
+
+        var offer = (await factory.Services.GetRequiredService<FakePendingOffersStore>()
+                .ListForRequestAsync(requestA, CancellationToken.None))
+            .Single(o => o.Id == offerA);
+        offer.Status.Should().Be(PendingOfferStatus.Withdrawn, "the unaffordable winner is auto-withdrawn");
+    }
+
+    [Fact]
+    public async Task Accept_Returns503_OfferExposureUnresolvable_WhenEnumerationDegraded_AndDoesNotWithdraw()
+    {
+        var wallet = new FakeWalletClient { Balance = 10.0 };
+        var offerService = new RecordingOfferServiceClient();
+        await using var factory = NewFactory(wallet, offerService: offerService);
+
+        var (clientId, requestId) = await SeedRequestAsync(factory);
+        var offerId = await SubmitOfferIdAsync(JeeberClient(factory, Guid.NewGuid().ToString()), requestId);
+
+        // Only the JEEBER-scoped read degrades: the fee read stays healthy, so this is E5, not E4.
+        var offers = factory.Services.GetRequiredService<FakePendingOffersStore>();
+        offers.ForceListForJeeberDegraded = true;
+
+        var acceptResp = await ClientActor(factory, clientId).PostAsync(
+            $"/v1/offers/{offerId}/accept", content: null);
+
+        acceptResp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        var body = JObject.Parse(await acceptResp.Content.ReadAsStringAsync());
+        body["type"]!.Value<string>().Should().Be("https://jeeb.dev/errors/offer-exposure-unresolvable");
+        offerService.AcceptWithStatusCalled.Should().BeFalse();
+
+        offers.ForceListForJeeberDegraded = false;
+        var offer = (await offers.ListForRequestAsync(requestId, CancellationToken.None))
+            .Single(o => o.Id == offerId);
+        offer.Status.Should().Be(PendingOfferStatus.Pending,
+            "insufficiency was never confirmed — a degrade must not withdraw the offer");
+    }
+
+    // -----------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------
 
+    /// <summary>Holds are OFF by default here: this class pins the LAYER A aggregate admission,
+    /// which is the contract whenever <c>Holds:Enabled=false</c> (the rollback mode).</summary>
     private static WebApplicationFactory<Program> NewFactory(
-        FakeWalletClient wallet, string failMode = "fail-closed", RecordingOfferServiceClient? offerService = null)
+        FakeWalletClient wallet, string failMode = "fail-closed", RecordingOfferServiceClient? offerService = null,
+        bool holds = false, int? maxLiveOffersPerJeeber = null)
         => new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.ConfigureAppConfiguration((_, cfg) =>
-                cfg.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                var settings = new Dictionary<string, string?>
                 {
                     { "WalletGuard:FailMode", failMode },
                     { "FeatureFlags:UseUpstream:Offer", "true" },
-                }));
+                    { "Holds:Enabled", holds ? "true" : "false" },
+                };
+                if (maxLiveOffersPerJeeber is int cap)
+                {
+                    settings["Offers:MaxLiveOffersPerJeeber"] = cap.ToString(CultureInfo.InvariantCulture);
+                }
+
+                cfg.AddInMemoryCollection(settings);
+            });
             builder.ConfigureTestServices(services =>
             {
                 FakeOfferStoreWebApplicationFactory.UseFakeOfferStore(services);
@@ -770,6 +1024,30 @@ public class WalletGuardOfferTests
     {
         var index = factory.Services.GetRequiredService<IOfferRequestIndex>();
         index.Record(offerId, requestId, jeeberId);
+    }
+
+    /// <summary>The submit body every c1 test posts — one quoted fee, fixed ETA, no note.</summary>
+    private static object OfferBody(decimal fee)
+        => new { fee, etaMinutes = 30, note = (string?)null };
+
+    /// <summary>Submits a real offer over HTTP and returns its minted id, so a test's live
+    /// exposure is built the same way production builds it (index recorded, ledger written).</summary>
+    private static async Task<string> SubmitOfferIdAsync(HttpClient jeeber, string requestId, decimal fee = 100m)
+    {
+        var resp = await jeeber.PostAsJsonAsync($"/requests/{requestId}/offers", OfferBody(fee));
+        resp.StatusCode.Should().Be(HttpStatusCode.Created);
+        return (await resp.Content.ReadFromJsonAsync<OfferDto>())!.Id;
+    }
+
+    /// <summary>De-leak pin: the key is absent, or present-and-JSON-null — never a figure.</summary>
+    private static void ShouldNotCarry(JObject body, params string[] keys)
+    {
+        foreach (var key in keys)
+        {
+            var token = body[key];
+            (token is null || token.Type == JTokenType.Null).Should().BeTrue(
+                "the client-facing body must not carry '{0}' (value was {1})", key, token);
+        }
     }
 
     /// <summary>Locates the repo root from THIS source file so a test can read the SHIPPED

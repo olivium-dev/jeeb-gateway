@@ -2,6 +2,7 @@ using JeebGateway.Auth.Capabilities;
 using JeebGateway.Availability;
 using JeebGateway.Conversations.Client;
 using JeebGateway.Financials;
+using JeebGateway.Financials.Holds;
 using JeebGateway.Notifications;
 using JeebGateway.Requests;
 using JeebGateway.Services;
@@ -51,6 +52,8 @@ public class RequestOffersController : ControllerBase
     /// <summary>
     /// Retired T-backend-010 offer-count cap: live offers per request are unlimited.
     /// </summary>
+    // Still uncapped per request; the real multiplicity limit is now PER JEEBER
+    // (c1-F3: Offers:MaxLiveOffersPerJeeber → 409 offer-live-limit-reached in Submit).
     public const int MaxLiveOffersPerRequest = int.MaxValue;
 
     /// <summary>
@@ -74,6 +77,11 @@ public class RequestOffersController : ControllerBase
     private readonly IOfferPushNotifier _offerPush;
     private readonly IDetachedPushDispatcher _detachedPush;
     private readonly IWalletSufficiencyGuard _walletGuard;
+    private readonly JeeberSubmitSerializer _serializer;
+    private readonly IHoldManager _holds;
+    private readonly IHoldIntentStore _holdIntents;
+    private readonly OfferLimitsOptions _offerLimits;
+    private readonly HoldOptions _holdOptions;
     private readonly UpstreamFeatureFlags _flags;
     private readonly TimeProvider _clock;
     private readonly JeebGateway.Services.Clients.IDeliveryServiceClient _delivery;
@@ -89,6 +97,11 @@ public class RequestOffersController : ControllerBase
         IOfferPushNotifier offerPush,
         IDetachedPushDispatcher detachedPush,
         IWalletSufficiencyGuard walletGuard,
+        JeeberSubmitSerializer serializer,
+        IHoldManager holds,
+        IHoldIntentStore holdIntents,
+        IOptions<OfferLimitsOptions> offerLimits,
+        IOptions<HoldOptions> holdOptions,
         IOptions<UpstreamFeatureFlags> flags,
         TimeProvider clock,
         JeebGateway.Services.Clients.IDeliveryServiceClient delivery,
@@ -105,6 +118,11 @@ public class RequestOffersController : ControllerBase
         _offerPush = offerPush;
         _detachedPush = detachedPush;
         _walletGuard = walletGuard;
+        _serializer = serializer;
+        _holds = holds;
+        _holdIntents = holdIntents;
+        _offerLimits = offerLimits.Value;
+        _holdOptions = holdOptions.Value;
         _flags = flags.Value;
         _clock = clock;
         _logger = logger;
@@ -218,132 +236,209 @@ public class RequestOffersController : ControllerBase
                 WalletGuardContract.WalletHolderUnresolvedProblem());
         }
 
-        // F1 guard 1 — wallet must cover the offer's commission.
-        var required = WalletGuardContract.RequiredCommission(body.Fee.Value);
-        var guard = await _walletGuard.CheckAsync(jeeberGuid, required, ct);
-        if (!guard.Allowed)
+        PendingOffer created;
+
+        // c1-F2 / DECISION I5 — one per-jeeber critical section spans enumerate → cap →
+        // admission → mint → index-record, so a concurrent submit sees this offer's exposure.
+        using (await _serializer.AcquireAsync(jeeberId, ct))
         {
-            if (guard.DegradedByUpstreamFailure)
+            // E5 (OD-C1-3) — STRICT enumeration: an unreadable offer set BLOCKS the bid.
+            // Never best-effort; an under-count would silently admit unbacked exposure.
+            var mineRead = await _offers.TryListForJeeberAsync(jeeberId, ct);
+            if (mineRead.Degraded)
             {
                 return StatusCode(StatusCodes.Status503ServiceUnavailable,
-                    WalletGuardContract.WalletUnavailableProblem());
+                    WalletGuardContract.OfferExposureUnresolvableProblem());
             }
 
-            return StatusCode(StatusCodes.Status402PaymentRequired, new ProblemDetails
+            var mine = mineRead.Items;
+
+            // E2 (c1-F3) — per-jeeber live-offer cap. Terminal offers never count.
+            var live = mine.Count(o => PendingOfferStatus.IsLive(o.Status));
+            if (live >= _offerLimits.MaxLiveOffersPerJeeber)
             {
-                Title = "Wallet balance does not cover the offer's commission.",
-                Status = StatusCodes.Status402PaymentRequired,
-                Type = "https://jeeb.dev/errors/insufficient-wallet-balance",
-                Extensions =
+                return StatusCode(StatusCodes.Status409Conflict,
+                    WalletGuardContract.OfferLiveLimitProblem(_offerLimits.MaxLiveOffersPerJeeber, live));
+            }
+
+            // c1-F1 (OD-C1-4) — admission is AGGREGATE: this offer's 10% plus every live offer's
+            // 10%. Nothing is excluded at submit; this offer is not minted yet.
+            var thisOffer = WalletGuardContract.RequiredCommission(body.Fee.Value);
+            var outstanding = JeeberExposureCalculator.SumLiveCommission(
+                mine.Select(o => new ExposureLeg(o.Id, o.RequestId, o.Fee, o.Status)));
+
+            // Layer A admission when holds are OFF. Under holds the read is already
+            // pending-netted, so re-adding outstanding would double-count (DECISION Op 1).
+            var required = _holdOptions.Enabled ? thisOffer : thisOffer + outstanding;
+            var guard = await _walletGuard.CheckAsync(jeeberGuid, required, ct);
+            if (!guard.Allowed)
+            {
+                if (guard.DegradedByUpstreamFailure)
                 {
-                    // Correction 5: top-level, matching DioOfferSubmissionRepository._parseBalance.
-                    ["needed"] = guard.Required,
-                    ["available"] = guard.Available,
-                    ["currency"] = guard.Currency,
+                    return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                        WalletGuardContract.WalletUnavailableProblem());
                 }
-            });
-        }
 
-        // D2: hiding an out-of-radius request from the feed is not enough — the offer route
-        // is directly callable. Same fail-closed evaluation, so the two cannot disagree.
-        var radius = await EvaluateTierRadiusAsync(jeeberId, request, ct);
-        if (!radius.IsIncluded)
-        {
-            _logger.LogInformation(
-                "event={event} jeeberId={JeeberId} requestId={RequestId} tierId={TierId} "
-                + "reason={Reason} radiusKm={RadiusKm} distanceMeters={DistanceMeters}",
-                "offer.submit.out_of_range", jeeberId, requestId, request.TierId,
-                radius.Decision, radius.RadiusKm, radius.DistanceMeters);
-            return Conflict(new ProblemDetails
-            {
-                Title = "Request is outside your serviceable range.",
-                Detail = $"reason={radius.Decision}",
-                Status = StatusCodes.Status409Conflict,
-                Type = "https://jeeb.dev/errors/offer-out-of-range",
-            });
-        }
+                return StatusCode(StatusCodes.Status402PaymentRequired,
+                    InsufficientBalanceProblem(thisOffer, outstanding, guard));
+            }
 
-        PendingOffer created;
-        try
-        {
-            created = await _offers.TrySubmitAsync(
-                requestId,
-                jeeberId,
-                body.Fee.Value,
-                body.EtaMinutes.Value,
-                note,
-                MaxLiveOffersPerRequest,
-                _clock.GetUtcNow(),
-                ct,
-                // GW-1: the request creator's id. The upstream-backed store uses
-                // it to mirror the request into offer-service (OS-1) and retry
-                // when the submit 404s because the row was never mirrored. The
-                // in-memory store ignores it.
-                clientId: request.ClientId);
-        }
-        catch (OfferUpstreamValidationException ex)
-        {
-            // GW-2: offer-service rejected the mirror/submit payload (422/400).
-            // A caller-correctable validation failure — surface a 422
-            // ProblemDetails, never the global handler's opaque 502.
-            return UnprocessableEntity(new ProblemDetails
+            // D2: hiding an out-of-radius request from the feed is not enough — the offer route
+            // is directly callable. Same fail-closed evaluation, so the two cannot disagree.
+            var radius = await EvaluateTierRadiusAsync(jeeberId, request, ct);
+            if (!radius.IsIncluded)
             {
-                Title = "offer-service rejected the offer payload.",
-                Detail = $"stage={ex.Stage}; upstreamStatus={ex.UpstreamStatus}; code={ex.UpstreamCode ?? "validation_error"}",
-                Status = StatusCodes.Status422UnprocessableEntity,
-                Type = "https://jeeb.dev/errors/offer-upstream-validation"
-            });
-        }
-        catch (DuplicateOfferException ex)
-        {
-            return Conflict(new ProblemDetails
-            {
-                Title = "You already have a live offer on this request.",
-                Detail = $"Withdraw offer {ex.ExistingOfferId} before submitting a new bid.",
-                Status = StatusCodes.Status409Conflict,
-                Type = "https://jeeb.dev/errors/offer-already-exists"
-            });
-        }
-        catch (RequestNotOpenForOffersException)
-        {
-            // sprint-009 Lane E — the auction is closed (accepted/expired/cancelled).
-            // Its own ProblemDetails so the jeeber sees the right reason.
-            return Conflict(new ProblemDetails
-            {
-                Title = "This request is no longer open for offers.",
-                Detail = "The auction has already been accepted, expired, or cancelled.",
-                Status = StatusCodes.Status409Conflict,
-                Type = "https://jeeb.dev/errors/request-not-open-for-offers"
-            });
-        }
-        catch (OfferSubmitConflictException ex)
-        {
-            return Conflict(new ProblemDetails
-            {
-                Title = "Offer could not be submitted because the request is in conflict upstream.",
-                Detail = $"upstreamCode={ex.UpstreamCode ?? "unknown"}",
-                Status = StatusCodes.Status409Conflict,
-                Type = "https://jeeb.dev/errors/offer-submit-conflict"
-            });
-        }
-        catch (TooManyOffersForRequestException ex)
-        {
-            return Conflict(new ProblemDetails
-            {
-                Title = $"Maximum {ex.Limit} offers per request reached.",
-                Detail = $"Live offers: {ex.LiveCount}.",
-                Status = StatusCodes.Status409Conflict,
-                Type = "https://jeeb.dev/errors/offers-per-request-exceeded"
-            });
-        }
+                _logger.LogInformation(
+                    "event={event} jeeberId={JeeberId} requestId={RequestId} tierId={TierId} "
+                    + "reason={Reason} radiusKm={RadiusKm} distanceMeters={DistanceMeters}",
+                    "offer.submit.out_of_range", jeeberId, requestId, request.TierId,
+                    radius.Decision, radius.RadiusKm, radius.DistanceMeters);
+                return Conflict(new ProblemDetails
+                {
+                    Title = "Request is outside your serviceable range.",
+                    Detail = $"reason={radius.Decision}",
+                    Status = StatusCodes.Status409Conflict,
+                    Type = "https://jeeb.dev/errors/offer-out-of-range",
+                });
+            }
 
-        // Record the offerId → (requestId, jeeberId) routing pairing so the
-        // offer-scoped accept route (POST /v1/offers/{offerId}/accept) can (a)
-        // forward to the request-scoped offer-service accept saga and (b) detect
-        // a genuine BR-1 self-offer (accepting CLIENT == this offer's bidder)
-        // without an extra round-trip. This is a thin BFF routing concern, not
-        // auction state (see IOfferRequestIndex).
-        _offerRequestIndex.Record(created.Id, requestId, created.JeeberId);
+            try
+            {
+                created = await _offers.TrySubmitAsync(
+                    requestId,
+                    jeeberId,
+                    body.Fee.Value,
+                    body.EtaMinutes.Value,
+                    note,
+                    MaxLiveOffersPerRequest,
+                    _clock.GetUtcNow(),
+                    ct,
+                    // GW-1: the request creator's id. The upstream-backed store uses
+                    // it to mirror the request into offer-service (OS-1) and retry
+                    // when the submit 404s because the row was never mirrored. The
+                    // in-memory store ignores it.
+                    clientId: request.ClientId);
+            }
+            catch (OfferUpstreamValidationException ex)
+            {
+                // GW-2: offer-service rejected the mirror/submit payload (422/400).
+                // A caller-correctable validation failure — surface a 422
+                // ProblemDetails, never the global handler's opaque 502.
+                return UnprocessableEntity(new ProblemDetails
+                {
+                    Title = "offer-service rejected the offer payload.",
+                    Detail = $"stage={ex.Stage}; upstreamStatus={ex.UpstreamStatus}; code={ex.UpstreamCode ?? "validation_error"}",
+                    Status = StatusCodes.Status422UnprocessableEntity,
+                    Type = "https://jeeb.dev/errors/offer-upstream-validation"
+                });
+            }
+            catch (DuplicateOfferException ex)
+            {
+                return Conflict(new ProblemDetails
+                {
+                    Title = "You already have a live offer on this request.",
+                    Detail = $"Withdraw offer {ex.ExistingOfferId} before submitting a new bid.",
+                    Status = StatusCodes.Status409Conflict,
+                    Type = "https://jeeb.dev/errors/offer-already-exists"
+                });
+            }
+            catch (RequestNotOpenForOffersException)
+            {
+                // sprint-009 Lane E — the auction is closed (accepted/expired/cancelled).
+                // Its own ProblemDetails so the jeeber sees the right reason.
+                return Conflict(new ProblemDetails
+                {
+                    Title = "This request is no longer open for offers.",
+                    Detail = "The auction has already been accepted, expired, or cancelled.",
+                    Status = StatusCodes.Status409Conflict,
+                    Type = "https://jeeb.dev/errors/request-not-open-for-offers"
+                });
+            }
+            catch (OfferSubmitConflictException ex)
+            {
+                return Conflict(new ProblemDetails
+                {
+                    Title = "Offer could not be submitted because the request is in conflict upstream.",
+                    Detail = $"upstreamCode={ex.UpstreamCode ?? "unknown"}",
+                    Status = StatusCodes.Status409Conflict,
+                    Type = "https://jeeb.dev/errors/offer-submit-conflict"
+                });
+            }
+            catch (TooManyOffersForRequestException ex)
+            {
+                return Conflict(new ProblemDetails
+                {
+                    Title = $"Maximum {ex.Limit} offers per request reached.",
+                    Detail = $"Live offers: {ex.LiveCount}.",
+                    Status = StatusCodes.Status409Conflict,
+                    Type = "https://jeeb.dev/errors/offers-per-request-exceeded"
+                });
+            }
+
+            if (_holdOptions.Enabled)
+            {
+                // DECISION I2 — the durable intent record precedes initiate, so no hold can
+                // exist that the sweeper cannot find. This write is REQUIRED, not best-effort.
+                try
+                {
+                    await _holdIntents.WriteAsync(
+                        new HoldIntent(created.Id, jeeberId, requestId, 0, thisOffer,
+                            _clock.GetUtcNow(), null, "open"),
+                        ct);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex,
+                        "event={event} offerId={OfferId} jeeberId={JeeberId} requestId={RequestId}",
+                        "hold.intent.write_failed", created.Id, jeeberId, requestId);
+
+                    if (!await CompensateMintAsync(created.Id, requestId, jeeberId, "intent-write-failed", ct))
+                    {
+                        // A live offer with no record is invisible to the sweeper; retry the record
+                        // so its MISSING branch can still collateralise or retract this bid.
+                        await TryLeaveSweeperMarkerAsync(created.Id, jeeberId, requestId, thisOffer, ct);
+                    }
+
+                    return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                        WalletGuardContract.OfferExposureUnresolvableProblem());
+                }
+
+                var placement = await _holds.PlaceOnSubmitAsync(
+                    jeeberGuid, jeeberId, created.Id, requestId, thisOffer, ct);
+                if (!placement.Placed)
+                {
+                    // DECISION Op 1 "no offer minted": the mint is compensated BEFORE the error
+                    // is returned, so nothing is ever exposed live without a hold behind it.
+                    await CompensateMintAsync(created.Id, requestId, jeeberId, "hold-place-failed", ct);
+
+                    if (placement.Insufficient)
+                    {
+                        // Figures re-read AFTER the refusal: the pre-initiate guard PASSED, so
+                        // reusing it can print available >= needed and a zero top-up (E1).
+                        var balance = await _walletGuard.CheckAsync(jeeberGuid, thisOffer, ct);
+                        return StatusCode(StatusCodes.Status402PaymentRequired,
+                            InsufficientBalanceProblem(thisOffer, outstanding, balance));
+                    }
+
+                    if (placement.ExposureUnresolvable)
+                    {
+                        return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                            WalletGuardContract.OfferExposureUnresolvableProblem());
+                    }
+
+                    return StatusCode(StatusCodes.Status503ServiceUnavailable,
+                        WalletGuardContract.WalletUnavailableProblem());
+                }
+            }
+
+            // Record the offerId → (requestId, jeeberId) routing pairing so the
+            // offer-scoped accept route (POST /v1/offers/{offerId}/accept) can (a)
+            // forward to the request-scoped offer-service accept saga and (b) detect
+            // a genuine BR-1 self-offer (accepting CLIENT == this offer's bidder)
+            // without an extra round-trip. This is a thin BFF routing concern, not
+            // auction state (see IOfferRequestIndex).
+            _offerRequestIndex.Record(created.Id, requestId, created.JeeberId);
+        }
 
         // S08 (B) — SEAT THE OFFERING JEEBER AS A CONVERSATION PARTICIPANT.
         // The conversation aggregate is created at order-create seating ONLY the
@@ -423,6 +518,14 @@ public class RequestOffersController : ControllerBase
         var outcome = await _offers.TryWithdrawAsync(
             offerId, requestId, jeeberId, _clock.GetUtcNow(), ct);
 
+        if (outcome == WithdrawOfferOutcome.Withdrawn)
+        {
+            // Op 3 release trigger. Fire-and-log: a failed abort keeps the intent record for
+            // the sweeper and NEVER turns the jeeber's successful withdraw into an error.
+            await ReleaseHoldAsync(offerId, "withdraw", ct);
+            return NoContent();
+        }
+
         return outcome switch
         {
             WithdrawOfferOutcome.Withdrawn => NoContent(),
@@ -475,6 +578,95 @@ public class RequestOffersController : ControllerBase
         }
 
         return await Withdraw(requestId, offerId, ct);
+    }
+
+    /// <summary>E1 402 body (CONTRACT §2): AGGREGATE <c>needed</c> = this offer's commission plus
+    /// the jeeber's live outstanding commission; <c>currency</c> is never null.</summary>
+    private ProblemDetails InsufficientBalanceProblem(
+        decimal thisOffer, decimal outstanding, WalletGuardResult guard)
+    {
+        // DESIGN §3.7: holds make the wallet read pending-netted, so `available` is reported GROSS
+        // (netted + held outstanding) to keep needed>available and mobile's top-up delta exact.
+        var available = _holdOptions.Enabled && guard.Available is decimal netted
+            ? netted + outstanding
+            : guard.Available;
+
+        return new ProblemDetails
+        {
+            Title = "Insufficient wallet balance to cover the platform fee.",
+            Status = StatusCodes.Status402PaymentRequired,
+            Type = "https://jeeb.dev/errors/insufficient-wallet-balance",
+            Extensions =
+            {
+                // Correction 5: top-level, matching DioOfferSubmissionRepository._parseBalance.
+                ["needed"] = thisOffer + outstanding,
+                ["thisOffer"] = thisOffer,
+                ["outstanding"] = outstanding,
+                ["available"] = available,
+                ["currency"] = guard.Currency,
+            }
+        };
+    }
+
+    /// <summary>DECISION Op 1 failure semantics — a post-mint intent/hold failure must leave NOTHING
+    /// live. True only when the withdraw is CONFIRMED; a failure is WARNed, never swallowed.</summary>
+    private async Task<bool> CompensateMintAsync(
+        string offerId, string requestId, string jeeberId, string reason, CancellationToken ct)
+    {
+        try
+        {
+            var outcome = await _offers.TryWithdrawAsync(
+                offerId, requestId, jeeberId, _clock.GetUtcNow(), ct);
+            if (outcome == WithdrawOfferOutcome.Withdrawn) return true;
+
+            _logger.LogWarning(
+                "event={event} offerId={OfferId} jeeberId={JeeberId} requestId={RequestId} "
+                + "reason={Reason} outcome={Outcome}",
+                "hold.compensate.withdraw_failed", offerId, jeeberId, requestId, reason, outcome);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "event={event} offerId={OfferId} jeeberId={JeeberId} requestId={RequestId} reason={Reason}",
+                "hold.compensate.withdraw_failed", offerId, jeeberId, requestId, reason);
+        }
+
+        return false;
+    }
+
+    /// <summary>Last resort when an uncompensated offer is live and unheld: the intent record is the
+    /// sweeper's ONLY enumeration surface, so one more write attempt is worth making.</summary>
+    private async Task TryLeaveSweeperMarkerAsync(
+        string offerId, string jeeberId, string requestId, decimal expected, CancellationToken ct)
+    {
+        try
+        {
+            await _holdIntents.WriteAsync(
+                new HoldIntent(offerId, jeeberId, requestId, 0, expected, _clock.GetUtcNow(), null, "open"),
+                ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "event={event} offerId={OfferId} jeeberId={JeeberId} requestId={RequestId}",
+                "hold.intent.unrecorded_live_offer", offerId, jeeberId, requestId);
+        }
+    }
+
+    /// <summary>Op 3 release. Unconditional (not gated on <c>Holds:Enabled</c>) so a rollback to the
+    /// flag-off mode still releases holds placed while it was on. Never throws.</summary>
+    private async Task ReleaseHoldAsync(string offerId, string reason, CancellationToken ct)
+    {
+        try
+        {
+            await _holds.ReleaseForOfferAsync(offerId, reason, ct);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "event={event} offerId={OfferId} reason={Reason}",
+                "hold.release.failed", offerId, reason);
+        }
     }
 
     /// <summary>

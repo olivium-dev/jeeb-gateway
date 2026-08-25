@@ -188,6 +188,10 @@ public static class PushSilencePolicy
     // D12: support/ticket case updates. Human-addressed, so ShadeAndStored, like `dispute`.
     public const string CategorySupport = "support";
 
+    /// <summary>c1/W3 wallet-guard pushes (CONTRACT §3). Human-addressed money news —
+    /// ShadeAndStored: exactly one shade card + one centre row, never silent.</summary>
+    public const string CategoryWallet = "wallet";
+
     // A category maps to EXACTLY ONE mode. That single-valuedness IS the corollary's
     // enforcement: there is no way to express "this category is both", so no event can
     // legally produce a silent push and a stored push as two separate sends.
@@ -223,6 +227,10 @@ public static class PushSilencePolicy
 
             // D12: the case callback's support leg; `dispute` above covers its dispute leg.
             [CategorySupport] = PushDeliveryMode.ShadeAndStored,
+
+            // c1/W3: the wallet-guard withdraw push tells a jeeber their bid is gone
+            // and their wallet is short — never a machine-addressed refresh edge.
+            [CategoryWallet] = PushDeliveryMode.ShadeAndStored,
         };
 
     // Notification TYPE (gateway-owned catalog template key) -> refresh category.

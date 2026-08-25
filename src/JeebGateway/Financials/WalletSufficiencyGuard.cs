@@ -89,6 +89,29 @@ public static class WalletGuardContract
         Status = StatusCodes.Status503ServiceUnavailable,
         Type = "https://jeeb.dev/errors/offer-fee-unresolvable",
     };
+
+    /// <summary>E5 — strict enumeration (OD-C1-3): the jeeber's live offers (or the hold-intent
+    /// write) could not be resolved, so exposure is unknown. Bid BLOCKED; nothing minted or held.</summary>
+    public static Microsoft.AspNetCore.Mvc.ProblemDetails OfferExposureUnresolvableProblem() => new()
+    {
+        Title = "Your open offers could not be checked; the balance check could not run.",
+        Status = StatusCodes.Status503ServiceUnavailable,
+        Type = "https://jeeb.dev/errors/offer-exposure-unresolvable",
+    };
+
+    /// <summary>E2 — cross-request live-offer cap reached (returned when live &gt;= limit).
+    /// Extensions are TOP-LEVEL keys beside title/status/type (CONTRACT §1).</summary>
+    public static Microsoft.AspNetCore.Mvc.ProblemDetails OfferLiveLimitProblem(int limit, int live) => new()
+    {
+        Title = "You have reached the maximum number of live offers.",
+        Status = StatusCodes.Status409Conflict,
+        Type = "https://jeeb.dev/errors/offer-live-limit-reached",
+        Extensions =
+        {
+            ["limit"] = limit,
+            ["live"] = live,
+        },
+    };
 }
 
 /// <summary>

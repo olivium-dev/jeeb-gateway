@@ -102,6 +102,10 @@ public class RequestExpiryObserver : BackgroundService
         var notifier = scope.ServiceProvider.GetRequiredService<IRequestExpiryNotifier>();
         var offers = scope.ServiceProvider
             .GetRequiredService<JeebGateway.Availability.IPendingOffersStore>();
+        // Optional: absent in the minimal providers the observer's own tests build, and a
+        // missing hold manager must degrade to today's behaviour, never crash the pass.
+        var holds = scope.ServiceProvider
+            .GetService<JeebGateway.Financials.Holds.IHoldManager>();
 
         var projected = 0;
         foreach (var row in rows)
@@ -144,6 +148,25 @@ public class RequestExpiryObserver : BackgroundService
                     _logger.LogInformation(
                         "Request {RequestId} expiry push was suppressed by the historical backfill configuration",
                         row.DeliveryId);
+                }
+
+                // DECISION Op 3 — release BEFORE the offers close: once they are terminal this
+                // pass no longer knows which they were, and the funds would sit frozen.
+                if (holds is not null)
+                {
+                    try
+                    {
+                        await holds.ReleaseForRequestAsync(row.DeliveryId, "expired", ct);
+                    }
+                    catch (Exception ex) when (!ct.IsCancellationRequested)
+                    {
+                        // Fire-and-log: a failed abort keeps the intent record, and the hold
+                        // sweeper retries it. It must never un-expire a request.
+                        _logger.LogWarning(ex,
+                            "Request {RequestId} expiry could not release its offer holds; "
+                            + "the hold sweeper will retry.",
+                            row.DeliveryId);
+                    }
                 }
 
                 try

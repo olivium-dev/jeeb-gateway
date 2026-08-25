@@ -67,6 +67,10 @@ public class AutoOfflineSweeper : BackgroundService
         // thing that decides a jeeber is idle (G-10).
         var mirror = (IAvailabilityMirror?)scope.ServiceProvider.GetService<FailOpenAvailabilityMirror>()
             ?? new NoOpAvailabilityMirror();
+        // Optional: the sweeper's own tests build a minimal provider, and a missing hold
+        // manager must degrade to today's behaviour rather than fault the sweep.
+        var holds = scope.ServiceProvider
+            .GetService<JeebGateway.Financials.Holds.IHoldManager>();
 
         var window = _options.Value.InactivityWindow;
         var now = _clock.GetUtcNow();
@@ -83,6 +87,26 @@ public class AutoOfflineSweeper : BackgroundService
             try
             {
                 var result = await store.GoOfflineAsync(record.UserId, GoOfflineReason.AutoOfflineInactive, ct);
+
+                // DECISION Op 3 — AFTER the flip, and only for offers the withdraw actually
+                // retired: in production it has no upstream route, so live bids keep their holds.
+                if (holds is not null)
+                {
+                    try
+                    {
+                        await holds.ReleaseWithdrawnForJeeberAsync(record.UserId, "auto-offline", ct);
+                    }
+                    catch (Exception ex) when (!ct.IsCancellationRequested)
+                    {
+                        // Fire-and-log: the hold sweeper retries a failed abort. Going offline
+                        // is a presence fact and must never depend on wallet-service.
+                        _logger.LogWarning(ex,
+                            "Auto-offline for jeeber {UserId} could not release its offer holds; "
+                            + "the hold sweeper will retry.",
+                            record.UserId);
+                    }
+                }
+
                 if (result.WasOnline)
                 {
                     await mirror.MirrorIdleOfflineAsync(record.UserId, ct);

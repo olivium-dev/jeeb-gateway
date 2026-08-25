@@ -407,6 +407,18 @@ public class FakePendingOffersStore : IPendingOffersStore
         return Task.FromResult<IReadOnlyList<PendingOffer>>(snapshot);
     }
 
+    /// <summary>c1 test seam — the DISCRIMINATED jeeber-scope read reports a degraded ledger
+    /// while the offers physically remain, so the exposure fail-mode (E5) is injectable.</summary>
+    public bool ForceListForJeeberDegraded { get; set; }
+
+    /// <summary>Ok-by-default (the real any-status snapshot) so existing tests stay green; only
+    /// <see cref="ForceListForJeeberDegraded"/> yields the degraded sentinel.</summary>
+    public async Task<OfferReadResult<PendingOffer>> TryListForJeeberAsync(
+        string jeeberId, CancellationToken ct)
+        => ForceListForJeeberDegraded
+            ? new OfferReadResult<PendingOffer>(true, Array.Empty<PendingOffer>())
+            : new OfferReadResult<PendingOffer>(false, await ListForJeeberAsync(jeeberId, ct));
+
     public Task<int> ExpireForRequestAsync(string requestId, DateTimeOffset at, CancellationToken ct)
     {
         // Request expired with no winner: every still-pending bid on it is now stale.

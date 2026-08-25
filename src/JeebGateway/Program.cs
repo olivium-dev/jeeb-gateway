@@ -1494,6 +1494,34 @@ ServiceClientExtensions.AttachBreakerAndTimeoutOnly(
 builder.Services.AddSingleton<JeebGateway.Financials.ICommissionCollector,
     JeebGateway.Financials.WalletCommissionCollector>();
 
+// c1 (OD-C1-1/2/4) — aggregate exposure floor + native pending-holds, sharing the wallet
+// two-phase client registered above. See exec/DECISION-holds-mechanism.md.
+builder.Services.Configure<JeebGateway.Financials.OfferLimitsOptions>(
+    builder.Configuration.GetSection(JeebGateway.Financials.OfferLimitsOptions.SectionName));
+// Holds:Enabled is the rollout/rollback switch (Layer B holds vs Layer A aggregate); the cap,
+// the strict enumeration and the serializer apply in BOTH modes.
+builder.Services.Configure<JeebGateway.Financials.Holds.HoldOptions>(
+    builder.Configuration.GetSection(JeebGateway.Financials.Holds.HoldOptions.SectionName));
+// Per-jeeber critical section for submit / edit-raise / sweeper backfill (DECISION I5).
+// Singleton: every request on this instance must contend on the same lock stripes.
+builder.Services.AddSingleton<JeebGateway.Financials.JeeberSubmitSerializer>();
+// The durable intent record is written BEFORE any initiate (DECISION I2), which makes it the
+// sweeper's enumeration surface: no placed hold can exist that nothing is able to find.
+builder.Services.AddSingleton<JeebGateway.Financials.Holds.IHoldIntentStore,
+    JeebGateway.Financials.Holds.HoldIntentStore>();
+builder.Services.AddSingleton<JeebGateway.Financials.Holds.IHoldManager,
+    JeebGateway.Financials.Holds.HoldManager>();
+// TimeProvider is already registered as a singleton further down (JEB-1502); the sweeper reuses
+// that one so its interval is wall-clock-free in tests. Do NOT register a second one here.
+var holdSweeperState = JeebGateway.StateService.StateServiceOptionsFactory
+    .FromConfiguration(builder.Configuration);
+// The sweeper walks the state-service KV. With no state-service there is no enumeration surface
+// at all, so it is left unhosted rather than spinning against a store it cannot reach.
+if (holdSweeperState.Enabled && !string.IsNullOrWhiteSpace(holdSweeperState.BaseUrl))
+{
+    builder.Services.AddHostedService<JeebGateway.Financials.Holds.HoldSweeper>();
+}
+
 // Jeeb Partner Portal wallet BFF (partner-wallet-bff) — validated options + the thin
 // saga-orchestration service. Reuses the scoped ServiceWalletClient registered above and the
 // IJeebWalletLedgerReader wired below; adds no new HttpClient (all partner money moves flow through
