@@ -1135,8 +1135,8 @@ public sealed class JeebOffersController : ControllerBase
         }
     }
 
-    /// <summary>F1 guard 2, best-effort: withdraw the unaffordable offer + reuse the lost
-    /// push. Correction 7: NotPending (replay of accepted offer) is swallowed.</summary>
+    /// <summary>F1 guard 2, best-effort: withdraw the unaffordable offer + send the withdrawn-for-
+    /// insufficient-balance push (CONTRACT §3). Correction 7: NotPending (replay of accepted offer) is swallowed.</summary>
     private async Task AutoWithdrawInsufficientBalanceOfferAsync(
         string offerId, string requestId, string jeeberId, string reason, CancellationToken ct)
     {
@@ -1155,7 +1155,7 @@ public sealed class JeebOffersController : ControllerBase
             _detachedPush.Dispatch(
                 "offer.insufficient_balance", recipientCount: 1, correlationId: requestId,
                 work: (sp, token) => sp.GetRequiredService<IOfferPushNotifier>()
-                    .NotifyOfferLostAsync(jeeberId, requestId, offerId, token));
+                    .NotifyOfferWithdrawnInsufficientBalanceAsync(jeeberId, requestId, offerId, token));
         }
         catch (Exception ex)
         {

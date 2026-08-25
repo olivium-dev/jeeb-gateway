@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net;
 using System.Net.Http.Json;
@@ -8,6 +9,7 @@ using JeebGateway.Financials;
 using JeebGateway.IntegrationTests.Fakes;
 using JeebGateway.Requests;
 using JeebGateway.Services.Clients;
+using JeebGateway.service.ServicePushNotification;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Configuration;
@@ -333,6 +335,38 @@ public class WalletGuardOfferTests
         acceptResp.StatusCode.Should().Be(HttpStatusCode.Conflict);
         var body = JObject.Parse(await acceptResp.Content.ReadAsStringAsync());
         body["type"]!.Value<string>().Should().Be("https://jeeb.dev/errors/offer-jeeber-insufficient-balance");
+        offerService.AcceptWithStatusCalled.Should().BeFalse("guard 2 must short-circuit before forwarding upstream");
+    }
+
+    /// <summary>F4-2 canonical de-leak pin (CONTRACT §7 / OD-C4-2): the CLIENT's 409 keeps the
+    /// machine-readable slug but carries a neutral Title and none of the jeeber's figures.</summary>
+    [Fact]
+    public async Task Accept_Returns409_WithoutLeakingJeeberBalance_ToClient()
+    {
+        var wallet = new FakeWalletClient { Balance = 10.0 }; // sufficient at submit
+        var offerService = new RecordingOfferServiceClient();
+        await using var factory = NewFactory(wallet, offerService: offerService);
+
+        var (clientId, requestId) = await SeedRequestAsync(factory);
+        var jeeberId = Guid.NewGuid().ToString();
+
+        var submitResp = await JeeberClient(factory, jeeberId).PostAsJsonAsync(
+            $"/requests/{requestId}/offers", new { fee = 100m, etaMinutes = 30, note = (string?)null });
+        submitResp.StatusCode.Should().Be(HttpStatusCode.Created);
+        var offerId = (await submitResp.Content.ReadFromJsonAsync<OfferDto>())!.Id;
+
+        wallet.Balance = 1.0; // balance drops before the client accepts
+
+        var acceptResp = await ClientActor(factory, clientId).PostAsync(
+            $"/v1/offers/{offerId}/accept", content: null);
+
+        acceptResp.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        var body = JObject.Parse(await acceptResp.Content.ReadAsStringAsync());
+        // The slug is KEPT (OD-C4-2) — telemetry and mobile branch on it.
+        body["type"]!.Value<string>().Should().Be("https://jeeb.dev/errors/offer-jeeber-insufficient-balance");
+        body["title"]!.Value<string>().Should().Be("This offer is no longer available.",
+            "the client is told the offer is gone, never that the jeeber is short of money");
+        ShouldNotCarry(body, "needed", "available", "currency", "outstanding", "thisOffer");
         offerService.AcceptWithStatusCalled.Should().BeFalse("guard 2 must short-circuit before forwarding upstream");
     }
 
@@ -928,6 +962,49 @@ public class WalletGuardOfferTests
         offer.Status.Should().Be(PendingOfferStatus.Withdrawn, "the unaffordable winner is auto-withdrawn");
     }
 
+    /// <summary>G4 (CONTRACT §3 emitter 1): the auto-withdrawn jeeber is told to top up.
+    /// FAILS-BEFORE — the pre-c4 auto-withdraw reused the "Offer Not Selected" loser push.</summary>
+    [Fact]
+    public async Task Accept_AutoWithdraw_EmitsWalletInsufficientPush_NotOfferLost()
+    {
+        var wallet = new FakeWalletClient { Balance = 20.0 };
+        var offerService = new RecordingOfferServiceClient();
+        var push = new RecordingUserPushClient();
+        await using var factory = NewFactory(wallet, offerService: offerService, push: push);
+
+        var (clientId, requestA) = await SeedRequestAsync(factory);
+        var (_, requestB) = await SeedRequestAsync(factory);
+        var jeeberId = Guid.NewGuid().ToString();
+        var jeeber = JeeberClient(factory, jeeberId);
+
+        var offerA = await SubmitOfferIdAsync(jeeber, requestA);
+        await SubmitOfferIdAsync(jeeber, requestB);
+
+        wallet.Balance = 10.0; // the aggregate no longer fits — accept auto-withdraws offerA
+
+        var acceptResp = await ClientActor(factory, clientId).PostAsync(
+            $"/v1/offers/{offerA}/accept", content: null);
+
+        acceptResp.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        await DrainDetachedPushesAsync(factory);
+
+        // Each submit also pushes offer.new to that request's OWN client, so the recipient
+        // pin scopes to the jeeber's inbox rather than the whole queue.
+        var toJeeber = push.Sends.Where(s => s.UserId == jeeberId).ToList();
+        toJeeber.Should().ContainSingle("the auto-withdrawn jeeber gets exactly one push");
+
+        var payload = (IDictionary<string, object?>)toJeeber.Single().Payload;
+        payload["type"].Should().Be("offer_withdrawn_insufficient_balance",
+            "mobile routes on the wire type, never on category");
+        payload["deepLink"].Should().Be("jeeb://wallet", "the destination is top-up, not the dead offer");
+        payload["title"].Should().Be("Offer withdrawn — top up to keep bidding");
+        payload["offerId"].Should().Be(offerA);
+
+        push.Sends.Should().NotContain(
+            s => Equals(((IDictionary<string, object?>)s.Payload)["type"], "offer_lost"),
+            "an auto-withdraw for insufficient balance must not masquerade as losing the auction");
+    }
+
     [Fact]
     public async Task Accept_Returns503_OfferExposureUnresolvable_WhenEnumerationDegraded_AndDoesNotWithdraw()
     {
@@ -965,7 +1042,7 @@ public class WalletGuardOfferTests
     /// which is the contract whenever <c>Holds:Enabled=false</c> (the rollback mode).</summary>
     private static WebApplicationFactory<Program> NewFactory(
         FakeWalletClient wallet, string failMode = "fail-closed", RecordingOfferServiceClient? offerService = null,
-        bool holds = false, int? maxLiveOffersPerJeeber = null)
+        bool holds = false, int? maxLiveOffersPerJeeber = null, RecordingUserPushClient? push = null)
         => new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.ConfigureAppConfiguration((_, cfg) =>
@@ -993,8 +1070,21 @@ public class WalletGuardOfferTests
                     services.RemoveAll<IOfferServiceClient>();
                     services.AddSingleton<IOfferServiceClient>(offerService);
                 }
+
+                if (push is not null)
+                {
+                    services.RemoveAll<ServicePushNotificationClient>();
+                    services.AddSingleton<ServicePushNotificationClient>(push);
+                    // The auto-withdraw push is detached by design; keep the handle so the test
+                    // awaits the send instead of racing the pool (EXEC-LEDGER S3.56 §2.4).
+                    Fakes.AwaitableDetachedPushDispatcher.Use(services);
+                }
             });
         });
+
+    /// <summary>Completes when every detached push dispatched so far has finished.</summary>
+    private static Task DrainDetachedPushesAsync(WebApplicationFactory<Program> factory)
+        => factory.Services.GetRequiredService<Fakes.AwaitableDetachedPushDispatcher>().DispatchedWork;
 
     private static async Task<(string ClientId, string RequestId)> SeedRequestAsync(WebApplicationFactory<Program> factory)
     {
@@ -1187,6 +1277,26 @@ public class WalletGuardOfferTests
 
         public override Task<JeebGateway.service.ServiceWallet.GetHolderWallets> WalletsAsync(Guid holderId)
             => WalletsAsync(holderId, CancellationToken.None);
+    }
+
+    private sealed record SendRecord(string UserId, object Payload);
+
+    /// <summary>In-process push recorder — the same double the accept-lifecycle push suite
+    /// uses, so a c4 payload pin reads the bytes the gateway would have put on the wire.</summary>
+    private sealed class RecordingUserPushClient : ServicePushNotificationClient
+    {
+        public RecordingUserPushClient() : base("http://localhost", new HttpClient()) { }
+
+        public ConcurrentQueue<SendRecord> Sends { get; } = new();
+        public int Attempts { get; private set; }
+
+        public override Task<SentPayloadResponse> Send_notification_to_userAsync(
+            string user_id, SentPayloadToUserRequest body, CancellationToken cancellationToken)
+        {
+            Attempts++;
+            Sends.Enqueue(new SendRecord(user_id, body.Payload));
+            return Task.FromResult(new SentPayloadResponse { Message = "ok", Timestamp = DateTimeOffset.UtcNow });
+        }
     }
 
     /// <summary>Records whether AcceptWithStatusAsync/EditAsync were invoked, so guard 2/3

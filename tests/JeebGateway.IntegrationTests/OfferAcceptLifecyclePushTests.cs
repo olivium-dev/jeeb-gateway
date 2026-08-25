@@ -91,6 +91,55 @@ public class OfferAcceptLifecyclePushTests
         payload["deepLink"].Should().Be("jeeb://offers/offer-lost");
     }
 
+    /// <summary>
+    /// c4/G4 (CONTRACT §3 + §5 P-1/P-2). An offer auto-withdrawn because the wallet stopped
+    /// covering the 10% fee must say SO — it is not the "you weren't selected" auction outcome.
+    /// </summary>
+    [Fact]
+    public async Task OfferWithdrawnInsufficientBalance_NotifiesJeeber_WithWalletTypeAndDeepLink()
+    {
+        var push = new RecordingUserPushClient();
+        var notifier = new OfferPushNotifier(push, NullLogger<OfferPushNotifier>.Instance);
+
+        await notifier.NotifyOfferWithdrawnInsufficientBalanceAsync(
+            "jeeber-x", "req-1", "offer-9", CancellationToken.None);
+
+        push.Sends.Should().ContainSingle();
+        var send = push.Sends.Single();
+        send.UserId.Should().Be("jeeber-x", "the withdrawn push goes to the jeeber who lost the offer");
+
+        var payload = (IDictionary<string, object?>)send.Payload;
+        payload["type"].Should().Be("offer_withdrawn_insufficient_balance");
+        payload["type"].Should().NotBe(
+            "offer_lost",
+            "their offer WON and was then withdrawn for balance — telling them they were "
+            + "'not selected' is a lie about why they lost the job");
+        payload["title"].Should().Be("Offer withdrawn — top up to keep bidding");
+        payload["body"].Should().Be(
+            "Your winning offer was withdrawn because your wallet no longer covers the 10% "
+            + "platform fee. Tap to top up.");
+        payload["deepLink"].Should().Be("jeeb://wallet");
+        payload["offerId"].Should().Be("offer-9");
+        payload["requestId"].Should().Be("req-1");
+        payload["request_id"].Should().Be("req-1");
+        // CONTRACT §3: the direct fallback keeps the legacy flat `delivery` label (only the
+        // upstream generic-event route carries `wallet`); mobile routes on `type`, never `category`.
+        payload["category"].Should().Be("delivery");
+    }
+
+    [Fact]
+    public async Task LifecyclePush_WalletWithdraw_BlankRecipient_PushesNothing()
+    {
+        var push = new RecordingUserPushClient();
+        var notifier = new OfferPushNotifier(push, NullLogger<OfferPushNotifier>.Instance);
+
+        await notifier.NotifyOfferWithdrawnInsufficientBalanceAsync(
+            " ", "r", "o", CancellationToken.None);
+
+        push.Sends.Should().BeEmpty();
+        push.Attempts.Should().Be(0);
+    }
+
     [Fact]
     public async Task LifecyclePush_PushServiceFault_IsSwallowed_NeverThrows()
     {

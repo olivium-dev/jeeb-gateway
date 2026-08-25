@@ -43,9 +43,22 @@ public sealed class PushSilencePolicyTests
     [InlineData(PushSilencePolicy.CategoryDispute)]
     [InlineData(PushSilencePolicy.CategoryRating)]
     [InlineData(PushSilencePolicy.CategoryChat)]
+    // c4/W3 category for the `offer_withdrawn_insufficient_balance` push — a jeeber whose
+    // offer was auto-withdrawn for balance must READ that, so it is never silent.
+    [InlineData(PushSilencePolicy.CategoryWallet)]
     public void D4_ShadeAndStoredCategories_AreStored(string category)
         => PushSilencePolicy.ModeForCategory(category).Should()
             .Be(PushDeliveryMode.ShadeAndStored);
+
+    [Fact]
+    public void WalletCategory_IsStored()
+        => PushSilencePolicy.ModeForCategory(PushSilencePolicy.CategoryWallet).Should()
+            .Be(PushDeliveryMode.ShadeAndStored,
+                "CONTRACT §3 freezes the guard-2 auto-withdraw push "
+                + "(`offer_withdrawn_insufficient_balance`) as ShadeAndStored: exactly one "
+                + "shade card + one notification-centre row, NEVER silent. Silencing "
+                + "`wallet` would leave the jeeber believing they simply lost the auction "
+                + "while their offer was pulled for balance — the c4 gap this epic closes");
 
     [Fact]
     public void NoCategoryIsBothModes()
