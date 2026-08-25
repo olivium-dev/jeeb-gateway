@@ -258,6 +258,11 @@ and data-export controls. `System.IO.FileMode` was the one non-configuration mat
 `FRAMEWORK_MODE_TYPES` rather than being falsely approved as a setting. The machine-readable rows in
 `scripts/gwdbx-flag-registry.txt` are the exhaustive source of truth.
 
+**2026-08-25 realtime proxy reconciliation.** The dedicated Staging-only WebSocket transport contributes
+six registered settings under `Features:RealtimeWebSocketProxy`: `Enabled`, the global/per-IP and tracked-IP
+resource bounds, and the connect/activity timeouts. `Enabled` is a restart-bound A1-off/B-on switch and is
+committed false in Production; it is not a gwdbx ownership cutover and therefore has `setting -` status.
+
 `FRAMEWORK_MODE_TYPES` is now only `BoundedChannelFullMode`, `FullMode` (both `System.Threading.Channels`),
 `FileMode` (`System.IO`), `SameSiteMode` (ASP.NET cookie enum) and `PushDeliveryMode` (a local enum in
 `Notifications/PushSilencePolicy.cs`, never bound to configuration). **Re-verify against the binding sites before

@@ -292,6 +292,13 @@ public sealed class RealtimeGuardianOptions
 {
     public const string SectionName = "Services:Realtime";
 
+    /// <summary>
+    /// Internal HTTP authority for realtime-comunication-service. The public
+    /// WebSocket proxy accepts only the reviewed staging overlay DNS authority;
+    /// other realtime HTTP clients retain their existing configuration rules.
+    /// </summary>
+    public string? BaseUrl { get; set; }
+
     /// <summary>Legacy tenant segment; stays the accepted route alias forever so
     /// pre-rename phone URLs keep resolving after any config flip.</summary>
     public const string DefaultTenantPrefix = "jeeb";

@@ -46,6 +46,7 @@ Mode: **PREPARE ONLY — no live authority granted**
 
 - [x] Chat OFF.
 - [x] Realtime OFF.
+- [x] Dedicated realtime WebSocket proxy OFF (404/no dial).
 - [x] Voice OFF.
 - [x] OTP ON.
 - [x] Both OTP base-URL aliases use exact overlay DNS, never host port.
@@ -88,6 +89,7 @@ Mode: **PREPARE ONLY — no live authority granted**
 
 - [x] B contract is separate from A1 and not exposed as an A1 input.
 - [x] Voice remains OFF in B for this campaign.
+- [x] Dedicated realtime WebSocket proxy is ON only in the separate B contract.
 - [ ] Real non-Super-Login SMS canary passes.
 - [ ] Real Firebase/chat canary passes.
 - [ ] Scoped public WSS canary passes.
