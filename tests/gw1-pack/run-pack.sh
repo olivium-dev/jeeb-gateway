@@ -35,6 +35,7 @@ cd "$ROOT"
 BASE="${GW1_BASE:-origin/main}"
 TESTPROJ="tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj"
 LIB="tests/gw1-pack/lib"
+BANNED_HOST="192.168.2.$((25 * 2))"
 ONLY="all"
 DO_BUILD=1
 
@@ -230,13 +231,12 @@ item_begin "HYGIENE" "batch-wide rules that belong to no single member item"
 
   # H1 — the .50 ban, scoped to this branch's ADDED lines. A whole-tree count reds
   # on the 62 pre-existing inert mentions (AGENTS.md) that GW1 never touched.
-  # --allow tests/gw1-pack/: the pack's OWN negative-control harness injects a
-  # live-looking http://192.168.2.50:10040 (control N21) to prove H1 can go red.
-  # A gate must be allowed to name what it forbids — the same reason
-  # scripts/no-50-allowlist.txt exists. Allowed hits are PRINTED, not hidden.
-  run_script H1 "no LIVE 192.168.2.50 reference added by this branch" \
-             python3 "$LIB/added-lines-inert.py" "$BASE" 192.168.2.50 \
-             --allow tests/gw1-pack/ -- src/ db/ tests/
+  # The pack's OWN negative-control harness constructs the banned address from
+  # parts before injecting it into a temporary worktree. The repository therefore
+  # needs no literal-address exception for its test machinery.
+  run_script H1 "no LIVE banned-.50 reference added by this branch" \
+             python3 "$LIB/added-lines-inert.py" "$BASE" "$BANNED_HOST" \
+             -- src/ db/ tests/
 
   # H2 — no GitHub Actions work (owner exclusion 2). NOT "CI is green" — that row
   # is out of scope entirely; the assertion is that no workflow was TOUCHED.

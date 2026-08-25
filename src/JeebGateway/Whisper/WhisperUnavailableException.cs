@@ -1,9 +1,8 @@
 namespace JeebGateway.Whisper;
 
 /// <summary>
-/// Reserved for transient Whisper outage cases — network errors, timeouts, 5xx, rate limits.
-/// Triggers retry, then circuit-breaker, then fallback to audio-only mode.
-/// Programmer errors (4xx auth/validation) propagate as-is.
+/// Transient failure reported while calling the owning voice-transcription-service.
+/// Provider details and credentials remain inside that service.
 /// </summary>
 public sealed class WhisperUnavailableException : Exception
 {

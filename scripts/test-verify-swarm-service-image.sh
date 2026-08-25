@@ -39,7 +39,6 @@ case "$*" in
 esac
 MOCK
 chmod +x "$TMP_DIR/bin/docker"
-
 PATH="$TMP_DIR/bin:$PATH" "$HERE/verify-swarm-service-image.sh" svc "$IMAGE"
 
 for mode in mismatch paused multiple wrong_service; do

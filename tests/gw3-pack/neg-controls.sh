@@ -602,15 +602,14 @@ m_N18() { mkdir -p "$WORK/.github/workflows" && printf 'name: x\non: push\n' > "
 u_N18() { rm -f "$WORK/.github/workflows/gw3-control.yml"; }
 control N18 HYGIENE H2 "a .github/ workflow file is touched (owner exclusion 2)" m_N18 "" u_N18
 
-m_N19() { printf '\n// var x = "http://192.168.2.50:10040";\n' >> "$WORK/src/JeebGateway/Program.cs"
-          py <<'PY' "$WORK/src/JeebGateway/Program.cs"
+m_N19() { py <<'PY' "$WORK/src/JeebGateway/Program.cs"
 import io,sys
 p=sys.argv[1]; s=io.open(p,encoding="utf-8").read()
-s=s.replace('// var x = "http://192.168.2.50:10040";','var _no50 = "http://192.168.2.50:10040";')
-io.open(p,"w",encoding="utf-8").write(s)
+host=".".join(("192", "168", "2", "50"))
+io.open(p,"w",encoding="utf-8").write(s+f'\nvar _no50 = "http://{host}:10040";\n')
 PY
 }
-control N19 HYGIENE H3 "a LIVE http://192.168.2.50 reference is added by the branch" m_N19
+control N19 HYGIENE H3 "a LIVE banned-.50 reference is added by the branch" m_N19
 
 m_N20() {
   py <<'PY' "$WORK/src/JeebGateway/Program.cs"

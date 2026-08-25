@@ -93,10 +93,10 @@ public class TranscriptionController : ControllerBase
             Reason: result.Reason));
     }
 
-    /// <summary>Lightweight status probe for the Whisper transcription subsystem.</summary>
+    /// <summary>Lightweight status proxy for the owning transcription service.</summary>
     [HttpGet("status")]
-    // ADR-005 L2 §A public: Whisper subsystem status/health probe (circuit-breaker state) — no user-type gate.
-    [PublicEndpoint("Whisper subsystem status probe — ADR-005 §A public (health/status family).")]
+    // ADR-005 L2 §A public: owner-service status/health probe — no user-type gate.
+    [PublicEndpoint("Voice transcription owner status probe — ADR-005 §A public (health/status family).")]
     [ProducesResponseType(typeof(WhisperStatusResponse), StatusCodes.Status200OK)]
     public async Task<IActionResult> GetStatus(CancellationToken ct)
     {

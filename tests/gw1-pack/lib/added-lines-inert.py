@@ -3,7 +3,7 @@
 GW1 test pack, HYGIENE leg — every ADDED line carrying a banned token must be INERT.
 
 Two tokens are banned by owner directive and both already exist, inertly, on
-`origin/main`: `192.168.2.50` (62 lines / 18 files) and `unified_payment_gateway`
+`origin/main`: the legacy `.50` address (62 lines / 18 files) and `unified_payment_gateway`
 (22 hits). So a whole-tree count reds on work this batch never did, and a bare
 "no added line contains the token" reds on a line whose entire content is the
 policy REFUSING the token — which is what GW1 actually added:
@@ -26,13 +26,11 @@ case from the other side and resolved it the same way — one of its 22 hits is 
 OpenTelemetry counter `description:` string, "not a dial path, so the conclusion
 stands". A rule that reds on the code enforcing it is a rule that gets deleted.
 
-`--allow <path-substring>` exists for exactly one reason and it is the reason
-`scripts/no-50-allowlist.txt` exists in this repo: **a gate must name what it
-forbids**. `tests/gw1-pack/neg-controls.sh` contains a LIVE-looking
-`http://192.168.2.50:10040` because control N21 injects one to prove H1 can go
-red. Without the allowlist H1 reds on its own negative control. Allowed hits are
-never hidden — each is printed as [ALLOWED] with its path, and the count is in the
-summary, so the allowlist can be audited rather than trusted.
+`--allow <path-substring>` exists for narrow self-test fixtures that must name a
+banned token. The `.50` negative control no longer needs it: it constructs the
+address from parts before injecting it into a temporary worktree. Allowed hits
+are never hidden — each is printed as [ALLOWED] with its path, and the count is
+in the summary, so any remaining exception can be audited rather than trusted.
 
 Also note, and this is why the check is a script rather than a shell one-liner:
 `git diff … | grep -c` returned **0** for the migration comment above when run

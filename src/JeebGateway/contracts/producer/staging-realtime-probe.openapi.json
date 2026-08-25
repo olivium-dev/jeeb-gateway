@@ -1,0 +1,194 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Jeeb Gateway Staging Realtime Probe",
+    "version": "1.0.0",
+    "description": "Internal staging-only producer contract consumed by jeeb-infrastructure's authorized public WSS verification."
+  },
+  "x-environment": "staging-only",
+  "paths": {
+    "/internal/ops/staging/realtime-probe-descriptor": {
+      "post": {
+        "operationId": "mintStagingRealtimeProbeDescriptor",
+        "summary": "Mint a nonce-bound, short-lived realtime edge-probe descriptor",
+        "description": "Requires an empty body and a dedicated timestamped HMAC-SHA256 header contract. The key is not a bearer, Guardian, session-JWT, or membership-ticket key.",
+        "parameters": [
+          {
+            "name": "X-Jeeb-Staging-Probe-Timestamp",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "pattern": "^(0|[1-9][0-9]*)$"
+            }
+          },
+          {
+            "name": "X-Jeeb-Staging-Probe-Nonce",
+            "in": "header",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            }
+          },
+          {
+            "name": "X-Jeeb-Staging-Probe-Signature",
+            "in": "header",
+            "required": true,
+            "description": "Lowercase hex HMAC-SHA256 over the exact UTF-8 bytes v1\\nPOST\\n/internal/ops/staging/realtime-probe-descriptor\\n<TIMESTAMP>\\n<NONCE>, with no trailing newline.",
+            "schema": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Complete 120-second descriptor for the synthetic client principal.",
+            "headers": {
+              "Cache-Control": {
+                "schema": {
+                  "type": "string",
+                  "enum": ["no-store"]
+                }
+              },
+              "X-Jeeb-Staging-Observed-Remote-Ip": {
+                "description": "RemoteIpAddress after the trusted forwarded-header middleware. Used only by the controlled staging ingress/XFF proof.",
+                "schema": {
+                  "type": "string",
+                  "minLength": 2,
+                  "maxLength": 45
+                }
+              }
+            },
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RealtimeProbeDescriptor"
+                }
+              }
+            }
+          },
+          "400": {
+            "$ref": "#/components/responses/Malformed"
+          },
+          "401": {
+            "$ref": "#/components/responses/Stale"
+          },
+          "403": {
+            "$ref": "#/components/responses/Forbidden"
+          },
+          "409": {
+            "$ref": "#/components/responses/Replay"
+          },
+          "503": {
+            "$ref": "#/components/responses/Unavailable"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "RealtimeProbeDescriptor": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "conversationId",
+          "topic",
+          "roleInConvo",
+          "socketUrl",
+          "token",
+          "ticket",
+          "expiresAt"
+        ],
+        "properties": {
+          "conversationId": {
+            "type": "string",
+            "pattern": "^edge-probe-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "topic": {
+            "type": "string",
+            "pattern": "^jeeb:chat:edge-probe-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+          },
+          "roleInConvo": {
+            "type": "string",
+            "enum": ["client"]
+          },
+          "socketUrl": {
+            "type": "string",
+            "format": "uri",
+            "enum": ["wss://app.jeeb.fds-1.com/socket/websocket"]
+          },
+          "token": {
+            "type": "string",
+            "minLength": 1,
+            "readOnly": true
+          },
+          "ticket": {
+            "type": "string",
+            "minLength": 1,
+            "readOnly": true
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "ProblemDetails": {
+        "type": "object",
+        "properties": {
+          "type": { "type": "string", "format": "uri" },
+          "title": { "type": "string" },
+          "status": { "type": "integer", "format": "int32" },
+          "detail": { "type": "string" },
+          "instance": { "type": "string" }
+        }
+      }
+    },
+    "responses": {
+      "Malformed": {
+        "description": "The body or required header shape is malformed.",
+        "content": {
+          "application/problem+json": {
+            "schema": { "$ref": "#/components/schemas/ProblemDetails" }
+          }
+        }
+      },
+      "Stale": {
+        "description": "The validly signed timestamp is outside the 60-second window.",
+        "content": {
+          "application/problem+json": {
+            "schema": { "$ref": "#/components/schemas/ProblemDetails" }
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "The fixed-time signature comparison failed.",
+        "content": {
+          "application/problem+json": {
+            "schema": { "$ref": "#/components/schemas/ProblemDetails" }
+          }
+        }
+      },
+      "Replay": {
+        "description": "Redis reports that the nonce was already consumed.",
+        "content": {
+          "application/problem+json": {
+            "schema": { "$ref": "#/components/schemas/ProblemDetails" }
+          }
+        }
+      },
+      "Unavailable": {
+        "description": "Redis, key material, socket configuration, or a credential issuer is unavailable.",
+        "content": {
+          "application/problem+json": {
+            "schema": { "$ref": "#/components/schemas/ProblemDetails" }
+          }
+        }
+      }
+    }
+  }
+}

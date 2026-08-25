@@ -15,7 +15,8 @@ RUN dotnet publish src/JeebGateway/JeebGateway.csproj \
 FROM mcr.microsoft.com/dotnet/aspnet:8.0.29-alpine3.23@sha256:b02ab6637e02dfe07d4205d557cbce7e2ab0e4a1d7d1285868b4f31eed20bd10 AS runtime
 WORKDIR /app
 
-RUN addgroup -S appgroup && adduser -S appuser -G appgroup
+RUN addgroup -S -g 65532 appgroup \
+    && adduser -S -D -H -u 65532 -G appgroup -s /sbin/nologin appuser
 USER appuser
 
 COPY --from=build /app/publish .

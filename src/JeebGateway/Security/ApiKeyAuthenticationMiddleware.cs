@@ -73,6 +73,15 @@ public class ApiKeyAuthenticationMiddleware
         // legacy internal API-key map as an alternate authentication path.
         if (path.StartsWithSegments("/internal/jobs", StringComparison.OrdinalIgnoreCase))
             return false;
+        // The staging realtime edge proof has its own timestamped HMAC contract
+        // with a distinct file-backed key. Requiring (or accepting) the broad
+        // legacy X-Api-Key here would create an undocumented alternate authority
+        // and would make the infrastructure probe impossible when API-key auth is on.
+        if (string.Equals(
+                path.Value,
+                JeebGateway.Operations.RealtimeProbe.StagingRealtimeProbeEndpoint.Route,
+                StringComparison.OrdinalIgnoreCase))
+            return false;
         return path.StartsWithSegments("/internal", StringComparison.OrdinalIgnoreCase);
     }
 

@@ -203,6 +203,7 @@ MaskedCalls:SessionDuration                          setting -
 MaskedCalls:TwilioAccountSid                         setting -
 MaskedCalls:TwilioAuthToken                          setting -
 MaskedCalls:TwilioProxyServiceSid                    setting -
+Operations:RealtimeProbe:MintKeyFile                 setting - # dedicated file-backed HMAC key for the staging WSS descriptor probe
 OtpHandover:ClientUnreachableWindow                  setting -
 OtpHandover:MaxAttempts                              setting -
 OtpHandover:SweepInterval                            setting -
@@ -261,10 +262,14 @@ Security:TokenMint                                   setting -
 Security:TokenMint:Enabled                           setting -
 Security:TokenMint:HeaderName                        setting -
 Security:TokenMint:Key                               setting -
+Jwt:SigningKeyFile                                   setting - # mounted gateway session-signing key for container deployments
+UmJwt:SigningKeyFile                                 setting - # mounted UM verification key for container deployments
 Services:Delivery:ActiveDeliveriesLimit              setting -
 Services:Delivery:TenantId                           setting -
 Services:Realtime:GuardianIssuer                     setting -
 Services:Realtime:GuardianSecret                     setting -
+Services:Realtime:GuardianSecretFile                 setting - # mounted staging secret; mutually exclusive with the inline compatibility setting
+Services:Realtime:MembershipTicketSigningKeyFile     setting - # dedicated mounted HS256 membership-ticket key shared only with realtime
 Services:Realtime:PublicSocketUrl                    setting -
 Services:Realtime:TenantPrefix                       setting - # RTC-rename G0: LiveComm name prefix (RealtimeTopicNames), default "jeeb" = zero behavior change; flip owner-gated
 Services:Realtime:TokenTtlSeconds                    setting -
@@ -300,18 +305,6 @@ WeeklySettlement:Interval                            setting -
 WeeklySettlement:MaxBatchSize                        setting -
 WeeklySettlement:SettlementDay                       setting -
 WeeklySettlement:TimeZoneId                          setting -
-Whisper:ApiKey                                       setting -
-Whisper:BaseUrl                                      setting -
-Whisper:CircuitBreakerFailureThreshold               setting -
-Whisper:CircuitBreakerOpenDuration                   setting -
-Whisper:FakeTranscribe                               setting -
-Whisper:InitialBackoff                               setting -
-Whisper:Language                                     setting -
-Whisper:MaxAttempts                                  setting -
-Whisper:MaxBackoff                                   setting -
-Whisper:Model                                        setting -
-Whisper:Timeout                                      setting -
-
 # ---- setting: bound options knobs the pre-D2 code arm could not reach (D2) --
 # AddOptions<T>().Bind(...) sites — 4 in Extensions/*.cs, 2 in Program.cs — plus GetSection().Get<T>().
 BffServices:Keys                                     setting -

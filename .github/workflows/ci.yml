@@ -7,6 +7,21 @@ on:
     branches: [main]
 
 jobs:
+  provider-boundary-gates:
+    # Owner locks: the gateway must never target the retired .50 host and must
+    # never receive an STT provider credential. Transcription crosses only the
+    # voice-transcription-service boundary. Both scanners include adversarial
+    # canaries, so a matcher that silently stops detecting its hazard also fails.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Reject banned gateway destinations
+        run: bash scripts/check-no-50-server.sh
+      - name: Reject gateway provider-secret drift
+        run: bash scripts/check-provider-secret-boundaries.sh
+      - name: Lock staging authorized-WSS probe contract
+        run: bash scripts/check-staging-realtime-probe-contract.sh
+
   stateless-gate:
     # R9 — reject database ownership and ratchet the reviewed transitional
     # owner/worker inventory (ADR-001-rev2).
@@ -113,6 +128,18 @@ jobs:
 
       - name: Build test project
         run: dotnet build tests/JeebGateway.IntegrationTests/JeebGateway.IntegrationTests.csproj -c Release --no-restore
+
+      - name: Restore unit test project
+        run: dotnet restore tests/JeebGateway.UnitTests/JeebGateway.UnitTests.csproj
+
+      - name: Build unit test project
+        run: dotnet build tests/JeebGateway.UnitTests/JeebGateway.UnitTests.csproj -c Release --no-restore
+
+      - name: Run all unit tests
+        run: >-
+          dotnet test tests/JeebGateway.UnitTests/JeebGateway.UnitTests.csproj
+          -c Release --no-build --no-restore --verbosity normal
+          --logger "trx;LogFileName=unit-tests.trx"
 
       - name: Verify test shards are disjoint and exhaustive
         run: |

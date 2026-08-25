@@ -39,6 +39,7 @@ GW_URL="${GW_URL:-http://127.0.0.1:10090}"
 ENVFILE="${GW_ENVFILE:-/home/ec2-user/iter5-native/env/gateway.env}"
 PUBLISH="${GW_PUBLISH:-/home/ec2-user/iter5-native/publish}"
 EXPECT_CRITICAL="${GW1_EXPECT_CRITICAL:-33}"
+BANNED_HOST="192.168.2.$((25 * 2))"
 
 SHA=""; SELFTEST=0; NEG=0
 while [ $# -gt 0 ]; do
@@ -96,9 +97,9 @@ SNAP="$(mktemp)"; trap 'rm -f "$SNAP" "$SNAP".*' EXIT
   echo '@@CWD';          p=\$(systemctl show -p MainPID --value jeeb-gateway); readlink /proc/\$p/cwd 2>/dev/null; echo
   echo '@@ACTIVE';       systemctl is-active jeeb-gateway 2>/dev/null; echo
   echo '@@READY';        curl -s -m 15 $GW_URL/health/ready; echo
-  echo '@@ENV_50_LIVE';  grep -F '192.168.2.50' $ENVFILE 2>/dev/null | grep -v -E '^[[:space:]]*#' | wc -l; echo
-  echo '@@ENV_50_ALL';   grep -F '192.168.2.50' $ENVFILE 2>/dev/null | wc -l; echo
-  echo '@@ENV_50_LINES'; grep -n -F '192.168.2.50' $ENVFILE 2>/dev/null; echo
+  echo '@@ENV_50_LIVE';  grep -F '$BANNED_HOST' $ENVFILE 2>/dev/null | grep -v -E '^[[:space:]]*#' | wc -l; echo
+  echo '@@ENV_50_ALL';   grep -F '$BANNED_HOST' $ENVFILE 2>/dev/null | wc -l; echo
+  echo '@@ENV_50_LINES'; grep -n -F '$BANNED_HOST' $ENVFILE 2>/dev/null; echo
   echo '@@ENV_LOOPBACK'; grep -c -F '127.0.0.1' $ENVFILE 2>/dev/null; echo
   echo '@@ENV_UPG_LIVE'; grep -F 'unified_payment_gateway' $ENVFILE 2>/dev/null | grep -v -E '^[[:space:]]*#' | wc -l; echo
   echo '@@ENV_UPG_ALL';  grep -F 'unified_payment_gateway' $ENVFILE 2>/dev/null | wc -l; echo
@@ -193,10 +194,10 @@ E_50L="$(field ENV_50_LIVE | tr -d ' \r\n')"; E_50A="$(field ENV_50_ALL | tr -d 
 E_LO="$(field ENV_LOOPBACK | tr -d ' \r\n')"
 E_UPGL="$(field ENV_UPG_LIVE | tr -d ' \r\n')"; E_UPGA="$(field ENV_UPG_ALL | tr -d ' \r\n')"
 if [ "${E_50L:-x}" = "0" ]; then
-  ok P5 "no LIVE 192.168.2.50 in the gateway env  [live=$E_50L of $E_50A total mention(s), the rest are comments]"
+  ok P5 "no LIVE banned-.50 host in the gateway env  [live=$E_50L of $E_50A total mention(s), the rest are comments]"
   [ "${E_50A:-0}" -gt 0 ] && field ENV_50_LINES | sed 's/^/       | [INERT] /'
 else
-  bad P5 "192.168.2.50 appears on $E_50L NON-COMMENT line(s) in the live gateway env — this can dial"
+  bad P5 "the banned .50 host appears on $E_50L NON-COMMENT line(s) in the live gateway env — this can dial"
   field ENV_50_LINES | sed 's/^/       | /'
 fi
 [ "${E_LO:-0}" -ge 1 ] && ok P5pos "POS control: the same grep finds 127.0.0.1 overrides  [$E_LO]" || bad P5pos "POS control failed — the .50 zero is unfounded"

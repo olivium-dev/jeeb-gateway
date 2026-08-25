@@ -10,6 +10,7 @@ using JeebGateway.Kyc;
 using JeebGateway.Middleware;
 using JeebGateway.NotificationPreferences;
 using JeebGateway.Observability;
+using JeebGateway.Operations.RealtimeProbe;
 using JeebGateway.ProhibitedItems;
 using JeebGateway.StateService;
 using JeebGateway.Ratings;
@@ -28,7 +29,6 @@ using JeebGateway.Tracking;
 using JeebGateway.Users;
 using JeebGateway.Users.DataExport;
 using JeebGateway.Calls;
-using JeebGateway.Whisper;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
@@ -122,6 +122,8 @@ builder.Services.Configure<SecurityOptions>(builder.Configuration.GetSection(Sec
 const string GatewayBearerScheme = "GatewayBearer";
 
 var jwt = builder.Configuration.GetSection(JwtOptions.SectionName).Get<JwtOptions>() ?? new JwtOptions();
+jwt.SigningKey = JeebGateway.Tokens.JwtSigningKeySource.Resolve(
+    jwt.SigningKey, jwt.SigningKeyFile, "Jwt:SigningKeyFile");
 
 // SEC-H2 (Leg-11): fail closed if the gateway would boot with a placeholder / dev / too-short
 // signing key outside Development/Testing. Bakes no key — only asserts a real secret was injected.
@@ -143,6 +145,8 @@ var signingBytes = Encoding.UTF8.GetBytes(jwt.SigningKey);
 // Jwt:SigningKey (operationally the same fleet secret today); supplying a distinct
 // UmJwt:SigningKey lets UM rotate off the leaked fleet key with no code change.
 var umJwt = builder.Configuration.GetSection(UmJwtOptions.SectionName).Get<UmJwtOptions>() ?? new UmJwtOptions();
+umJwt.SigningKey = JeebGateway.Tokens.JwtSigningKeySource.Resolve(
+    umJwt.SigningKey, umJwt.SigningKeyFile, "UmJwt:SigningKeyFile");
 var umSigningKey = string.IsNullOrWhiteSpace(umJwt.SigningKey) ? jwt.SigningKey : umJwt.SigningKey;
 
 // SEC-H2: when UmJwt supplies its OWN key (not the blank fall-through to Jwt:SigningKey,
@@ -544,8 +548,9 @@ builder.Services.AddHostedService(sp =>
 // mints a short-lived signed ticket scoped to (conversation, viewer, role) after
 // the chat-service membership check, so realtime-comunication-service can authorize
 // the WS join without calling chat-service (no inter-service coupling). HS256 over
-// the gateway's existing Jwt:SigningKey (the same secret the realtime Guardian
-// pipeline verifies the session bearer with). Singleton — the key is read once.
+// a dedicated mounted membership-ticket key in containers (Jwt:SigningKey remains
+// the native compatibility fallback). That is NOT realtime's HS512 Guardian key.
+// Singleton — the key is read once.
 builder.Services.AddSingleton<JeebGateway.Conversations.Realtime.IRealtimeTicketIssuer,
                               JeebGateway.Conversations.Realtime.RealtimeTicketIssuer>();
 
@@ -554,11 +559,11 @@ builder.Services.AddSingleton<JeebGateway.Conversations.Realtime.IRealtimeTicket
 // The credential issuer for realtime-comunication-service. Its Guardian pipeline
 // verifies with ITS OWN secret, not the gateway's Jwt:SigningKey, so neither the
 // forwarded user bearer nor the S08 membership ticket above can authenticate against
-// it. The service does ship an OPEN, UNAUTHENTICATED POST /api/auth/token that mints
-// topics:["*"] for anyone; nothing here is built on that. The gateway mints its own
-// credentials instead, each scoped to a single topic — publish-only for the server-side
-// fan-out, subscribe-only for a client. Unconfigured (the committed default) means no
-// token is minted and every dependent path fails closed.
+// it. Realtime's legacy POST /api/auth/token can mint wildcard credentials, but its
+// API-key guard remains unconfigured in staging and this gateway never calls it. The
+// gateway mints its own credentials instead, each scoped to a single topic —
+// publish-only for server-side fan-out, subscribe-only for a client. Unconfigured
+// (the committed default) means no token is minted and every dependent path fails closed.
 builder.Services.Configure<JeebGateway.Realtime.RealtimeGuardianOptions>(
     builder.Configuration.GetSection(JeebGateway.Realtime.RealtimeGuardianOptions.SectionName));
 builder.Services.AddSingleton<JeebGateway.Realtime.IRealtimeGuardianTokenIssuer,
@@ -566,6 +571,10 @@ builder.Services.AddSingleton<JeebGateway.Realtime.IRealtimeGuardianTokenIssuer,
 // Every LiveComm topic/channel name derives from Services:Realtime:TenantPrefix
 // here; the default keeps live names byte-identical (RTC rename phase G0).
 builder.Services.AddSingleton<JeebGateway.Realtime.RealtimeTopicNames>();
+// Staging-only edge proof: a dedicated HMAC-authenticated descriptor mint with
+// Redis replay protection. Registration is a no-op outside Staging, matching
+// the route map below, so the surface does not exist in production/dev/test.
+builder.Services.AddStagingRealtimeProbe(builder.Configuration, builder.Environment);
 // Rejects unknown {tenant} segments at URL matching, so those requests 404
 // pre-auth exactly as they did when the two realtime routes were literals.
 builder.Services.Configure<Microsoft.AspNetCore.Routing.RouteOptions>(options =>
@@ -1232,6 +1241,7 @@ builder.Services.AddOpenTelemetry()
             .AddAspNetCoreInstrumentation()
             .AddHttpClientInstrumentation()
             .AddSource(CaseTelemetry.ActivitySourceName)
+            .AddSource(RealtimeProbeTelemetry.ActivitySourceName)
             .AddOtlpExporter(opt => opt.Endpoint = new Uri(otlpEndpoint));
     })
     .WithMetrics(metrics =>
@@ -2314,6 +2324,11 @@ builder.Services.AddHostedService(sp => sp.GetRequiredService<DataExportProcesso
 // StateServiceRefreshTokenStore (register #3); the in-memory store is Development/Testing only.
 builder.Services.Configure<JwtOptions>(builder.Configuration.GetSection(JwtOptions.SectionName));
 builder.Services.Configure<UmJwtOptions>(builder.Configuration.GetSection(UmJwtOptions.SectionName));
+// The authentication schemes above and the token/ticket issuers below must use
+// the same resolved key material. File-backed keys intentionally override any
+// committed development default or stale inline environment value.
+builder.Services.PostConfigure<JwtOptions>(options => options.SigningKey = jwt.SigningKey);
+builder.Services.PostConfigure<UmJwtOptions>(options => options.SigningKey = umJwt.SigningKey);
 // JEB-1502: register FakeTimeProvider as the singleton TimeProvider so the test
 // control-plane can shift the clock for ALL time-dependent background jobs without
 // any per-job patching. At zero offset this is behaviourally identical to
@@ -2670,66 +2685,6 @@ builder.Services.Configure<JeebGateway.Calls.MaskedCallOptions>(
     builder.Configuration.GetSection(JeebGateway.Calls.MaskedCallOptions.SectionName));
 builder.Services.AddSingleton<JeebGateway.Calls.IMaskedCallService, JeebGateway.Calls.MaskedCallService>();
 
-// Resilient Whisper integration (T-backend-036).
-// Per-attempt 10s timeout enforced via linked CTS inside ResilientTranscriptionService;
-// HttpClient.Timeout is set to Infinite so the service's cancellation policy is authoritative.
-// Retry with exponential backoff (3 attempts, 1s/2s/4s), circuit breaker (5 failures),
-// secondary fallback provider, and health check integration.
-// Honor the owner's flat lever name WHISPER_FAKE_TRANSCRIBE in addition to the
-// section-based key Whisper:FakeTranscribe. .NET's default env provider only maps
-// double-underscore keys (Whisper__FakeTranscribe), so we explicitly fold the flat
-// name in here when present. Section/Whisper__ keys still win if both are set.
-var whisperFakeFlat = Environment.GetEnvironmentVariable("WHISPER_FAKE_TRANSCRIBE");
-if (!string.IsNullOrWhiteSpace(whisperFakeFlat)
-    && string.IsNullOrWhiteSpace(builder.Configuration["Whisper:FakeTranscribe"]))
-{
-    builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
-    {
-        ["Whisper:FakeTranscribe"] = whisperFakeFlat
-    });
-}
-
-builder.Services.Configure<WhisperOptions>(builder.Configuration.GetSection(WhisperOptions.SectionName));
-
-// STT seam (Track C): select the REAL OpenAI Whisper client when STT is enabled for
-// real (FakeTranscribe=false) AND an API key is present; otherwise fall back to the
-// network-free FakeWhisperClient. The real WhisperClient is never deleted — it remains
-// the production path and is the only branch that opens an HttpClient to OpenAI.
-var whisperOpts = builder.Configuration.GetSection(WhisperOptions.SectionName).Get<WhisperOptions>()
-                  ?? new WhisperOptions();
-var useRealWhisper = !whisperOpts.FakeTranscribe && !string.IsNullOrWhiteSpace(whisperOpts.ApiKey);
-if (useRealWhisper)
-{
-    builder.Services.AddHttpClient<IWhisperClient, WhisperClient>((sp, http) =>
-    {
-        var opts = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<WhisperOptions>>().Value;
-        http.BaseAddress = new Uri(opts.BaseUrl.TrimEnd('/') + "/");
-        http.Timeout = Timeout.InfiniteTimeSpan;
-    });
-}
-else
-{
-    builder.Services.AddSingleton<IWhisperClient, FakeWhisperClient>();
-}
-builder.Services.AddSingleton<IWhisperCircuitBreaker, WhisperCircuitBreaker>();
-// IAudioStore holds the raw voice-note BYTES (WhisperAudio.Content). Large audio
-// blobs deliberately do NOT go into the gateway Postgres DB — their durable home is
-// the voice-transcription-service's S3-compatible storage (see IAudioStore's own
-// doc-comment), which the gateway must not reach into (org no-coupling law). In the
-// gateway it is only a TRANSIENT in-process buffer holding the bytes already in-hand
-// at the moment of fallback (SaveAsync is the ONLY method ever called — there is no
-// GetAsync / drain-back path in the gateway today), NOT a store of record. It is left
-// in-memory ON PURPOSE — an intentional transient, not a pending migration. (The AUDIT-A
-// roster that recorded it, StoreDurabilityGuard.KnownInMemoryBacklog, was deleted in W5-11.)
-builder.Services.AddSingleton<IAudioStore, InMemoryAudioStore>();
-// Durability follow-up — transcription fallback queue (JEBV4-126): small re-drive rows (audio_id,
-// reason, queued_at). No durable store since W5-11 — the backlog and PendingQueueDepth reset on a bounce.
-builder.Services.AddSingleton<ITranscriptionFallbackQueue, InMemoryTranscriptionFallbackQueue>();
-builder.Services.AddSingleton<IFallbackTranscriptionProvider, NoOpFallbackTranscriptionProvider>();
-builder.Services.AddScoped<ITranscriptionService, ResilientTranscriptionService>();
-builder.Services.AddHealthChecks()
-    .AddCheck<WhisperHealthCheck>("whisper", tags: new[] { "ready" });
-
 // AUDIT-A (FIX-1) readiness surface for the fail-closed durability gate. "ready"-tagged so
 // ---------------------------------------------------------------------------
 // jeeb-state-service durable rewire (ADR-001-rev2, Layer-2 R1–R8).
@@ -2995,25 +2950,6 @@ app.UseStatusCodePages(async statusCodeContext =>
     });
 });
 
-// STT seam visibility (Track C): make the active Whisper path obvious in startup logs.
-if (useRealWhisper)
-{
-    app.Logger.LogInformation(
-        "Whisper STT: REAL OpenAI client active (model={Model}, lang={Language}).",
-        whisperOpts.Model, whisperOpts.Language);
-}
-else if (whisperOpts.FakeTranscribe)
-{
-    app.Logger.LogInformation(
-        "Whisper STT: FAKE client active (Whisper:FakeTranscribe=true). No external calls.");
-}
-else
-{
-    app.Logger.LogWarning(
-        "Whisper STT: FAKE client active because no Whisper:ApiKey is configured "
-        + "while FakeTranscribe=false. Set Whisper__ApiKey to enable REAL transcription.");
-}
-
 // PR #32 review B2 — must run FIRST so every downstream middleware (rate
 // limiter, OTP per-IP partition, auth-correlation logs) sees the real client
 // IP from X-Forwarded-For instead of the LB's internal address.
@@ -3157,6 +3093,7 @@ if (stateServiceWired)
 }
 
 app.MapControllers();
+app.MapStagingRealtimeProbe();
 
 // T-backend-050 — Prometheus scrape endpoint. Returns the OpenMetrics
 // snapshot for the configured MeterProvider (ASP.NET Core HTTP server,

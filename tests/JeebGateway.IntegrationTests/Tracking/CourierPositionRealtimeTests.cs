@@ -370,6 +370,44 @@ public class CourierPositionRealtimeTests : IClassFixture<WebApplicationFactory<
             TimeProvider.System,
             NullLogger<RealtimeGuardianTokenIssuer>.Instance);
 
+    [Fact]
+    public void GuardianIssuer_Loads_Key_From_MountedSecretFile()
+    {
+        var path = Path.Combine(
+            Path.GetTempPath(), $"jeeb-realtime-guardian-{Guid.NewGuid():N}.secret");
+        File.WriteAllText(path, TestGuardianSecret + Environment.NewLine);
+        try
+        {
+            var issuer = new RealtimeGuardianTokenIssuer(
+                Options.Create(new RealtimeGuardianOptions { GuardianSecretFile = path }),
+                TimeProvider.System,
+                NullLogger<RealtimeGuardianTokenIssuer>.Instance);
+
+            issuer.IsConfigured.Should().BeTrue();
+            issuer.Issue("viewer-1", "jeeb:chat:conv-1", RealtimeGuardianTokenIssuer.SubscribeOnly)
+                .Should().NotBeNull();
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void GuardianIssuer_Rejects_Ambiguous_InlineAndFile_Configuration()
+    {
+        var act = () => new RealtimeGuardianTokenIssuer(
+            Options.Create(new RealtimeGuardianOptions
+            {
+                GuardianSecret = TestGuardianSecret,
+                GuardianSecretFile = "/run/secrets/realtime_guardian_secret",
+            }),
+            TimeProvider.System,
+            NullLogger<RealtimeGuardianTokenIssuer>.Instance);
+
+        act.Should().Throw<InvalidOperationException>().WithMessage("*never both*");
+    }
+
     private static IEnumerable<string?> Strings(JsonElement payload, string claim)
     {
         var value = payload.GetProperty(claim);

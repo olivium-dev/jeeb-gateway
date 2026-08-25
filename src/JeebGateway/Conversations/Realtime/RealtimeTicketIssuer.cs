@@ -19,10 +19,13 @@ namespace JeebGateway.Conversations.Realtime;
 /// the gateway-signed ticket).
 ///
 /// <para>
-/// The ticket is an HS256 JWT signed with the gateway's existing fleet signing key
-/// (<c>Jwt:SigningKey</c>) — the SAME HS256 secret the realtime service's Guardian
-/// pipeline already verifies the session bearer with, so no new key distribution is
-/// needed. Claims: <c>sub</c> (viewer), <c>conv</c> (conversation id), <c>role</c>
+/// The ticket is an HS256 JWT signed with a dedicated mounted key when
+/// <c>Services:Realtime:MembershipTicketSigningKeyFile</c> is configured. The
+/// existing <c>Jwt:SigningKey</c> remains a compatibility fallback for native
+/// deployments. Realtime receives the corresponding key separately as
+/// <c>GATEWAY_TICKET_SIGNING_KEY</c>; it is intentionally distinct from both the
+/// session-token key and realtime's HS512 Guardian key. Claims: <c>sub</c> (viewer),
+/// <c>conv</c> (conversation id), <c>role</c>
 /// (role_in_convo), short <c>exp</c>. The gateway computes NO membership here — it
 /// only stamps what chat-service authorized.
 /// </para>
@@ -38,9 +41,9 @@ public interface IRealtimeTicketIssuer
 }
 
 /// <summary>
-/// Default <see cref="IRealtimeTicketIssuer"/> — HS256 over <c>Jwt:SigningKey</c>.
-/// Registered as a singleton; the signing key is read once at construction
-/// (mirrors <see cref="TokenService"/>'s validation that the key is ≥ 32 bytes).
+/// Default <see cref="IRealtimeTicketIssuer"/> — HS256 over the dedicated mounted
+/// membership-ticket key, with <c>Jwt:SigningKey</c> as the legacy/native fallback.
+/// Registered as a singleton; the signing key is read once at construction.
 /// </summary>
 public sealed class RealtimeTicketIssuer : IRealtimeTicketIssuer
 {
@@ -53,21 +56,31 @@ public sealed class RealtimeTicketIssuer : IRealtimeTicketIssuer
 
     private const string ConversationClaim = "conv";
     private const string RoleClaim = "role";
+    // This issuer is part of the cross-service membership-ticket wire contract.
+    // It must not inherit Jwt:Issuer, which may be an environment URL for session
+    // tokens; realtime deliberately accepts only this fixed issuer.
+    private const string MembershipTicketIssuer = "jeeb-gateway";
 
-    private readonly JwtOptions _jwt;
     private readonly TimeProvider _clock;
     private readonly SigningCredentials _signingCredentials;
 
-    public RealtimeTicketIssuer(IOptions<JwtOptions> jwt, TimeProvider clock)
+    public RealtimeTicketIssuer(
+        IOptions<JwtOptions> jwt,
+        IOptions<JeebGateway.Realtime.RealtimeGuardianOptions> realtime,
+        TimeProvider clock)
     {
-        _jwt = jwt.Value;
         _clock = clock;
 
-        var keyBytes = Encoding.UTF8.GetBytes(_jwt.SigningKey);
+        var signingKey = JwtSigningKeySource.Resolve(
+            jwt.Value.SigningKey,
+            realtime.Value.MembershipTicketSigningKeyFile,
+            "Services:Realtime:MembershipTicketSigningKeyFile");
+        var keyBytes = Encoding.UTF8.GetBytes(signingKey);
         if (keyBytes.Length < 32)
         {
             throw new InvalidOperationException(
-                "Jwt:SigningKey must be at least 32 bytes (256 bits) to mint a realtime ticket.");
+                "The realtime membership-ticket signing key must be at least 32 bytes "
+                + "(256 bits).");
         }
         _signingCredentials = new SigningCredentials(
             new SymmetricSecurityKey(keyBytes), SecurityAlgorithms.HmacSha256);
@@ -76,6 +89,7 @@ public sealed class RealtimeTicketIssuer : IRealtimeTicketIssuer
     public string Issue(string conversationId, string viewerId, string roleInConvo)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(roleInConvo);
+        var realtimeRole = NormalizeMembershipRole(roleInConvo);
 
         var now = _clock.GetUtcNow();
         var expires = now.Add(TicketLifetime);
@@ -87,11 +101,11 @@ public sealed class RealtimeTicketIssuer : IRealtimeTicketIssuer
             new(JwtRegisteredClaimNames.Iat,
                 now.ToUnixTimeSeconds().ToString(), ClaimValueTypes.Integer64),
             new(ConversationClaim, conversationId),
-            new(RoleClaim, roleInConvo),
+            new(RoleClaim, realtimeRole),
         };
 
         var jwt = new JwtSecurityToken(
-            issuer: _jwt.Issuer,
+            issuer: MembershipTicketIssuer,
             audience: "jeeb-realtime",
             claims: claims,
             notBefore: now.UtcDateTime,
@@ -100,4 +114,22 @@ public sealed class RealtimeTicketIssuer : IRealtimeTicketIssuer
 
         return new JwtSecurityTokenHandler().WriteToken(jwt);
     }
+
+    /// <summary>
+    /// Translate chat-service's lifecycle roles onto realtime's deliberately small
+    /// authorization vocabulary. Both offerer and winner are jeebers for message
+    /// visibility; preserving either raw value would make realtime reject the ticket.
+    /// Unknown values fail closed instead of being promoted to a participant role.
+    /// </summary>
+    private static string NormalizeMembershipRole(string roleInConvo)
+        => roleInConvo.Trim().ToLowerInvariant() switch
+        {
+            "client" => "client",
+            "jeeber" or "jeeber_offerer" or "jeeber_winner" => "jeeber",
+            "admin" => "admin",
+            "support" => "support",
+            _ => throw new ArgumentException(
+                $"Unsupported realtime membership role '{roleInConvo}'.",
+                nameof(roleInConvo)),
+        };
 }

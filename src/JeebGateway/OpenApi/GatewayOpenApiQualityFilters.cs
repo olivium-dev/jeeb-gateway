@@ -3,6 +3,7 @@ using JeebGateway.Admin;
 using JeebGateway.Cases;
 using JeebGateway.Controllers;
 using Microsoft.AspNetCore.Http;
+using Microsoft.OpenApi.Any;
 using Microsoft.OpenApi.Models;
 using Swashbuckle.AspNetCore.SwaggerGen;
 
@@ -139,6 +140,39 @@ public sealed class GatewayEvidenceSchemaFilter : ISchemaFilter
                 legacyRefund.Description =
                     "Rejected legacy input. Approved COD cash reimbursement is arranged manually.";
         }
+        else if (context.Type == typeof(RealtimeChannelDescriptor))
+            PinRealtimeDescriptorContract(schema);
+    }
+
+    private static void PinRealtimeDescriptorContract(OpenApiSchema schema)
+    {
+        foreach (var property in new[]
+                 {
+                     "conversationId", "viewerId", "topic", "roleInConvo", "ticket",
+                     "socketUrl", "token", "expiresAt",
+                 })
+            schema.Required.Add(property);
+
+        var viewer = schema.Properties["viewerId"];
+        viewer.MinLength = 1;
+        viewer.Description =
+            "Canonical user id derived only from the authenticated bearer; never client input.";
+
+        var topic = schema.Properties["topic"];
+        topic.MinLength = 1;
+        topic.Pattern = "^[A-Za-z0-9_-]+:chat:[A-Za-z0-9_-]+$";
+        topic.Description =
+            "Exact owner-service Phoenix topic {tenant}:chat:{conversationId}.";
+
+        var role = schema.Properties["roleInConvo"];
+        role.MinLength = 1;
+        role.Enum = new List<IOpenApiAny>
+        {
+            new OpenApiString("client"),
+            new OpenApiString("jeeber_offerer"),
+            new OpenApiString("jeeber_winner"),
+        };
+        role.Description = "Canonical active role returned by chat-service.";
     }
 
     private static void RepairArbitraryJson(OpenApiSchema schema, string property)

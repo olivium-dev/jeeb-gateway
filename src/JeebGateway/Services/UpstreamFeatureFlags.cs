@@ -107,11 +107,11 @@ public sealed class UpstreamFeatureFlags
     // FeatureFlags:UseUpstream:Feedback config key binds to nothing and is ignored.
 
     /// <summary>
-    /// When true, voice transcription paths proxy the real
+    /// Controls the voice request-creation path. When true, it proxies the owning
     /// voice-transcription-service (host port 10062, health <c>/healthz</c>) via
-    /// <see cref="JeebGateway.Services.Clients.IVoiceTranscriptionClient"/>
-    /// instead of the gateway-local Whisper transport. Default false keeps the
-    /// existing in-process Whisper fixtures green.
+    /// <see cref="JeebGateway.Services.Clients.IVoiceTranscriptionClient"/>. When
+    /// false, <c>RequestVoiceController</c> fails closed with 503; there is no
+    /// gateway-local provider fallback.
     /// </summary>
     public bool Voice { get; set; }
 

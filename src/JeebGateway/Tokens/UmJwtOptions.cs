@@ -49,4 +49,10 @@ public class UmJwtOptions
     /// leaked fleet key.
     /// </summary>
     public string SigningKey { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Absolute mounted-secret path for the UM verification key. When set, it
+    /// takes precedence over <see cref="SigningKey"/>.
+    /// </summary>
+    public string? SigningKeyFile { get; set; }
 }
