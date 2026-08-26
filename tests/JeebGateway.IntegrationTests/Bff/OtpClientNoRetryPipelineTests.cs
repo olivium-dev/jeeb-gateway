@@ -7,6 +7,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Hosting;
+using Polly.Timeout;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests.Bff;
@@ -65,6 +66,12 @@ public sealed class OtpClientNoRetryPipelineTests
         ServiceClientExtensions.ShouldBreakOtp(exception: null, badRequest).Should().BeFalse();
         ServiceClientExtensions.ShouldBreakOtp(new HttpRequestException("network fault"), response: null)
             .Should().BeTrue();
+        ServiceClientExtensions.ShouldBreakOtp(new TimeoutRejectedException("attempt timed out"), response: null)
+            .Should().BeTrue();
+        ServiceClientExtensions.ShouldBreakOtp(new OperationCanceledException("caller cancelled"), response: null)
+            .Should().BeFalse();
+        ServiceClientExtensions.ShouldBreakOtp(new InvalidOperationException("activation fault"), response: null)
+            .Should().BeFalse();
     }
 
     private static Task InvokeAsync(IServiceOTPClient client, OtpOperation operation) =>

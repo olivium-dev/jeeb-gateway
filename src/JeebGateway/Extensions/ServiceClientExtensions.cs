@@ -3,6 +3,7 @@ using JeebGateway.Services.Bff;
 using JeebGateway.Services.Clients;
 using Microsoft.Extensions.Http.Resilience;
 using Polly;
+using Polly.Timeout;
 
 namespace JeebGateway.Extensions;
 
@@ -773,8 +774,13 @@ public static class ServiceClientExtensions
     /// </summary>
     internal static bool ShouldBreakOtp(Exception? exception, HttpResponseMessage? response)
     {
-        if (exception is not null)
+        if (exception is HttpRequestException or TimeoutRejectedException)
             return true;
+
+        // Caller cancellation and programming/activation faults do not establish
+        // that the OTP upstream is unhealthy, so they must not pollute breaker state.
+        if (exception is not null)
+            return false;
 
         if (response is null || response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
             return false;
