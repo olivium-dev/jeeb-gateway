@@ -409,7 +409,7 @@ jobs:
                   ServiceOTPApi__BaseUrl=http://jeeb-staging-one-time-password:8080
                   Auth__Otp__ApplicationId=0d51afe1-499f-4a29-a55a-36d2dd223b05
                   Auth__Otp__Phone__AllowedRegion=LB
-                  Auth__Otp__Phone__EnforceRegion=true
+                  Auth__Otp__Phone__EnforceRegion=false
                   Services__Realtime__BaseUrl=http://jeeb-staging-realtime-comunication-service:4000
                   SuperLogin__OpenMode=false
                   DemoUsers__Enabled=false
@@ -965,7 +965,7 @@ jobs:
               add_env FeatureFlags__Kyc__AutoApprove true
               add_env Auth__Otp__ApplicationId 0d51afe1-499f-4a29-a55a-36d2dd223b05
               add_env Auth__Otp__Phone__AllowedRegion LB
-              add_env Auth__Otp__Phone__EnforceRegion true
+              add_env Auth__Otp__Phone__EnforceRegion false
               add_env FeatureFlags__UseUpstream__Compliment false
               # The existing gateway deploy is native and uses host loopback.
               # This staging gateway is containerized, so retain the same fleet

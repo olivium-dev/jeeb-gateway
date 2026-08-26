@@ -18,8 +18,9 @@ info:
     Backend OTP sign-in (T-BE-001). Locked per audit comment #14764:
       - ttlSeconds = 300 (5 min, read from downstream ExpiresAt)
       - 3-attempt downstream cap with Resend recovery (no time window)
-      - Phone normalized to E.164 (region=LB) before any processing
-      - PII: only bcrypt(phone, 12) ever leaves the gateway in logs/spans
+      - Phone carries an explicit international + prefix and is canonicalized to E.164
+      - Valid numbers from every country are eligible; the emergency region switch is off
+      - PII: only the keyed HMAC phone reference may appear in logs/spans
       - Frozen ProblemDetails type set:
           invalid_otp, too_many_attempts, invalid_country, rate_limited, invalid_phone
 servers:
@@ -29,7 +30,7 @@ paths:
   /v1/auth/otp/request:
     post:
       operationId: requestOtp
-      summary: Request an OTP for a Lebanese phone number
+      summary: Request an OTP for an explicit international phone number
       tags: [otp]
       requestBody:
         required: true
@@ -104,9 +105,10 @@ components:
       properties:
         phone:
           type: string
-          description: Phone in any common Lebanese format; gateway normalizes to E.164 (region=LB).
+          description: Explicit international phone with + country code. Harmless presentation separators are canonicalized to E.164; national-format guessing is rejected.
           minLength: 4
           maxLength: 32
+          pattern: '^\+[0-9 ()\-.]{2,31}$'
           example: "+96179123456"
     OtpRequestResponse:
       type: object
@@ -124,8 +126,10 @@ components:
       properties:
         phone:
           type: string
+          description: Explicit international phone with + country code; the same canonical E.164 identity used for the OTP request.
           minLength: 4
           maxLength: 32
+          pattern: '^\+[0-9 ()\-.]{2,31}$'
         code:
           type: string
           pattern: "^[0-9]{6}$"

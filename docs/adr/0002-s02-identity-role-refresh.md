@@ -1,5 +1,9 @@
 # 0002 — S02 identity: dual-role profile, role-switch, refresh rotation, phone policy
 
+> **Partial supersession:** ADR-0012 supersedes only this ADR's F-E phone
+> admission rules. OTP ingress now requires an explicit international `+`
+> prefix and admits valid E.164 numbers from every country by default.
+
 **Date:** 2026-06-06
 **Status:** Accepted (Wave 0). Wave 1 / DECISION #1 resolved and N11 split-signer corrected by [ADR-0003](0003-s02-wave1-dual-role-identity-split-signer.md).
 **Deciders:** Senior Software Architect (cto-S02); DECISION #1 ruled by owner in ADR-0003
@@ -90,7 +94,8 @@ components:
     RoleSwitchReq:    { required: [role] }                                    # role ∈ {client,jeeber}
     RoleSwitchResult: { required: [active_role, access_token, refresh_token] }
     VerifyResult:     { required: [access_token, refresh_token, available_roles, active_role] }
-# F-E error types (gateway-local, 4xx/429): invalid_country(400) invalid_phone(400) rate_limited(429)
+# F-E error types (gateway-local, 4xx/429): invalid_phone(400), rate_limited(429),
+# and invalid_country(400) only when the emergency region restriction is enabled
 ```
 
 ---
@@ -99,7 +104,7 @@ components:
 
 | Feature | Gateway (thin orchestration) | user-management (owning service) | Store |
 |---|---|---|---|
-| **F-E** phone policy + rate-limit | libphonenumber-csharp (region=LB) → 400 `invalid_country`; E.164 parse-fail → 400 `invalid_phone`; sliding window >10/min/IP AND >3/min/phone → 429 `rate_limited`; **downstream SendAsync NOT called when throttled** | none (no upstream change) | counters: durable (M3) or memory; gateway-local |
+| **F-E** phone policy + rate-limit | Explicit international `+` input; exact libphonenumber E.164 round-trip; all countries admitted by default; malformed, national, repaired, or impossible input → 400 `invalid_phone`; optional emergency `AllowedRegion` restriction → 400 `invalid_country`; sliding window >10/min/IP AND >3/min/phone → 429 `rate_limited`; **downstream SendAsync NOT called when rejected/throttled** | none (no upstream change) | counters: durable (M3) or memory; gateway-local |
 | **F-D** refresh rotation | EXISTING `ITokenService.RefreshAsync` (rotate-on-use, reuse→chain-revoke→401→re-OTP). **Only change:** bind `IRefreshTokenStore` to durable impl | none | durable (M3, gate only on store-tech) |
 | **F-C** verify DTO | decorate verify 200 with snake_case `available_roles`/`active_role`; put `role`/`active_role` claims in access JWT (gateway signs) | additive columns (JEB-38) + find-or-create returns `{userId,isNew,phoneHashRef}` (JEB-1422) | UM Postgres (additive) |
 | **F-B** GET /v1/users/me | NEW route; userId from bearer principal; fix real UM `profile` 500-with-valid-bearer; surface `available_roles`/`active_role`; 30s cache (NFR-1) | return roles on profile | UM Postgres |
@@ -125,7 +130,9 @@ components:
 
 ## Test strategy (strict `:3040` body assertions, real path)
 
-- **F-E:** N3/N4/N12 — invalid_country, invalid_phone, rate_limited; assert downstream-not-called via 202-absence + type body match.
+- **F-E:** international + Lebanese positives; national/repaired/impossible
+  `invalid_phone`; emergency-restriction `invalid_country`; `rate_limited`;
+  assert downstream-not-called for every rejection and throttle.
 - **F-D:** H-A4/N8 — rotate returns new pair; replay of revoked → 401 + re-OTP forced (family revoked).
 - **F-C:** H-A2/H-B2 (CP-A new Sami `[client]`, CP-B seeded Kamal `[client,jeeber]`) — jsonEquals on `available_roles`/`active_role` + JWT claim.
 - **F-B:** H-A3/H-B3/H-B5/ALT-5.1 — `me` returns dual-role profile; userId from bearer.

@@ -1218,11 +1218,12 @@ builder.Services.Configure<JeebGateway.Auth.OtpSignIn.OtpSignInOptions>(
 
 // F-E (S02, JEB-37 / JEB-1422) — gateway-local phone admission policy + OTP-request
 // burst guard, both evaluated in AuthOtpController BEFORE the one-time-password
-// upstream is dialed (no upstream change). Region gate (LB-only -> invalid_country),
-// E.164 parse (-> invalid_phone), and a per-IP AND per-phone sliding window
-// (-> 429 rate_limited, SendOTP NOT called when throttled). Caps/region are
-// configuration (Auth:Otp:Phone / Auth:Otp:RateLimit) so an env tunes them without
-// a code change. The in-memory limiter is the M3 seam: bind a durable impl in prod.
+// upstream is dialed (no upstream change). Explicit international E.164 validation
+// (-> invalid_phone), an optional emergency region restriction (-> invalid_country),
+// and a per-IP AND per-phone sliding window (-> 429 rate_limited, SendOTP NOT called
+// when throttled). The normal deployment leaves region restriction disabled so all
+// valid countries are eligible. The in-memory limiter is the M3 seam: bind a durable
+// implementation in production.
 builder.Services.Configure<JeebGateway.Auth.OtpSignIn.PhonePolicyOptions>(
     builder.Configuration.GetSection(JeebGateway.Auth.OtpSignIn.PhonePolicyOptions.SectionName));
 builder.Services.Configure<JeebGateway.Auth.OtpSignIn.OtpRequestRateLimitOptions>(

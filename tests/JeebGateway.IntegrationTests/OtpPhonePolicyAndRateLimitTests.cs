@@ -10,6 +10,7 @@ using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using PhoneNumbers;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests;
@@ -94,6 +95,8 @@ public class OtpPhonePolicyAndRateLimitTests
     [InlineData("03000001", "national format")]
     [InlineData("009613000001", "international prefix without an explicit plus")]
     [InlineData("+9611", "impossible number")]
+    [InlineData("+0123456789", "zero country-code prefix")]
+    [InlineData("+999123456789", "unknown country code")]
     [InlineData("+1234567890123456", "overlong E.164")]
     [InlineData("+961+9613000001", "double prefix")]
     public async Task NonCanonicalOrImpossiblePhone_Returns400_AndNeverDialsUpstream(
@@ -109,6 +112,45 @@ public class OtpPhonePolicyAndRateLimitTests
         resp.StatusCode.Should().Be(HttpStatusCode.BadRequest, reason);
         (await resp.Content.ReadAsStringAsync()).Should().Contain("invalid_phone");
         stub.SendCalls.Should().Be(0, $"{reason} must fail before the typed OTP client");
+    }
+
+    [Fact]
+    public async Task LibPhoneNumberRepair_IsRejectedByRequestAndVerifyWithoutUpstreamCalls()
+    {
+        const string repairedInput = "+96103000001";
+        var util = PhoneNumberUtil.GetInstance();
+        var parsed = util.Parse(repairedInput, "ZZ");
+        util.IsValidNumber(parsed).Should().BeTrue("the vector must reach the exact round-trip guard");
+        util.Format(parsed, PhoneNumberFormat.E164).Should().Be("+9613000001");
+
+        var stub = new StubServiceOtpClient();
+        using var factory = MakeFactory(stub);
+        var http = factory.CreateClient();
+
+        var request = await http.PostAsync("/v1/auth/otp/request",
+            JsonBody(JsonSerializer.Serialize(new { phone = repairedInput })));
+        var verify = await http.PostAsync("/v1/auth/otp/verify",
+            JsonBody(JsonSerializer.Serialize(new { phone = repairedInput, code = "1234" })));
+
+        request.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        verify.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        stub.SendCalls.Should().Be(0);
+        stub.ValidateCalls.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task OversizedPhone_IsRejectedBeforeParsingAndNeverDialsUpstream()
+    {
+        var stub = new StubServiceOtpClient();
+        using var factory = MakeFactory(stub);
+        var http = factory.CreateClient();
+        var phone = "+1" + new string(' ', 64) + "4155550100";
+
+        var response = await http.PostAsync("/v1/auth/otp/request",
+            JsonBody(JsonSerializer.Serialize(new { phone })));
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        stub.SendCalls.Should().Be(0);
     }
 
     // ---------------------------------------------------------------
@@ -147,6 +189,36 @@ public class OtpPhonePolicyAndRateLimitTests
         resp.Content.Headers.ContentType?.MediaType.Should().Be("application/problem+json");
         var raw = await resp.Content.ReadAsStringAsync();
         raw.Should().Contain("https://problems.jeeb.lb/auth/invalid_country");
+        stub.SendCalls.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task EmergencyRegionRestriction_WhenEnabled_RejectsNonLebanesePhone()
+    {
+        var stub = new StubServiceOtpClient();
+        using var factory = MakeFactory(stub, enforceRegion: true);
+        var http = factory.CreateClient();
+
+        var response = await http.PostAsync("/v1/auth/otp/request",
+            JsonBody("""{ "phone": "+14155550100" }"""));
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await response.Content.ReadAsStringAsync()).Should().Contain("invalid_country");
+        stub.SendCalls.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task AllowedOutcomeWithoutCanonicalPhone_FailsClosedBeforeUpstreamCall()
+    {
+        var stub = new StubServiceOtpClient();
+        using var factory = MakeFactory(stub, phonePolicy: new MissingCanonicalPhonePolicy());
+        var http = factory.CreateClient();
+
+        var response = await http.PostAsync("/v1/auth/otp/request",
+            JsonBody("""{ "phone": "+14155550100" }"""));
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await response.Content.ReadAsStringAsync()).Should().Contain("invalid_phone");
         stub.SendCalls.Should().Be(0);
     }
 
@@ -277,7 +349,8 @@ public class OtpPhonePolicyAndRateLimitTests
         IServiceOTPClient stub,
         int maxPerPhone = 3,
         int maxPerIp = 10,
-        IPhonePolicy? phonePolicy = null) =>
+        IPhonePolicy? phonePolicy = null,
+        bool enforceRegion = false) =>
         new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.ConfigureServices(services =>
@@ -305,7 +378,7 @@ public class OtpPhonePolicyAndRateLimitTests
                 services.Configure<PhonePolicyOptions>(o =>
                 {
                     o.AllowedRegion = "LB";
-                    o.EnforceRegion = true;
+                    o.EnforceRegion = enforceRegion;
                 });
                 services.Configure<OtpRequestRateLimitOptions>(o =>
                 {
@@ -354,5 +427,11 @@ public class OtpPhonePolicyAndRateLimitTests
     private sealed class InvalidCountryPhonePolicy : IPhonePolicy
     {
         public PhonePolicyResult Evaluate(string? rawPhone) => PhonePolicyResult.InvalidCountry;
+    }
+
+    private sealed class MissingCanonicalPhonePolicy : IPhonePolicy
+    {
+        public PhonePolicyResult Evaluate(string? rawPhone) =>
+            new(PhonePolicyOutcome.Allowed);
     }
 }

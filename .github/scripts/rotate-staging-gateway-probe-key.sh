@@ -123,7 +123,7 @@ assert_gateway_b() {
   assert_exact_env "$environment" Auth__Otp__ApplicationId \
     0d51afe1-499f-4a29-a55a-36d2dd223b05
   assert_exact_env "$environment" Auth__Otp__Phone__AllowedRegion LB
-  assert_exact_env "$environment" Auth__Otp__Phone__EnforceRegion true
+  assert_exact_env "$environment" Auth__Otp__Phone__EnforceRegion false
   assert_exact_env "$environment" Services__Realtime__BaseUrl \
     http://jeeb-staging-realtime-comunication-service:4000
   assert_exact_env "$environment" Services__Realtime__PublicSocketUrl \

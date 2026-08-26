@@ -8,15 +8,16 @@ namespace JeebGateway.Auth.OtpSignIn;
 /// dialed; the shared service remains an unmodified generic OTP primitive.
 ///
 /// <para>Every admitted value must carry an explicit <c>+</c> country code.
-/// National-format guessing, international-prefix repair, digit truncation,
-/// and country allowlists are deliberately absent. Harmless presentation
-/// separators are removed, then libphonenumber validates the exact digit
-/// sequence and emits the single E.164 value used by all downstream keys.</para>
+/// National-format guessing, international-prefix repair, and digit truncation
+/// are deliberately absent. Harmless presentation separators are removed, then
+/// libphonenumber validates the exact digit sequence and emits the single E.164
+/// value used by all downstream keys.</para>
 ///
 /// <para><see cref="PhonePolicyOutcome.InvalidCountry"/> remains in the result
 /// contract so older gateway integrations keep their typed
-/// <c>invalid_country</c> compatibility. The production policy no longer emits
-/// that outcome because valid numbers from every country are eligible.</para>
+/// <c>invalid_country</c> compatibility. International eligibility is the
+/// default; the outcome is emitted only when the emergency region-restriction
+/// switch is enabled.</para>
 /// </summary>
 public interface IPhonePolicy
 {
@@ -53,10 +54,10 @@ public readonly record struct PhonePolicyResult(
 }
 
 /// <summary>
-/// Legacy-compatible options bound from <c>Auth:Otp:Phone</c>. The properties
-/// remain bindable so existing environment configuration and older deployment
-/// contracts do not break. They no longer restrict eligibility: Lebanon is a
-/// client-side default selection, not a server-side country allowlist.
+/// Options bound from <c>Auth:Otp:Phone</c>. International eligibility is the
+/// default. Operators may temporarily enable a single-region restriction as an
+/// emergency fraud-containment switch; normal client country selection remains
+/// independent and defaults to Lebanon in the Jeeb UI.
 /// </summary>
 public sealed class PhonePolicyOptions
 {
@@ -64,28 +65,36 @@ public sealed class PhonePolicyOptions
 
     public string AllowedRegion { get; set; } = "LB";
 
-    public bool EnforceRegion { get; set; } = true;
+    public bool EnforceRegion { get; set; }
 }
 
 /// <inheritdoc />
 public sealed class PhonePolicy : IPhonePolicy
 {
+    private const int MaxRawPhoneLength = 32;
     private const int MaxE164Digits = 15;
     private const string UnknownRegion = "ZZ";
     private static readonly PhoneNumberUtil Util = PhoneNumberUtil.GetInstance();
+
+    private readonly string _allowedRegion;
+    private readonly bool _enforceRegion;
 
     public PhonePolicy(Microsoft.Extensions.Options.IOptions<PhonePolicyOptions> options)
     {
         ArgumentNullException.ThrowIfNull(options);
 
-        // Force option materialisation to preserve the existing binding/startup
-        // contract even though country eligibility is no longer configured.
-        _ = options.Value;
+        var configured = options.Value;
+        _allowedRegion = string.IsNullOrWhiteSpace(configured.AllowedRegion)
+            ? "LB"
+            : configured.AllowedRegion.Trim().ToUpperInvariant();
+        _enforceRegion = configured.EnforceRegion;
     }
 
     public PhonePolicyResult Evaluate(string? rawPhone)
     {
-        if (string.IsNullOrWhiteSpace(rawPhone))
+        if (rawPhone is null
+            || rawPhone.Length > MaxRawPhoneLength
+            || string.IsNullOrWhiteSpace(rawPhone))
         {
             return PhonePolicyResult.InvalidPhone;
         }
@@ -121,6 +130,15 @@ public sealed class PhonePolicy : IPhonePolicy
         if (!string.Equals(canonical, explicitPhone, StringComparison.Ordinal))
         {
             return PhonePolicyResult.InvalidPhone;
+        }
+
+        if (_enforceRegion)
+        {
+            var region = Util.GetRegionCodeForNumber(parsed);
+            if (!string.Equals(region, _allowedRegion, StringComparison.OrdinalIgnoreCase))
+            {
+                return PhonePolicyResult.InvalidCountry;
+            }
         }
 
         return PhonePolicyResult.Allow(canonical);

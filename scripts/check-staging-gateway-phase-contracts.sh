@@ -43,7 +43,7 @@ expected_a1 = {
     "ServiceOTPApi__BaseUrl": "http://jeeb-staging-one-time-password:8080",
     "Auth__Otp__ApplicationId": "0d51afe1-499f-4a29-a55a-36d2dd223b05",
     "Auth__Otp__Phone__AllowedRegion": "LB",
-    "Auth__Otp__Phone__EnforceRegion": "true",
+    "Auth__Otp__Phone__EnforceRegion": "false",
     "Services__Realtime__BaseUrl": "http://jeeb-staging-realtime-comunication-service:4000",
     "Operations__RealtimeProbe__MintKeyFile": "/run/secrets/staging_wss_probe_mint_key",
     "SuperLogin__OpenMode": "false",

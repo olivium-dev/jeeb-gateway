@@ -183,7 +183,7 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().Contain(
             "add_env Auth__Otp__ApplicationId 0d51afe1-499f-4a29-a55a-36d2dd223b05");
         workflow.Should().Contain("add_env Auth__Otp__Phone__AllowedRegion LB");
-        workflow.Should().Contain("add_env Auth__Otp__Phone__EnforceRegion true");
+        workflow.Should().Contain("add_env Auth__Otp__Phone__EnforceRegion false");
         workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Compliment false");
         workflow.Should().Contain("add_env CatalogServiceApi__BaseUrl ''");
 

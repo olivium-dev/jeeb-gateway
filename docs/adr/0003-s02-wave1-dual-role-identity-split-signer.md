@@ -81,7 +81,7 @@ Two signing paths, two signers — locked:
 | `GET /v1/users/me` (NEW) | gateway translates UM profile; fixes live UM profile 500; 30s cache | n/a (read) | H-A3/H-B3/H-B5; userId from bearer (I4) |
 | `POST /v1/users/me/role/switch` (NEW) | gateway whitelist+forward; **UM** persists+re-issues | **UM** | CP-C `active_role=jeeber`, UM-issued token decodes role=jeeber, gateway signed nothing (N11) |
 
-Error taxonomy (distinct, RFC7807): `invalid_role` **400** (unknown value, NO UM call — N6) ≠ `role_not_available` **403** (valid value not in `available_roles` — UM distinct signal G4, N5/ALT-1). `invalid_country` 400 (N3), `invalid_phone` 400 (N4), `rate_limited` 429 (N12) are gateway-local (Wave 0). Refresh reuse → 401 + whole family revoked (N8).
+Error taxonomy (distinct, RFC7807): `invalid_role` **400** (unknown value, NO UM call — N6) ≠ `role_not_available` **403** (valid value not in `available_roles` — UM distinct signal G4, N5/ALT-1). `invalid_phone` 400 and `rate_limited` 429 are gateway-local (Wave 0); `invalid_country` 400 remains reserved for the default-off emergency region restriction per ADR-0012. Refresh reuse → 401 + whole family revoked (N8).
 
 ---
 
