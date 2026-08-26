@@ -27,6 +27,10 @@ namespace JeebGateway.IntegrationTests;
 /// </summary>
 public class DualRoleBffTests
 {
+    private const string KamalId = "5d4d7390-e039-4e3a-9f90-41868b4d1fe4";
+    private const string NewClientId = "44460cc8-99db-49b7-9c36-c536e0bc0b2e";
+    private const string SamiId = "b425ca3a-e3c6-4a86-bf38-40b7ae9c39b6";
+
     // -----------------------------------------------------------------
     // F-C — OTP verify translates opaque -> snake_case (CP-A / CP-B)
     // -----------------------------------------------------------------
@@ -38,7 +42,7 @@ public class DualRoleBffTests
         var um = new StubUm
         {
             FindOrCreate = new PhoneFindOrCreateResult(
-                UserId: "kamal-1",
+                UserId: KamalId,
                 IsNew: false,
                 AvailableRoles: new[] { Roles.Client, Roles.Jeeber }, // customer, driver
                 ActiveRole: Roles.Client)
@@ -52,7 +56,7 @@ public class DualRoleBffTests
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
         var user = doc.RootElement.GetProperty("user");
-        user.GetProperty("userId").GetString().Should().Be("kamal-1");
+        user.GetProperty("userId").GetString().Should().Be(KamalId);
         user.GetProperty("active_role").GetString().Should().Be("client",
             "opaque 'customer' MUST translate to the Jeeb contract 'client'");
         user.GetProperty("available_roles").EnumerateArray().Select(e => e.GetString())
@@ -67,7 +71,7 @@ public class DualRoleBffTests
         var otp = new StubOtp();
         var um = new StubUm
         {
-            FindOrCreate = new PhoneFindOrCreateResult("new-1", IsNew: true,
+            FindOrCreate = new PhoneFindOrCreateResult(NewClientId, IsNew: true,
                 AvailableRoles: new[] { Roles.Client }, ActiveRole: Roles.Client)
         };
         using var factory = MakeFactory(otp, um, umEnabled: true);
@@ -85,7 +89,7 @@ public class DualRoleBffTests
     }
 
     [Fact]
-    public async Task FC_Verify_UM_Fault_Falls_Back_And_Still_Mints()
+    public async Task FC_Verify_UM_Fault_FailsClosed_And_MintsNothing()
     {
         var otp = new StubOtp();
         var um = new StubUm { FindOrCreateThrows = new UserManagementCallException("phone/find-or-create", 502) };
@@ -95,10 +99,11 @@ public class DualRoleBffTests
         var resp = await http.PostAsync("/v1/auth/otp/verify",
             Json("""{ "phone": "+9613000011", "code": "1234" }"""));
 
-        // Fail-safe: a UM blip must NOT block a successful OTP validate.
-        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
         var body = await resp.Content.ReadFromJsonAsync<JsonElement>();
-        body.GetProperty("accessToken").GetString().Should().NotBeNullOrWhiteSpace();
+        body.GetProperty("type").GetString().Should()
+            .Be("https://problems.jeeb.lb/auth/identity_unavailable");
+        body.TryGetProperty("accessToken", out _).Should().BeFalse();
     }
 
     // -----------------------------------------------------------------
@@ -174,7 +179,7 @@ public class DualRoleBffTests
         var um = new StubUm
         {
             FindOrCreate = new PhoneFindOrCreateResult(
-                UserId: "sami-1",
+                UserId: SamiId,
                 IsNew: false,
                 AvailableRoles: new[] { Roles.Client },
                 ActiveRole: Roles.Client)
@@ -188,7 +193,7 @@ public class DualRoleBffTests
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
         var user = doc.RootElement.GetProperty("user");
-        user.GetProperty("userId").GetString().Should().Be("sami-1");
+        user.GetProperty("userId").GetString().Should().Be(SamiId);
         user.GetProperty("active_role").GetString().Should().Be("client");
         user.GetProperty("available_roles").EnumerateArray().Select(e => e.GetString())
             .Should().BeEquivalentTo(new[] { "client" },
@@ -390,7 +395,8 @@ public class DualRoleBffTests
         public string? LastRoleSwitchOpaqueRole { get; private set; }
 
         public PhoneFindOrCreateResult FindOrCreate { get; init; } =
-            new("default-1", false, new[] { Roles.Client }, Roles.Client);
+            new("3600c6c7-6646-4f9d-af3f-49f5d9a02b90", false,
+                new[] { Roles.Client }, Roles.Client);
         public RoleSwitchReissueResult RoleSwitch { get; init; } =
             new("default-1", "access", "refresh", Roles.Client);
         public UserManagementCallException? FindOrCreateThrows { get; init; }
@@ -419,11 +425,10 @@ public class DualRoleBffTests
         public Task<RoleGrantResult> RemoveAvailableRoleAsync(string userId, string opaqueRole, CancellationToken ct)
             => throw new UserManagementCallException("role/revoke", 404);
 
-        // Null = this stub does not model the authoritative UM roles-read, so the
-        // /v1/users/me resolver falls through to its local-projection / session-claims
-        // fallback (the bearer's per-role claims these tests set up). Returning a fixed
-        // role set here would override that and is not what these tests exercise.
         public Task<UserRolesResult?> GetUserRolesAsync(string userId, CancellationToken ct)
-            => Task.FromResult<UserRolesResult?>(null);
+            => Task.FromResult<UserRolesResult?>(new UserRolesResult(
+                FindOrCreate.UserId,
+                FindOrCreate.AvailableRoles,
+                FindOrCreate.ActiveRole));
     }
 }

@@ -22,7 +22,8 @@ namespace JeebGateway.Auth.OtpSignIn;
 /// service through the SAME NSwag-generated <see cref="IServiceOTPClient"/> the
 /// generic <c>/api/otp/*</c> proxy and the delivery-handover path consume, then
 /// — and ONLY on a successful validate — mints the gateway session
-/// (<see cref="IUsersStore.GetOrCreateAsync"/> + <see cref="ITokenService.IssueAsync"/>).
+/// (authoritative user-management identity resolution +
+/// <see cref="ITokenService.IssueAsync"/>).
 /// The session/JWT mint is orchestration, not OTP logic, and stays in the
 /// gateway (JEB-1516 guardrail [05]). This replaces the retired in-gateway OTP
 /// mock, which duplicated send/validate business logic (a P2 thin-BFF
@@ -189,7 +190,10 @@ public sealed class AuthOtpController : ControllerBase
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status502BadGateway)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
+    [ProducesResponseType(
+        typeof(ProblemDetails),
+        StatusCodes.Status503ServiceUnavailable,
+        "application/problem+json")]
     public async Task<IActionResult> VerifyOtp([FromBody] OtpVerifyDto? body, CancellationToken ct)
     {
         if (!_flags.CurrentValue.Otp)
@@ -250,7 +254,10 @@ public sealed class AuthOtpController : ControllerBase
         // mint is orchestration and stays in the gateway — N11 split-signer: only the
         // role-switch path is UM-signed).
         var key = (body.Phone ?? string.Empty).Trim();
-        var (userId, opaqueRoles, opaqueActiveRole) = await ResolveIdentityAsync(key, ct);
+        var identity = await ResolveIdentityAsync(key, ct);
+        if (identity is null) return IdentityUnavailable();
+
+        var (userId, opaqueRoles, opaqueActiveRole) = identity;
 
         // Suspension used to be enforced ONLY on [RequireActiveUser] endpoints, so a
         // suspended account still minted a session here and reached HOME.
@@ -273,8 +280,9 @@ public sealed class AuthOtpController : ControllerBase
 
         var pair = await _tokens.IssueAsync(userId, opaqueRoles, ct);
 
-        // Never log the raw phone or code — only the minted user id.
-        _log.LogInformation("auth.otp.verify ok userId={UserId}", userId);
+        // Never log OTP identity material. The event proves the transition without
+        // exposing the phone, code, token, user id, or a stable derivative.
+        _log.LogInformation("auth.otp.verify ok");
 
         // Translate the OPAQUE roles to the frozen snake_case Jeeb contract on the way out.
         var contractRoles = JeebRoleTranslator.ToContract(opaqueRoles);
@@ -317,16 +325,14 @@ public sealed class AuthOtpController : ControllerBase
         if (verdict == ModerationVerdict.Unavailable)
         {
             // FAIL CLOSED — minting a session on an unclassified lookup fault is this defect again.
-            return OtpSignInProblems.Problem(this, StatusCodes.Status503ServiceUnavailable,
-                "moderation_unavailable", "Sign-in unavailable",
-                "Account status could not be verified. Please try again.");
+            return IdentityUnavailable();
         }
 
         if (verdict != ModerationVerdict.Suspended) return null;
 
         BusinessOutcomeTelemetry.OtpVerifyFailures.Add(1,
             new KeyValuePair<string, object?>("outcome", "account_suspended"));
-        _log.LogWarning("auth.otp.verify refused: account suspended userId={UserId}", userId);
+        _log.LogWarning("auth.otp.verify refused: account suspended");
 
         // Same reason text [RequireActiveUser] returns, plus machine fields the app renders.
         return OtpSignInProblems.Problem(this, StatusCodes.Status403Forbidden,
@@ -335,85 +341,107 @@ public sealed class AuthOtpController : ControllerBase
     }
 
     /// <summary>
-    /// F-C identity resolution. When the UM kill switch is ON, orchestrates the shared
-    /// user-management phone find-or-create (the identity authority) and returns the
-    /// canonical id + OPAQUE roles. Degrades SAFELY: a transient UM fault falls back to
-    /// the legacy in-memory find-or-create so a live OTP login is never hard-broken by a
-    /// UM blip (the session is gateway-minted in both branches). When the switch is OFF,
-    /// uses the in-memory path directly (unchanged legacy behavior for existing fixtures).
+    /// F-C identity resolution. User-management is the sole identity, role, and account
+    /// authority after OTP validation. Find-or-create establishes only the canonical identity;
+    /// the subsequent matching roles read establishes role authority. Any missing switch,
+    /// dependency fault, malformed identity, or uncertain role state fails closed; the gateway
+    /// never substitutes a phone-derived local identity or a caller-local role default.
     /// </summary>
-    private async Task<(string userId, IReadOnlyList<string> opaqueRoles, string opaqueActiveRole)>
+    private async Task<ResolvedIdentity?>
         ResolveIdentityAsync(string phone, CancellationToken ct)
     {
-        if (_flags.CurrentValue.UserManagement)
+        if (!_flags.CurrentValue.UserManagement)
         {
-            try
-            {
-                var um = await _userManagement.PhoneFindOrCreateAsync(phone, ct);
-
-                // JEEBER-SPINE Defect 1 — the phone find-or-create surface is IDENTITY-ONLY
-                // (JEB-1480), so it returns only the canonical id + the gateway's default
-                // 'customer' decoration. Hydrate the user's REAL persisted role set
-                // (available_roles + active_role, e.g. a granted/active driver) from UM's
-                // role-read so the gateway-minted JWT (roles + active_role claims) reflects
-                // the driver capability instead of always projecting customer. Best-effort:
-                // a 404/blip leaves the safe default and never blocks the login.
-                IReadOnlyList<string> roles = um.AvailableRoles is { Count: > 0 }
-                    ? um.AvailableRoles
-                    : new[] { Roles.Client };
-                var active = string.IsNullOrWhiteSpace(um.ActiveRole) ? Roles.Client : um.ActiveRole;
-
-                var persisted = await SafeGetUserRolesAsync(um.UserId, ct);
-                if (persisted is not null)
-                {
-                    if (persisted.AvailableRoles is { Count: > 0 })
-                        roles = persisted.AvailableRoles;
-                    if (!string.IsNullOrWhiteSpace(persisted.ActiveRole))
-                        active = persisted.ActiveRole!;
-                }
-
-                // Never emit an active_role the user does not hold (token integrity / BR-1).
-                if (!roles.Contains(active, StringComparer.OrdinalIgnoreCase))
-                {
-                    active = roles.Count > 0 ? roles[0] : Roles.Client;
-                }
-
-                return (um.UserId, roles, active);
-            }
-            catch (UserManagementCallException ex)
-            {
-                // Fail-safe: never block a successful OTP validate on a UM blip.
-                _log.LogWarning(
-                    "auth.otp.verify UM find-or-create failed (status {Status}); falling back to in-memory identity",
-                    ex.StatusCode);
-            }
+            _log.LogWarning("auth.otp.verify identity authority is disabled; refusing session mint");
+            return null;
         }
 
-        var profile = await _users.GetOrCreateAsync(phone, ct);
-        var fallbackActive = string.IsNullOrWhiteSpace(profile.ActiveRole) ? Roles.Client : profile.ActiveRole;
-        return (profile.Id, profile.Roles.ToList(), fallbackActive);
-    }
-
-    /// <summary>
-    /// JEEBER-SPINE Defect 1 — best-effort read of the user's persisted UM role set. Swallows
-    /// a UM call fault (returns null) so the OTP login proceeds on the safe default; the
-    /// caller decides the role decoration. Never throws into the verify happy path.
-    /// </summary>
-    private async Task<UserRolesResult?> SafeGetUserRolesAsync(string userId, CancellationToken ct)
-    {
-        if (string.IsNullOrWhiteSpace(userId)) return null;
         try
         {
-            return await _userManagement.GetUserRolesAsync(userId, ct);
+            var um = await _userManagement.PhoneFindOrCreateAsync(phone, ct);
+            if (!IsCanonicalUserId(um.UserId))
+            {
+                _log.LogWarning("auth.otp.verify identity authority returned malformed identity; refusing session mint");
+                return null;
+            }
+
+            var persisted = await _userManagement.GetUserRolesAsync(um.UserId, ct);
+            if (!HasAuthoritativeRoles(um.UserId, persisted))
+            {
+                _log.LogWarning("auth.otp.verify identity authority returned uncertain roles; refusing session mint");
+                return null;
+            }
+
+            return new ResolvedIdentity(
+                um.UserId,
+                persisted!.AvailableRoles,
+                persisted.ActiveRole!);
         }
-        catch (Exception ex)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            _log.LogWarning(ex,
-                "auth.otp.verify UM get-roles read failed for userId={UserId}; using default role decoration",
-                userId);
+            // Preserve normal ASP.NET request-abort semantics. Dependency timeouts do
+            // not have this token set and are mapped to identity_unavailable below.
+            throw;
+        }
+        catch (UserManagementCallException ex)
+        {
+            _log.LogWarning(
+                "auth.otp.verify identity authority unavailable (status {Status}); refusing session mint",
+                ex.StatusCode);
+            return null;
+        }
+        catch (Exception)
+        {
+            // Exception details are deliberately excluded: downstream HTTP exceptions
+            // can contain request/body data. The RFC7807 response is equally generic.
+            _log.LogWarning("auth.otp.verify identity authority unavailable; refusing session mint");
             return null;
         }
     }
+
+    private static bool IsCanonicalUserId(string? userId)
+        => Guid.TryParseExact(userId, "D", out var parsed) && parsed != Guid.Empty;
+
+    private static bool HasAuthoritativeRoles(string userId, UserRolesResult? persisted)
+    {
+        if (persisted is null
+            || !IsCanonicalUserId(persisted.UserId)
+            || !Guid.TryParse(userId, out var resolvedId)
+            || !Guid.TryParse(persisted.UserId, out var rolesId)
+            || resolvedId != rolesId
+            || persisted.AvailableRoles is not { Count: > 0 }
+            || string.IsNullOrWhiteSpace(persisted.ActiveRole))
+        {
+            return false;
+        }
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var role in persisted.AvailableRoles)
+        {
+            if (string.IsNullOrWhiteSpace(role)
+                || !string.Equals(role, role.Trim(), StringComparison.Ordinal)
+                || !seen.Add(role))
+            {
+                return false;
+            }
+        }
+
+        return string.Equals(
+                   persisted.ActiveRole,
+                   persisted.ActiveRole.Trim(),
+                   StringComparison.Ordinal)
+               && seen.Contains(persisted.ActiveRole);
+    }
+
+    private ObjectResult IdentityUnavailable() => OtpSignInProblems.Problem(
+        this, StatusCodes.Status503ServiceUnavailable, OtpSignInProblems.IdentityUnavailableShortType,
+        "Sign-in unavailable",
+        "Identity and account status could not be verified. Please try again.");
+
+    private sealed record ResolvedIdentity(
+        string UserId,
+        IReadOnlyList<string> OpaqueRoles,
+        string OpaqueActiveRole);
 
     /// <summary>
     /// 503 ProblemDetails when the OTP upstream kill switch is off. There is no

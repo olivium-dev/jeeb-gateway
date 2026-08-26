@@ -261,8 +261,8 @@ public class AuthOtpSuspendedLoginTests
 
         using var doc = JsonDocument.Parse(raw);
         doc.RootElement.GetProperty("type").GetString().Should()
-            .Be("https://problems.jeeb.lb/auth/moderation_unavailable",
-                "the fault is reported honestly as retriable — NOT dressed up as a suspension");
+            .Be("https://problems.jeeb.lb/auth/identity_unavailable",
+                "the account-state authority is part of identity minting and uncertainty is retriable, not a suspension");
     }
 
     // -----------------------------------------------------------------
@@ -378,19 +378,19 @@ public class AuthOtpSuspendedLoginTests
         return userId;
     }
 
-    /// The controller resolves identity through the in-process store when UserManagement is off,
-    /// so the fixture asks the same question the controller will.
+    /// The controller resolves identity through user-management, so the fixture asks the same
+    /// authority for the canonical id the controller will use.
     private static async Task<string> ResolveUserIdAsync(
         WebApplicationFactory<Program> factory, string phone)
     {
-        var store = factory.Services.GetRequiredService<IUsersStore>();
-        return (await store.GetOrCreateAsync(phone, CancellationToken.None)).Id;
+        var users = factory.Services.GetRequiredService<IUserManagementDualRoleClient>();
+        return (await users.PhoneFindOrCreateAsync(phone, CancellationToken.None)).UserId;
     }
 
     private static async Task SeedActiveAsync(WebApplicationFactory<Program> factory, string phone)
     {
-        var store = factory.Services.GetRequiredService<IUsersStore>();
-        await store.GetOrCreateAsync(phone, CancellationToken.None);
+        var users = factory.Services.GetRequiredService<IUserManagementDualRoleClient>();
+        await users.PhoneFindOrCreateAsync(phone, CancellationToken.None);
     }
 
     /// Status + body, so two responses can be compared as one opaque shape.
@@ -413,12 +413,13 @@ public class AuthOtpSuspendedLoginTests
             {
                 services.RemoveAll<IServiceOTPClient>();
                 services.AddSingleton(stub);
+                services.RemoveAll<IUserManagementDualRoleClient>();
+                services.AddSingleton<IUserManagementDualRoleClient,
+                    Fakes.TestUserManagementDualRoleClient>();
                 services.Configure<UpstreamFeatureFlags>(f =>
                 {
                     f.Otp = true;
-                    // Identity resolves through the in-process store, so the fixture and the
-                    // controller agree on the user id without standing up user-management.
-                    f.UserManagement = false;
+                    f.UserManagement = true;
                 });
                 services.Configure<OtpSignInOptions>(o =>
                 {
