@@ -112,6 +112,19 @@ public class TokenService : ITokenService
             return new RefreshResult { Outcome = RefreshOutcome.NotFound };
         }
 
+        // Retire sessions minted by the historical fail-open OTP fallback before
+        // role resolution, rotation, or either token-mint path can run. Revocation
+        // is idempotent and best-effort; rejection remains fail-closed on a store
+        // fault so a legacy phone subject can never regain a session.
+        if (JeebGateway.Auth.LegacyPhoneSessionRejection.IsLegacySubject(existing.UserId))
+        {
+            BusinessOutcomeTelemetry.RecordLegacySessionRejection(
+                LegacySessionRejectionReason.RefreshTokenLegacySubject);
+            await JeebGateway.Auth.LegacyPhoneSessionRejection.RevokeRefreshFamiliesAsync(
+                _store, existing.UserId, ct);
+            return new RefreshResult { Outcome = RefreshOutcome.Revoked };
+        }
+
         var now = _clock.GetUtcNow();
 
         // Reuse of an already-rotated token signals theft → burn the chain.

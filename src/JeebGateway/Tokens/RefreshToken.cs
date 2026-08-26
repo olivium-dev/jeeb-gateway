@@ -60,4 +60,5 @@ public enum RevocationReason
     ReuseDetected,
     AccountDeleted,
     Reauthenticated,
+    LegacyPhoneSubject,
 }
