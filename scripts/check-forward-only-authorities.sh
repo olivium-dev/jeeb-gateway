@@ -273,6 +273,20 @@ SECURITY_CUTOVER_INPUT = {
     "type": "choice",
     "options": ["normal", "security-cutover"],
 }
+SECURITY_CUTOVER_GATE_NAME = "Require designated security-cutover owner"
+SECURITY_CUTOVER_GATE_IF = "${{ inputs.deployment_mode == 'security-cutover' }}"
+SECURITY_CUTOVER_GATE_ENV = {
+    "REQUESTING_ACTOR": "${{ github.actor }}",
+    "TRIGGERING_ACTOR": "${{ github.triggering_actor }}",
+}
+SECURITY_CUTOVER_GATE_LINES = (
+    "set -euo pipefail",
+    'if [ "$REQUESTING_ACTOR" != oudaykhaled ] \\',
+    '  || [ "$TRIGGERING_ACTOR" != oudaykhaled ]; then',
+    "  echo '::error::Security cutover requires the designated owner.' >&2",
+    "  exit 1",
+    "fi",
+)
 STATUS_BYPASS = re.compile(r"\b(?:always|failure|cancelled)\s*\(", re.I)
 SUCCESS_STATUS = re.compile(r"\bsuccess\s*\(", re.I)
 MUTATION_STEP_MARKERS = (
@@ -313,6 +327,21 @@ def run_owner_body(body):
         ["/bin/bash", "--noprofile", "--norc", "-c", body],
         cwd=repo_root,
         env={"PATH": ""},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def run_security_cutover_gate(body, actor, triggering_actor):
+    return subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", body],
+        cwd=repo_root,
+        env={
+            "PATH": "",
+            "REQUESTING_ACTOR": actor,
+            "TRIGGERING_ACTOR": triggering_actor,
+        },
         text=True,
         capture_output=True,
         check=False,
@@ -369,13 +398,57 @@ def validate_workflow_authority(name, document):
             inputs = dispatch.get("inputs") if isinstance(dispatch, dict) else None
             if inputs != {"deployment_mode": SECURITY_CUTOVER_INPUT}:
                 raise ValueError(f"{name}:{job_name} deployment-mode input drifted")
-            if len(steps) < 4:
+            if len(steps) < 5:
                 raise ValueError(f"{name}:{job_name} security-cutover gates are incomplete")
-            if set(steps[1]) != {"uses"} or not str(steps[1]["uses"]).startswith(
+            security_gate = steps[1]
+            if not isinstance(security_gate, dict) or set(security_gate) != {
+                "name",
+                "if",
+                "env",
+                "run",
+            }:
+                raise ValueError(f"{name}:{job_name} security owner gate shape drifted")
+            if security_gate.get("name") != SECURITY_CUTOVER_GATE_NAME:
+                raise ValueError(f"{name}:{job_name} security owner gate name drifted")
+            if security_gate.get("if") != SECURITY_CUTOVER_GATE_IF:
+                raise ValueError(f"{name}:{job_name} security owner gate condition drifted")
+            if security_gate.get("env") != SECURITY_CUTOVER_GATE_ENV:
+                raise ValueError(f"{name}:{job_name} security owner identity inputs drifted")
+            security_body = security_gate.get("run")
+            if not isinstance(security_body, str) or tuple(
+                security_body.splitlines()
+            ) != SECURITY_CUTOVER_GATE_LINES:
+                raise ValueError(f"{name}:{job_name} security owner gate body drifted")
+            accepted = run_security_cutover_gate(
+                security_body, "oudaykhaled", "oudaykhaled"
+            )
+            if accepted.returncode != 0 or accepted.stdout or accepted.stderr:
+                raise ValueError(f"{name}:{job_name} designated owner pair was rejected")
+            for actor, triggering_actor in (
+                ("OudayKhaled", "oudaykhaled"),
+                ("oudaykhaled", "OudayKhaled"),
+                ("another-actor", "oudaykhaled"),
+                ("oudaykhaled", "rerun-by-another-actor"),
+            ):
+                rejected = run_security_cutover_gate(
+                    security_body, actor, triggering_actor
+                )
+                if (
+                    rejected.returncode != 1
+                    or rejected.stdout
+                    or rejected.stderr
+                    != "::error::Security cutover requires the designated owner.\n"
+                    or actor in rejected.stderr
+                    or triggering_actor in rejected.stderr
+                ):
+                    raise ValueError(
+                        f"{name}:{job_name} security owner gate is not fail-closed and sanitized"
+                    )
+            if set(steps[2]) != {"uses"} or not str(steps[2]["uses"]).startswith(
                 "actions/checkout@"
             ):
-                raise ValueError(f"{name}:{job_name} protected checkout is not second")
-            freeze = steps[2]
+                raise ValueError(f"{name}:{job_name} protected checkout is not after owner gate")
+            freeze = steps[3]
             if freeze != {
                 "name": "Prove public OTP verification freeze before any deploy action",
                 "run": "bash scripts/verify-staging-otp-verify-freeze.sh",
@@ -392,7 +465,7 @@ def validate_workflow_authority(name, document):
                 ),
                 None,
             )
-            if first_mutation is None or first_mutation <= 2:
+            if first_mutation is None or first_mutation <= 3:
                 raise ValueError(f"{name}:{job_name} mutation precedes the public freeze")
         body = owner.get("run")
         if not isinstance(body, str) or tuple(body.splitlines()) != OWNER_RUN_LINES:
@@ -531,13 +604,79 @@ for name, path in workflow_authority_paths.items():
         ].append("bypass")
         assert_workflow_rejected("extra deployment mode", name, extra_mode)
 
+        missing_security_gate = copy.deepcopy(document)
+        del missing_security_gate["jobs"]["deploy"]["steps"][1]
+        assert_workflow_rejected(
+            "security owner gate removed", name, missing_security_gate
+        )
+
+        actor_only = copy.deepcopy(document)
+        actor_only["jobs"]["deploy"]["steps"][1]["run"] = (
+            "set -euo pipefail\n"
+            'if [ "$REQUESTING_ACTOR" != oudaykhaled ]; then\n'
+            "  echo '::error::Security cutover requires the designated owner.' >&2\n"
+            "  exit 1\n"
+            "fi\n"
+        )
+        assert_workflow_rejected("triggering actor check removed", name, actor_only)
+
+        triggering_only = copy.deepcopy(document)
+        triggering_only["jobs"]["deploy"]["steps"][1]["run"] = (
+            "set -euo pipefail\n"
+            'if [ "$TRIGGERING_ACTOR" != oudaykhaled ]; then\n'
+            "  echo '::error::Security cutover requires the designated owner.' >&2\n"
+            "  exit 1\n"
+            "fi\n"
+        )
+        assert_workflow_rejected("requesting actor check removed", name, triggering_only)
+
+        for description, condition in (
+            (
+                "repository-owner authority widening",
+                "${{ inputs.deployment_mode == 'security-cutover' && github.repository_owner == 'olivium-dev' }}",
+            ),
+            (
+                "admin-name authority widening",
+                "${{ inputs.deployment_mode == 'security-cutover' && github.actor == 'admin' }}",
+            ),
+            (
+                "contains authority widening",
+                "${{ inputs.deployment_mode == 'security-cutover' && contains(github.actor, 'oudaykhaled') }}",
+            ),
+        ):
+            widened_authority = copy.deepcopy(document)
+            widened_authority["jobs"]["deploy"]["steps"][1]["if"] = condition
+            assert_workflow_rejected(description, name, widened_authority)
+
+        late_security_gate = copy.deepcopy(document)
+        steps = late_security_gate["jobs"]["deploy"]["steps"]
+        steps[1], steps[2] = steps[2], steps[1]
+        assert_workflow_rejected(
+            "security owner gate moved after checkout", name, late_security_gate
+        )
+
+        post_freeze_security_gate = copy.deepcopy(document)
+        steps = post_freeze_security_gate["jobs"]["deploy"]["steps"]
+        steps[1], steps[3] = steps[3], steps[1]
+        assert_workflow_rejected(
+            "security owner gate moved after freeze", name, post_freeze_security_gate
+        )
+
+        rerun_bypass = copy.deepcopy(document)
+        rerun_bypass["jobs"]["deploy"]["steps"][1]["env"][
+            "TRIGGERING_ACTOR"
+        ] = "${{ github.actor }}"
+        assert_workflow_rejected(
+            "rerun triggering actor replaced by requesting actor", name, rerun_bypass
+        )
+
         missing_freeze = copy.deepcopy(document)
-        del missing_freeze["jobs"]["deploy"]["steps"][2]
+        del missing_freeze["jobs"]["deploy"]["steps"][3]
         assert_workflow_rejected("public freeze removed", name, missing_freeze)
 
         late_freeze = copy.deepcopy(document)
         steps = late_freeze["jobs"]["deploy"]["steps"]
-        steps[2], steps[5] = steps[5], steps[2]
+        steps[3], steps[6] = steps[6], steps[3]
         assert_workflow_rejected("public freeze moved after SSH", name, late_freeze)
 
 rotation_contract = subprocess.run(
@@ -580,7 +719,7 @@ for description, mutated in (
 
 print(
     "Structurally validated 3 single-job workflow authorities, dynamically executed "
-    "their owner steps under empty PATH, and rejected 19 adversarial workflow mutations."
+    "their owner steps under empty PATH, and rejected 28 adversarial workflow mutations."
 )
 print("Dynamically validated the blocked lifecycle authority and 2 adversarial mutations.")
 
