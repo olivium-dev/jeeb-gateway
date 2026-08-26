@@ -210,11 +210,14 @@ def validate_bootstrap_workflow(text):
         "Replicas: $spec[0].Mode.Replicated.Replicas",
         'FailureAction:"rollback",Order:"start-first"',
         'FailureAction:"pause",Order:"start-first"',
+        'FailureAction:"pause",Order:"stop-first"',
         '"${published}:${target}:ingress"',
         "source scripts/staging-gateway-mutation-lock.sh",
         "source scripts/staging-gateway-spec-recovery.sh",
+        "source scripts/staging-gateway-security-cutover.sh",
         "staging_gateway_external_gate_recover",
         "staging_gateway_forward_apply",
+        "staging_gateway_security_cutover_forward_apply",
         "if (\n                  set -euo pipefail\n                  staging_gateway_external_gate_recover",
         "staging_gateway_submit_spec_cas() {",
         "registryAuthFrom=previous-spec",
@@ -241,6 +244,7 @@ def validate_bootstrap_workflow(text):
         'select(.Options | has("encrypted"))',
         'select(.Options.encrypted == "" or .Options.encrypted == "true")',
         "-f scripts/staging-gateway-candidate-contract.jq",
+        "scripts/verify-staging-otp-verify-freeze.sh",
     )
     missing = [marker for marker in required if marker not in text]
     if missing:
@@ -248,8 +252,6 @@ def validate_bootstrap_workflow(text):
 
     forbidden = (
         "docker service " + "rollback",
-        "--update-order " + "stop-first",
-        "--update-failure-action " + "pause",
         "&rollback=" + "previous",
         "docker service " + "create",
         '"${published}:${target}:host"',
@@ -260,8 +262,28 @@ def validate_bootstrap_workflow(text):
         raise ValueError(f"unsafe staging mutation behavior remains: {present}")
 
     dispatch_header = text[: text.index("permissions:")]
-    if re.search(r"(?m)^\s+inputs:\s*$", dispatch_header) or "${{ inputs." in text:
-        raise ValueError("staging bootstrap exposes a callable activation input")
+    expected_dispatch = '''name: jeeb-staging-deploy
+
+"on":
+  workflow_dispatch:
+    inputs:
+      deployment_mode:
+        description: Protected staging deployment mode
+        required: true
+        default: normal
+        type: choice
+        options:
+          - normal
+          - security-cutover
+
+'''
+    if dispatch_header != expected_dispatch:
+        raise ValueError("staging deployment-mode dispatch contract drifted")
+    input_references = set(
+        re.findall(r"\$\{\{\s*inputs\.([A-Za-z][A-Za-z0-9_]*)", text)
+    )
+    if input_references != {"deployment_mode"}:
+        raise ValueError(f"unexpected staging callable inputs: {sorted(input_references)}")
     for authority in ("Chat", "Realtime", "Voice"):
         false_lock = f"add_env FeatureFlags__UseUpstream__{authority} false"
         true_lock = f"add_env FeatureFlags__UseUpstream__{authority} true"
@@ -287,6 +309,14 @@ def validate_bootstrap_workflow(text):
     if not host_assertion < topology_preflight < registry_login < image_build:
         raise ValueError("target/topology assertions do not precede registry mutation")
 
+    checkout = text.index("actions/checkout@")
+    first_freeze = text.index("bash scripts/verify-staging-otp-verify-freeze.sh", checkout)
+    first_ssh = text.index("Install cloudflared and configure strict SSH", first_freeze)
+    if not checkout < first_freeze < first_ssh:
+        raise ValueError("security-cutover freeze is not the first post-checkout deploy gate")
+    if text.count("bash scripts/verify-staging-otp-verify-freeze.sh") != 3:
+        raise ValueError("security-cutover must prove the exact freeze at three boundaries")
+
     pre_update = text.index(
         'capture_remote_spec "$pre_update_spec" "$pre_update_version" "$pre_update_id"'
     )
@@ -295,7 +325,14 @@ def validate_bootstrap_workflow(text):
         '[ "$(jq -er \'.TaskTemplate.ContainerSpec.Image\' "$candidate_spec")" = "$IMAGE" ]',
         candidate,
     )
-    arm = text.index("recovery_armed=true", candidate_validation)
+    task_capture = text.index("--execute capture", candidate_validation)
+    pre_cas_freeze = text.index(
+        "bash scripts/verify-staging-otp-verify-freeze.sh", task_capture
+    )
+    cutover_forward = text.index(
+        "staging_gateway_security_cutover_forward_apply \\", pre_cas_freeze
+    )
+    arm = text.index("recovery_armed=true", cutover_forward)
     forward = text.index("staging_gateway_forward_apply \\", arm)
     manifest = text.index(
         '"$candidate_spec" "$candidate_version" "$candidate_id" "$candidate_manifest"',
@@ -313,8 +350,13 @@ def validate_bootstrap_workflow(text):
     final_candidate = text.index(
         "verify_exact_candidate_after_checks", descriptor_probe
     )
-    disarm = text.index("recovery_armed=false", final_candidate)
-    if not pre_update < candidate < candidate_validation < arm < forward < manifest < verifier < readiness < network < false_flags < public_probe < proxy_probe < descriptor_probe < final_candidate < disarm:
+    old_task_proof = text.index("--execute verify", final_candidate)
+    post_freeze = text.index(
+        "bash scripts/verify-staging-otp-verify-freeze.sh", old_task_proof
+    )
+    final_confirm = text.index("verify_exact_candidate_after_checks", post_freeze)
+    disarm = text.index("recovery_armed=false", final_confirm)
+    if not pre_update < candidate < candidate_validation < task_capture < pre_cas_freeze < cutover_forward < arm < forward < manifest < verifier < readiness < network < false_flags < public_probe < proxy_probe < descriptor_probe < final_candidate < old_task_proof < post_freeze < final_confirm < disarm:
         raise ValueError("candidate verification order drifted")
 
 
@@ -611,6 +653,8 @@ PY
 python3 scripts/test-staging-authenticated-realtime-probe.py
 bash scripts/test-staging-gateway-mutation-lock.sh
 bash scripts/test-staging-gateway-spec-recovery.sh
+bash scripts/test-staging-gateway-security-cutover.sh
 bash scripts/test-staging-gateway-candidate-contract.sh
+bash scripts/test-verify-staging-otp-verify-freeze.sh
 bash scripts/check-staging-gateway-phase-contracts.sh
 bash scripts/test-assert-distinct-staging-signing-keys.sh
