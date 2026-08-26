@@ -42,10 +42,15 @@ public static class UserModerationGate
         {
             suspension = await suspensions.ReadAsync(userId!, ct);
         }
-        catch (Exception ex)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            log.LogError(ex,
-                "moderation lookup failed userId={UserId}; refusing to mint a session", userId);
+            throw;
+        }
+        catch (Exception)
+        {
+            // Do not attach the downstream exception: transport exception messages can
+            // contain request metadata. Session-mint callers need only the safe verdict.
+            log.LogError("moderation lookup failed; refusing to mint a session");
             return (ModerationVerdict.Unavailable, string.Empty, null);
         }
 

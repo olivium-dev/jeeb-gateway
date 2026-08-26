@@ -63,8 +63,8 @@ public sealed class HttpUserManagementDualRoleClient : IUserManagementDualRoleCl
         // JEEBER-SPINE Defect 1 — read the user's PERSISTED role set so a gateway-minted
         // OTP session reflects an already-granted driver role (and the DB-set active_role)
         // WITHOUT inventing it. UM is the authority; the gateway only reads + projects.
-        // A 404 (no roles row yet) or any non-success is non-fatal: the caller keeps the
-        // safe default ('customer'), so a UM blip never hard-breaks an OTP login.
+        // A 404 (no roles row yet) or any non-success is surfaced as an absent role result.
+        // Security-sensitive callers treat that uncertainty as fail-closed.
         using var resp = await _http.GetAsync($"api/User/{Uri.EscapeDataString(userId)}/roles", ct);
 
         if (resp.StatusCode == HttpStatusCode.NotFound)
@@ -75,8 +75,8 @@ public sealed class HttpUserManagementDualRoleClient : IUserManagementDualRoleCl
         if (!resp.IsSuccessStatusCode)
         {
             _log.LogWarning(
-                "user-management get-roles returned {Status} for userId={UserId}",
-                (int)resp.StatusCode, userId);
+                "user-management get-roles returned {Status}",
+                (int)resp.StatusCode);
             return null;
         }
 
@@ -88,7 +88,10 @@ public sealed class HttpUserManagementDualRoleClient : IUserManagementDualRoleCl
 
         var roles = dto.AvailableRoles is { Length: > 0 } ? dto.AvailableRoles : Array.Empty<string>();
         var active = string.IsNullOrWhiteSpace(dto.ActiveRole) ? null : dto.ActiveRole;
-        return new UserRolesResult(dto.UserId ?? userId, roles, active);
+        // Do not replace a missing response identity with the requested identity. That
+        // would make malformed authority data indistinguishable from confirmed data to
+        // the OTP session-mint boundary. Other consumers retain the same nullable result.
+        return new UserRolesResult(dto.UserId ?? string.Empty, roles, active);
     }
 
     public async Task<RoleSwitchReissueResult> RoleSwitchAsync(string userId, string opaqueRole, CancellationToken ct)

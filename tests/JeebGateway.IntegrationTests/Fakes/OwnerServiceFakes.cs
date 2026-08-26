@@ -135,7 +135,7 @@ internal sealed class TestUserManagementDualRoleClient : IUserManagementDualRole
         var userId = _usersByPhone.GetOrAdd(phone, _ =>
         {
             isNew = true;
-            return $"test-user-{Guid.NewGuid():N}";
+            return Guid.NewGuid().ToString("D");
         });
         var roles = _rolesByUser.GetOrAdd(
             userId,
