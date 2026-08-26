@@ -27,10 +27,13 @@ public interface IUserManagementDualRoleClient
     /// canonical user id. Idempotent: a repeated call for the same phone returns the same
     /// id with <c>isNew = false</c>.
     ///
-    /// <para>JEB-1480 (GR2): the shared UM phone-identity endpoint is IDENTITY-ONLY and
-    /// no longer emits roles. The DEFAULT role and all role/claim shaping are applied
-    /// HERE in the gateway — the returned <see cref="PhoneFindOrCreateResult"/> carries
-    /// the gateway's default opaque role decoration, NOT a UM-supplied claim.</para>
+    /// <para>JEB-1480 (GR2): the shared UM phone-identity response is IDENTITY-ONLY and
+    /// does not emit roles. On a successful fresh create, UM persists the new identity's
+    /// initial <c>customer</c> role and active role on that same row before returning 200.
+    /// Security-sensitive consumers, including OTP session minting, MUST still read the
+    /// authoritative role record with <see cref="GetUserRolesAsync"/> and MUST NOT treat
+    /// compatibility decoration on <see cref="PhoneFindOrCreateResult"/> as authority or
+    /// invent a caller-local default.</para>
     /// </summary>
     /// <exception cref="UserManagementCallException">The upstream returned a non-success status.</exception>
     Task<PhoneFindOrCreateResult> PhoneFindOrCreateAsync(string phone, CancellationToken ct);
@@ -68,11 +71,13 @@ public interface IUserManagementDualRoleClient
     /// <summary>
     /// JEEBER-SPINE Defect 1. READ <paramref name="userId"/>'s PERSISTED role set
     /// (<c>GET /api/User/{userId}/roles</c> → <c>UserRolesResponse</c>: available_roles +
-    /// active_role) so a gateway-minted OTP session reflects an already-granted driver role
-    /// (and a DB-set active_role) WITHOUT inventing it — UM is the authority, the gateway only
-    /// reads + projects. Returns <c>null</c> when UM has no roles row for the user (404) or on
-    /// any non-success status, so the caller keeps the safe default ('customer') and a UM blip
-    /// never hard-breaks a live OTP login. OPAQUE role strings ({customer,driver}).
+    /// active_role) so a gateway-minted OTP session reflects the role state persisted by UM
+    /// WITHOUT inventing it — UM is the authority, the gateway only reads + projects. A fresh
+    /// successful phone create has already persisted its initial role on the same UM row, so
+    /// a subsequent 404 or any other non-success response is authority drift/unavailability,
+    /// not permission to supply a gateway-local default. This adapter represents those cases
+    /// as <c>null</c>; security-sensitive callers MUST fail closed. OPAQUE role strings
+    /// ({customer,driver}).
     /// </summary>
     Task<UserRolesResult?> GetUserRolesAsync(string userId, CancellationToken ct);
 }
@@ -98,9 +103,12 @@ public sealed record RoleGrantResult(
     bool Added);
 
 /// <summary>
-/// Result of <see cref="IUserManagementDualRoleClient.PhoneFindOrCreateAsync"/>. The id is
-/// UM-canonical; the role decoration is GATEWAY-OWNED (JEB-1480 / GR2) — UM no longer
-/// supplies roles on the phone-identity surface. OPAQUE role strings ({customer,driver}).
+/// Result of <see cref="IUserManagementDualRoleClient.PhoneFindOrCreateAsync"/>. The id and
+/// <see cref="IsNew"/> flag come from UM's identity-only phone surface. The role fields remain
+/// solely for backward compatibility with existing non-security consumers; they are not UM
+/// claims and MUST NOT authorize or mint an OTP session. OTP consumers require a separate,
+/// matching <see cref="IUserManagementDualRoleClient.GetUserRolesAsync"/> result and never
+/// synthesize a local default. OPAQUE role strings ({customer,driver}).
 /// </summary>
 public sealed record PhoneFindOrCreateResult(
     string UserId,

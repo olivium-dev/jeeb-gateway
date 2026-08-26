@@ -190,7 +190,10 @@ public sealed class AuthOtpController : ControllerBase
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status502BadGateway)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
+    [ProducesResponseType(
+        typeof(ProblemDetails),
+        StatusCodes.Status503ServiceUnavailable,
+        "application/problem+json")]
     public async Task<IActionResult> VerifyOtp([FromBody] OtpVerifyDto? body, CancellationToken ct)
     {
         if (!_flags.CurrentValue.Otp)
@@ -339,9 +342,10 @@ public sealed class AuthOtpController : ControllerBase
 
     /// <summary>
     /// F-C identity resolution. User-management is the sole identity, role, and account
-    /// authority after OTP validation. Any missing switch, dependency fault, malformed
-    /// identity, or uncertain role state fails closed; the gateway never substitutes a
-    /// phone-derived local identity.
+    /// authority after OTP validation. Find-or-create establishes only the canonical identity;
+    /// the subsequent matching roles read establishes role authority. Any missing switch,
+    /// dependency fault, malformed identity, or uncertain role state fails closed; the gateway
+    /// never substitutes a phone-derived local identity or a caller-local role default.
     /// </summary>
     private async Task<ResolvedIdentity?>
         ResolveIdentityAsync(string phone, CancellationToken ct)
@@ -430,7 +434,7 @@ public sealed class AuthOtpController : ControllerBase
     }
 
     private ObjectResult IdentityUnavailable() => OtpSignInProblems.Problem(
-        this, StatusCodes.Status503ServiceUnavailable, "identity_unavailable",
+        this, StatusCodes.Status503ServiceUnavailable, OtpSignInProblems.IdentityUnavailableShortType,
         "Sign-in unavailable",
         "Identity and account status could not be verified. Please try again.");
 

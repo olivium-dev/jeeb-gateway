@@ -22,7 +22,9 @@ namespace JeebGateway.IntegrationTests;
 /// Security regression pack for the OTP-to-session trust boundary. OTP validation proves
 /// possession of a phone; only user-management plus the suspension authority may establish
 /// which identity and roles receive a session. Every uncertain authority result is therefore
-/// a typed 503 with no local identity, projection, token, or success-log side effect.
+/// a typed 503 with zero gateway-local identity/projection mutation, token mint, or success log.
+/// The authoritative UM find-or-create call may already have committed before a later authority
+/// read fails; these tests intentionally make no claim about downstream UM writes.
 /// </summary>
 public sealed class AuthOtpIdentityAuthorityFailClosedTests
 {
@@ -32,21 +34,22 @@ public sealed class AuthOtpIdentityAuthorityFailClosedTests
     private const string UserId = "41a864a2-42c6-4e0c-8ecb-0878df34ff07";
     private const string OtherUserId = "9162d99a-10d2-40ab-9027-b6a6cb82647e";
 
+    public static TheoryData<string, UnavailableCase> IdentityUnavailableCases
+    {
+        get
+        {
+            var cases = new TheoryData<string, UnavailableCase>();
+            foreach (var route in new[] { "/v1/auth/otp/verify", "/auth/otp/verify" })
+                foreach (var scenario in Enum.GetValues<UnavailableCase>())
+                    cases.Add(route, scenario);
+            return cases;
+        }
+    }
+
     [Theory]
-    [InlineData(UnavailableCase.UserManagementFlagOff)]
-    [InlineData(UnavailableCase.UserManagementStatusFault)]
-    [InlineData(UnavailableCase.UserManagementDependencyTimeout)]
-    [InlineData(UnavailableCase.EmptyIdentity)]
-    [InlineData(UnavailableCase.NonCanonicalIdentity)]
-    [InlineData(UnavailableCase.MissingRoles)]
-    [InlineData(UnavailableCase.RoleStatusFault)]
-    [InlineData(UnavailableCase.MismatchedRoleIdentity)]
-    [InlineData(UnavailableCase.EmptyRoleIdentity)]
-    [InlineData(UnavailableCase.EmptyRoles)]
-    [InlineData(UnavailableCase.MalformedRole)]
-    [InlineData(UnavailableCase.ActiveRoleNotHeld)]
-    [InlineData(UnavailableCase.ModerationUncertain)]
-    public async Task Verify_WhenIdentityAuthorityIsUncertain_ReturnsTyped503_AndHasNoMintSideEffects(
+    [MemberData(nameof(IdentityUnavailableCases))]
+    public async Task Verify_WhenIdentityAuthorityIsUncertain_ReturnsExactTyped503_AndMakesNoGatewayLocalMutationOrMint(
+        string route,
         UnavailableCase scenario)
     {
         var fixture = AuthorityFixture.For(scenario);
@@ -54,7 +57,7 @@ public sealed class AuthOtpIdentityAuthorityFailClosedTests
         using var http = factory.CreateClient();
 
         using var response = await http.PostAsync(
-            "/v1/auth/otp/verify",
+            route,
             JsonBody($$"""{ "phone": "{{Phone}}", "code": "{{Code}}" }"""));
 
         response.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
@@ -63,18 +66,28 @@ public sealed class AuthOtpIdentityAuthorityFailClosedTests
         using var problem = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
         problem.RootElement.GetProperty("status").GetInt32().Should().Be(503);
         problem.RootElement.GetProperty("type").GetString().Should()
-            .Be("https://problems.jeeb.lb/auth/identity_unavailable");
+            .Be(OtpSignInProblems.IdentityUnavailableType);
+        problem.RootElement.GetProperty("title").GetString().Should().Be("Sign-in unavailable");
         problem.RootElement.GetProperty("detail").GetString().Should()
             .Be("Identity and account status could not be verified. Please try again.");
+        problem.RootElement.GetProperty("instance").GetString().Should().Be(route);
+        problem.RootElement.EnumerateObject().Select(property => property.Name).Should()
+            .BeEquivalentTo(new[] { "type", "title", "status", "detail", "instance" },
+                "the RFC7807 type is the sole machine code for identity_unavailable");
         problem.RootElement.TryGetProperty("accessToken", out _).Should().BeFalse();
         problem.RootElement.TryGetProperty("refreshToken", out _).Should().BeFalse();
+        problem.RootElement.TryGetProperty("code", out _).Should().BeFalse();
+        problem.RootElement.TryGetProperty("errorCode", out _).Should().BeFalse();
+        problem.RootElement.TryGetProperty("reason", out _).Should().BeFalse();
+        problem.RootElement.TryGetProperty("retryAfter", out _).Should().BeFalse();
+        response.Headers.Contains("Retry-After").Should().BeFalse();
 
         fixture.Otp.ValidateCalls.Should().Be(1,
             "identity authority is consulted only after the shared OTP service validates possession");
         fixture.Users.GetOrCreateCalls.Should().Be(0,
-            "a phone-derived local identity is forbidden even when user-management is unavailable");
-        fixture.Users.ProjectionWrites.Should().Be(0);
-        fixture.Users.OtherMutationCalls.Should().Be(0);
+            "gateway-local phone identity fallback is forbidden even when user-management is unavailable");
+        fixture.Users.ProjectionWrites.Should().Be(0, "authority uncertainty forbids gateway-local projection writes");
+        fixture.Users.OtherMutationCalls.Should().Be(0, "authority uncertainty forbids gateway-local store mutations");
         fixture.Tokens.IssueCalls.Should().Be(0);
 
         AssertNoSensitiveOrSuccessLog(fixture.Logs);
@@ -156,6 +169,32 @@ public sealed class AuthOtpIdentityAuthorityFailClosedTests
         fixture.Otp.SendCalls.Should().Be(0);
         fixture.UserManagement.FindCalls.Should().Be(0);
         fixture.Tokens.IssueCalls.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task OpenApi_CanonicalVerify503_AdvertisesOnlyProblemJsonWithGenericProblemDetails()
+    {
+        var fixture = AuthorityFixture.Valid();
+        await using var factory = MakeFactory(fixture);
+        using var http = factory.CreateClient();
+
+        using var response = await http.GetAsync("/swagger/v1/swagger.json");
+
+        response.EnsureSuccessStatusCode();
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var content = document.RootElement
+            .GetProperty("paths")
+            .GetProperty("/v1/auth/otp/verify")
+            .GetProperty("post")
+            .GetProperty("responses")
+            .GetProperty("503")
+            .GetProperty("content");
+        content.EnumerateObject().Select(media => media.Name).Should()
+            .Equal("application/problem+json");
+        content.GetProperty("application/problem+json")
+            .GetProperty("schema")
+            .GetProperty("$ref")
+            .GetString().Should().Be("#/components/schemas/ProblemDetails");
     }
 
     [Fact]
@@ -361,8 +400,8 @@ public sealed class AuthOtpIdentityAuthorityFailClosedTests
         public PhoneFindOrCreateResult Identity { get; set; } = new(
             UserId,
             IsNew: false,
-            AvailableRoles: new[] { JeebGateway.Users.Roles.Client },
-            ActiveRole: JeebGateway.Users.Roles.Client);
+            AvailableRoles: Array.Empty<string>(),
+            ActiveRole: string.Empty);
         public UserRolesResult? Roles { get; set; } = new(
             UserId,
             new[] { JeebGateway.Users.Roles.Client, JeebGateway.Users.Roles.Jeeber },

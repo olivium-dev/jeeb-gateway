@@ -35,6 +35,17 @@ public static class OtpSignInProblems
     public const string ProblemBaseUri = "https://problems.jeeb.lb/auth";
 
     /// <summary>
+    /// OTP identity-authority failures use the RFC 7807 <c>type</c>
+    /// <c>https://problems.jeeb.lb/auth/identity_unavailable</c> as their sole stable
+    /// machine code. That 503 carries no duplicate <c>code</c>, <c>errorCode</c>,
+    /// <c>reason</c>, or retry field/header; <c>Retry-After</c> remains specific to 429.
+    /// </summary>
+    public const string IdentityUnavailableShortType = "identity_unavailable";
+
+    /// <summary>The fully qualified RFC 7807 type and sole stable wire machine code.</summary>
+    public const string IdentityUnavailableType = ProblemBaseUri + "/" + IdentityUnavailableShortType;
+
+    /// <summary>
     /// Build a <c>application/problem+json</c> result under the frozen
     /// <see cref="ProblemBaseUri"/> base. The upstream response body is NEVER
     /// passed in here — callers must supply a fixed, code-free detail string so
