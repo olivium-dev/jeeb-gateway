@@ -214,6 +214,37 @@ builder.Services
             NameClaimType = "sub",
             RoleClaimType = "roles"
         };
+        options.Events = new JwtBearerEvents
+        {
+            OnTokenValidated = async context =>
+            {
+                var subject = context.Principal?.FindFirst("sub")?.Value;
+                if (!JeebGateway.Auth.LegacyPhoneSessionRejection.IsLegacySubject(subject))
+                    return;
+
+                JeebGateway.Observability.BusinessOutcomeTelemetry.RecordLegacySessionRejection(
+                    JeebGateway.Observability.LegacySessionRejectionReason.AccessTokenLegacySubject);
+
+                try
+                {
+                    var refreshStore = context.HttpContext.RequestServices
+                        .GetRequiredService<IRefreshTokenStore>();
+                    await JeebGateway.Auth.LegacyPhoneSessionRejection.RevokeRefreshFamiliesAsync(
+                        refreshStore, subject!, context.HttpContext.RequestAborted);
+                }
+                catch (Exception)
+                {
+                    // DI/store resolution is part of the same best-effort revoke
+                    // boundary: authentication still fails closed.
+                    JeebGateway.Observability.BusinessOutcomeTelemetry.RecordLegacySessionRejection(
+                        JeebGateway.Observability.LegacySessionRejectionReason.RevocationFailure);
+                }
+
+                // Keep the public contract identical to every other invalid bearer.
+                // The generic reason contains no subject, phone, token, or identifier.
+                context.Fail("Bearer token validation failed.");
+            }
+        };
     })
     // UM re-issued tokens (post-role-switch): iss=user-management / aud=user-management,
     // UM key. Full signature + iss + aud + exp validation — no blind accept.
