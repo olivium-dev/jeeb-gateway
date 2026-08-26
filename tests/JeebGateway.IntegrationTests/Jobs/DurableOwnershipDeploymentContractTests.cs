@@ -214,6 +214,7 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().Contain("Selective gateway deploy requires an incumbent service");
         workflow.Should().Contain("FailureAction:\"rollback\",Order:\"start-first\"");
         workflow.Should().Contain("FailureAction:\"pause\",Order:\"start-first\"");
+        workflow.Should().Contain("FailureAction:\"pause\",Order:\"stop-first\"");
         workflow.Should().Contain("staging_gateway_external_gate_recover");
         workflow.Should().Contain("staging_gateway_forward_apply");
         workflow.Should().Contain("registryAuthFrom=previous-spec");
@@ -458,9 +459,16 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().NotContain("add_env FeatureFlags__UseUpstream__Realtime true");
         workflow.Should().NotContain("add_env Features__RealtimeWebSocketProxy__Enabled true");
         workflow.Should().NotContain("add_env FeatureFlags__UseUpstream__Voice true");
-        workflow[..workflow.IndexOf("permissions:", StringComparison.Ordinal)]
-            .Should().NotContain("inputs:");
-        workflow.Should().NotContain("${{ inputs.");
+        var dispatch = workflow[..workflow.IndexOf("permissions:", StringComparison.Ordinal)];
+        dispatch.Should().Contain("deployment_mode:");
+        dispatch.Should().Contain("default: normal");
+        dispatch.Should().Contain("type: choice");
+        dispatch.Should().Contain("- security-cutover");
+        CountOccurrences(dispatch, "inputs:").Should().Be(1);
+        CountOccurrences(dispatch, "deployment_mode:").Should().Be(1);
+        workflow.Should().Contain(
+            "if: ${{ inputs.deployment_mode != 'security-cutover' }}");
+        workflow.Should().NotContain("${{ inputs.activate_");
 
         workflow.Should().Contain("capture_remote_spec() {");
         workflow.Should().Contain("write_snapshot_manifest() {");
@@ -484,6 +492,7 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().Contain("cmp -s \"$final_id\" \"$candidate_id\"");
         workflow.Should().Contain("group: jeeb-staging-gateway-mutation");
         workflow.Should().Contain("source scripts/staging-gateway-mutation-lock.sh");
+        workflow.Should().Contain("source scripts/staging-gateway-security-cutover.sh");
         workflow.Should().Contain("staging_gateway_lock_acquire");
         workflow.Should().Contain("staging_gateway_lock_assert");
         workflow.Should().Contain("staging_gateway_lock_release");
@@ -501,6 +510,13 @@ public sealed class DurableOwnershipDeploymentContractTests
             "add_env Services__Realtime__BaseUrl http://192.168.2.20:10069");
         workflow.Should().Contain("python3 scripts/probe-staging-authenticated-realtime.py");
         workflow.Should().Contain("probe_staging_proxy_source_contract");
+        CountOccurrences(workflow, "bash scripts/verify-staging-otp-verify-freeze.sh")
+            .Should().Be(3);
+        workflow.Should().Contain("staging_gateway_security_cutover_forward_apply");
+        workflow.Should().Contain("--execute capture");
+        workflow.Should().Contain("--execute verify");
+        workflow.Should().Contain("[ \"$recovery_armed\" = false ]");
+        workflow.Should().Contain("[ \"$DEPLOYMENT_MODE\" = normal ]");
         CountOccurrences(workflow, "scripts/verify-swarm-service-image.sh").Should().Be(2,
             "the blocked template retains exact candidate and recovered-incumbent verifiers");
 
@@ -517,6 +533,16 @@ public sealed class DurableOwnershipDeploymentContractTests
         var candidateSemantics = workflow.IndexOf(
             "-f scripts/staging-gateway-candidate-contract.jq",
             candidate,
+            StringComparison.Ordinal);
+        var taskCapture = workflow.IndexOf("--execute capture", candidateSemantics,
+            StringComparison.Ordinal);
+        var preCasFreeze = workflow.IndexOf(
+            "bash scripts/verify-staging-otp-verify-freeze.sh",
+            taskCapture,
+            StringComparison.Ordinal);
+        var cutoverForward = workflow.IndexOf(
+            "staging_gateway_security_cutover_forward_apply \\",
+            preCasFreeze,
             StringComparison.Ordinal);
         var arm = workflow.IndexOf(
             "recovery_armed=true",
@@ -555,10 +581,24 @@ public sealed class DurableOwnershipDeploymentContractTests
             "verify_exact_candidate_after_checks",
             descriptor,
             StringComparison.Ordinal);
+        var oldTaskProof = workflow.IndexOf("--execute verify", finalCandidate,
+            StringComparison.Ordinal);
+        var postFreeze = workflow.IndexOf(
+            "bash scripts/verify-staging-otp-verify-freeze.sh",
+            oldTaskProof,
+            StringComparison.Ordinal);
+        var finalConfirmation = workflow.IndexOf(
+            "verify_exact_candidate_after_checks",
+            postFreeze,
+            StringComparison.Ordinal);
 
         ownerBlock.Should().BeLessThan(firstExternalMutation);
         preUpdate.Should().BeLessThan(candidate);
         candidate.Should().BeLessThan(candidateSemantics);
+        candidateSemantics.Should().BeLessThan(taskCapture);
+        taskCapture.Should().BeLessThan(preCasFreeze);
+        preCasFreeze.Should().BeLessThan(cutoverForward);
+        cutoverForward.Should().BeLessThan(arm);
         candidateSemantics.Should().BeLessThan(arm);
         candidate.Should().BeLessThan(arm);
         arm.Should().BeLessThan(forward);
@@ -571,6 +611,9 @@ public sealed class DurableOwnershipDeploymentContractTests
         publicProbe.Should().BeLessThan(proxyProbe);
         proxyProbe.Should().BeLessThan(descriptor);
         descriptor.Should().BeLessThan(finalCandidate);
+        finalCandidate.Should().BeLessThan(oldTaskProof);
+        oldTaskProof.Should().BeLessThan(postFreeze);
+        postFreeze.Should().BeLessThan(finalConfirmation);
     }
 
     private static string ShellFunction(string workflow, string name)

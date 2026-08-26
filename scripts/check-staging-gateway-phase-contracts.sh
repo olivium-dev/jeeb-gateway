@@ -70,8 +70,30 @@ if b != expected_b:
 
 workflow = workflow_path.read_text()
 dispatch_header = workflow[: workflow.index("permissions:")]
-if re.search(r"(?m)^\s+inputs:\s*$", dispatch_header) or "${{ inputs." in workflow:
-    raise SystemExit("FAIL: A1 workflow exposes a callable activation input")
+expected_dispatch = '''name: jeeb-staging-deploy
+
+"on":
+  workflow_dispatch:
+    inputs:
+      deployment_mode:
+        description: Protected staging deployment mode
+        required: true
+        default: normal
+        type: choice
+        options:
+          - normal
+          - security-cutover
+
+'''
+if dispatch_header != expected_dispatch:
+    raise SystemExit("FAIL: staging deployment-mode dispatch contract drifted")
+input_references = set(
+    re.findall(r"\$\{\{\s*inputs\.([A-Za-z][A-Za-z0-9_]*)", workflow)
+)
+if input_references != {"deployment_mode"}:
+    raise SystemExit(
+        f"FAIL: staging workflow exposes unexpected callable inputs: {sorted(input_references)}"
+    )
 
 for key, value in expected_a1.items():
     marker = f"add_env {key} {value}"

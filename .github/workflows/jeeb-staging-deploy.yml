@@ -2,6 +2,15 @@ name: jeeb-staging-deploy
 
 "on":
   workflow_dispatch:
+    inputs:
+      deployment_mode:
+        description: Protected staging deployment mode
+        required: true
+        default: normal
+        type: choice
+        options:
+          - normal
+          - security-cutover
 
 permissions:
   contents: read
@@ -22,11 +31,15 @@ jobs:
     environment: staging
     steps:
       - name: Owner block - forward-only promotion pending
+        if: ${{ inputs.deployment_mode != 'security-cutover' }}
         run: |
           echo '::error::Forward-only promotion pending owner-approved failure handling; no image, SSH, provider, secret, or Swarm mutation was attempted.' >&2
           exit 1
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Prove public OTP verification freeze before any deploy action
+        run: bash scripts/verify-staging-otp-verify-freeze.sh
 
       - name: Require immutable default-branch source
         env:
@@ -34,6 +47,7 @@ jobs:
           GITHUB_REF_PROTECTED: ${{ github.ref_protected }}
           REQUESTED_REPOSITORY: ${{ github.repository }}
           DEPLOY_ENVIRONMENT: staging
+          DEPLOYMENT_MODE: ${{ inputs.deployment_mode }}
         run: |
           set -euo pipefail
           : "${DEFAULT_BRANCH:?repository default branch is required}"
@@ -42,6 +56,7 @@ jobs:
             exit 1
           }
           [ "$DEPLOY_ENVIRONMENT" = staging ]
+          [ "$DEPLOYMENT_MODE" = security-cutover ]
           [ "$GITHUB_REF" = "refs/heads/${DEFAULT_BRANCH}" ] || {
             echo '::error::Staging deploys may run only from the repository default branch' >&2
             exit 1
@@ -165,6 +180,7 @@ jobs:
         env:
           IMAGE: ${{ steps.immutable.outputs.image }}
           REPOSITORY: ${{ github.event.repository.name }}
+          DEPLOYMENT_MODE: ${{ inputs.deployment_mode }}
           JEEB_RTC_GUARDIAN_SECRET_KEY: ${{ secrets.JEEB_RTC_GUARDIAN_SECRET_KEY }}
           JEEB_STAGING_WSS_PROBE_MINT_KEY: ${{ secrets.JEEB_STAGING_WSS_PROBE_MINT_KEY }}
           JWT_SIGNING_KEY: ${{ secrets.JEEB_JWT_SIGNING_KEY }}
@@ -180,6 +196,10 @@ jobs:
           set -euo pipefail
           [ "$REPOSITORY" = jeeb-gateway ] || {
             echo '::error::This vendored workflow deploys only jeeb-gateway' >&2
+            exit 1
+          }
+          [ "$DEPLOYMENT_MODE" = security-cutover ] || {
+            echo '::error::Only the explicit security-cutover mode may pass the owner block' >&2
             exit 1
           }
           state_secret_name=''
@@ -244,6 +264,7 @@ jobs:
             candidate_version="$secret_stage/candidate-service-version"
             candidate_id="$secret_stage/candidate-service-id"
             candidate_manifest="$secret_stage/candidate-service-manifest.json"
+            incumbent_tasks="$secret_stage/incumbent-task-containers.json"
             forward_result="$secret_stage/forward-result"
             pre_update_spec="$secret_stage/pre-update-service-spec.json"
             pre_update_version="$secret_stage/pre-update-service-version"
@@ -260,6 +281,8 @@ jobs:
             source scripts/staging-gateway-mutation-lock.sh
             # shellcheck source=staging-gateway-spec-recovery.sh
             source scripts/staging-gateway-spec-recovery.sh
+            # shellcheck source=staging-gateway-security-cutover.sh
+            source scripts/staging-gateway-security-cutover.sh
             staging_gateway_lock_init jeeb-staging "$secret_stage"
             capture_remote_spec() {
               local destination=$1 version_destination=$2 id_destination=$3
@@ -585,7 +608,14 @@ jobs:
                 bounded-retry-exact-incumbent-no-candidate|\
                 bounded-retry-unreconciled|\
                 submission-interrupted-recovered-incumbent|\
-                submission-interrupted-recovery-failed) ;;
+                submission-interrupted-recovery-failed|\
+                security-cutover-submitted-pending|\
+                security-cutover-http-200-exact-candidate|\
+                security-cutover-cas-rejected-fix-forward|\
+                security-cutover-ambiguous-fix-forward|\
+                security-cutover-exact-state-unavailable|\
+                security-cutover-unknown-state-fix-forward|\
+                security-cutover-interrupted-fix-forward) ;;
                 *) forward=invalid-result-refused ;;
               esac
               case "$recovery_result" in
@@ -605,7 +635,8 @@ jobs:
               local lock_cleanup_ok=true
               trap - EXIT
               set +e
-              if [ "$status" -ne 0 ] && [ "$recovery_armed" = true ]; then
+              if [ "$status" -ne 0 ] && [ "$DEPLOYMENT_MODE" = normal ] \
+                && [ "$recovery_armed" = true ]; then
                 if (
                   set -euo pipefail
                   staging_gateway_external_gate_recover \
@@ -630,8 +661,14 @@ jobs:
                 else
                   staging_gateway_write_sanitized_result \
                     "$forward_result" submission-interrupted-recovery-failed \
-                    || status=99
+                  || status=99
                 fi
+              fi
+              if [ -s "$forward_result" ] \
+                && [ "$(<"$forward_result")" = security-cutover-submitted-pending ]; then
+                staging_gateway_security_cutover_write_result \
+                  "$forward_result" security-cutover-interrupted-fix-forward \
+                  || status=99
               fi
               for created in "$jwt_secret_name" "$umjwt_secret_name" "$guardian_secret_name" \
                 "$probe_secret_name" "$membership_secret_name" "$firebase_secret_name" "$state_secret_name" \
@@ -735,7 +772,8 @@ jobs:
           # shellcheck disable=SC2034
           STAGING_GATEWAY_LOCK_OWNER=$(<"$STAGING_GATEWAY_LOCK_OWNER_FILE")
           {
-            for variable in IMAGE REMOTE_DOCKER_CONFIG REPOSITORY EXPECTED_INCUMBENT_IMAGE \
+            for variable in IMAGE REMOTE_DOCKER_CONFIG REPOSITORY DEPLOYMENT_MODE \
+              EXPECTED_INCUMBENT_IMAGE \
               EXPECTED_INCUMBENT_SPEC_SHA \
               STAGING_GATEWAY_LOCK_OWNER \
               state_secret_name notification_secret_name settlement_secret_name \
@@ -745,6 +783,7 @@ jobs:
             done
             cat <<'REMOTE'
           set -euo pipefail
+          case "$DEPLOYMENT_MODE" in normal|security-cutover) ;; *) exit 64 ;; esac
           export DOCKER_CONFIG="$HOME/$REMOTE_DOCKER_CONFIG"
           lock_owner_file="$HOME/.jeeb-deploy/locks/jeeb-staging-gateway.owner"
           [[ "$STAGING_GATEWAY_LOCK_OWNER" =~ ^[0-9a-f]{64}$ ]]
@@ -1001,6 +1040,7 @@ jobs:
           jq -e \
             --arg image "$IMAGE" \
             --arg network_id "$network_id" \
+            --arg deployment_mode "$DEPLOYMENT_MODE" \
             --slurpfile desired_env "$desired_env_json" \
             --slurpfile env_remove "$env_remove_json" \
             --slurpfile secret_additions "$secret_additions_json" \
@@ -1039,12 +1079,20 @@ jobs:
                   Name:"json-file",Options:{"max-size":"10m","max-file":"3"}
                 }
               | .Mode.Replicated.Replicas = 1
-              | .UpdateConfig = ((.UpdateConfig // {}) + {
-                  Parallelism:1,Monitor:20000000000,FailureAction:"rollback",Order:"start-first"
-                })
-              | .RollbackConfig = ((.RollbackConfig // {}) + {
-                  Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"start-first"
-                })
+              | .UpdateConfig = ((.UpdateConfig // {}) + (
+                  if $deployment_mode == "security-cutover" then
+                    {Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"stop-first"}
+                  else
+                    {Parallelism:1,Monitor:20000000000,FailureAction:"rollback",Order:"start-first"}
+                  end
+                ))
+              | .RollbackConfig = ((.RollbackConfig // {}) + (
+                  if $deployment_mode == "security-cutover" then
+                    {Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"stop-first"}
+                  else
+                    {Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"start-first"}
+                  end
+                ))
             ' "$current_spec" > "$candidate"
           jq -e 'type == "object"' "$candidate" >/dev/null
           cat "$candidate"
@@ -1077,14 +1125,40 @@ jobs:
             --arg image "$IMAGE" \
             --arg network_id "$observed_network_id" \
             --argjson published "$published" \
+            --arg deployment_mode "$DEPLOYMENT_MODE" \
             -f scripts/staging-gateway-candidate-contract.jq \
             "$candidate_spec" >/dev/null
-          recovery_armed=true
-          recovery_result=armed-pending
-          staging_gateway_forward_apply \
-            "$incumbent_spec" "$incumbent_version" "$incumbent_id" \
-            "$candidate_spec" "$candidate_version" "$candidate_id" \
-            "$secret_stage" "$forward_result"
+          if [ "$DEPLOYMENT_MODE" = security-cutover ]; then
+            incumbent_service_id=$(<"$incumbent_id")
+            [[ "$incumbent_service_id" =~ ^[a-z0-9]+$ ]]
+            ssh jeeb-staging bash -s -- --execute capture \
+              "$service" "$incumbent_service_id" "$incumbent_image" \
+              < scripts/staging-gateway-security-cutover.sh > "$incumbent_tasks"
+            chmod 600 "$incumbent_tasks"
+            jq -e --arg service_id "$incumbent_service_id" '
+              .ServiceID == $service_id
+              and (.Tasks | length == 1)
+              and (.Tasks[0].TaskID | test("^[a-z0-9]+$"))
+              and (.Tasks[0].ContainerID | test("^[0-9a-f]{64}$"))
+            ' "$incumbent_tasks" >/dev/null
+
+            # This is the last external gate before the single security-cutover
+            # Version-CAS. It uses only the public Worker -> nginx route.
+            bash scripts/verify-staging-otp-verify-freeze.sh
+            [ "$recovery_armed" = false ]
+            [ "$recovery_result" = not-armed ]
+            staging_gateway_security_cutover_forward_apply \
+              "$incumbent_spec" "$incumbent_version" "$incumbent_id" \
+              "$candidate_spec" "$candidate_version" "$candidate_id" \
+              "$secret_stage" "$forward_result"
+          else
+            recovery_armed=true
+            recovery_result=armed-pending
+            staging_gateway_forward_apply \
+              "$incumbent_spec" "$incumbent_version" "$incumbent_id" \
+              "$candidate_spec" "$candidate_version" "$candidate_id" \
+              "$secret_stage" "$forward_result"
+          fi
           write_snapshot_manifest \
             "$candidate_spec" "$candidate_version" "$candidate_id" "$candidate_manifest"
           ssh jeeb-staging bash -s -- jeeb-staging-jeeb-gateway "$IMAGE" \
@@ -1092,11 +1166,38 @@ jobs:
           verify_candidate_readiness
           verify_staging_overlay_and_dns
           verify_bootstrap_flags
-          bash scripts/probe-staging-public-gateway-contract.sh
+          if [ "$DEPLOYMENT_MODE" = normal ]; then
+            # The normal path remains owner-blocked. Its established public
+            # contract includes an OTP-request validation probe and therefore
+            # must never execute during the security cutover.
+            bash scripts/probe-staging-public-gateway-contract.sh
+          fi
           probe_staging_proxy_source_contract
           probe_staging_authenticated_realtime
           verify_exact_candidate_after_checks
-          recovery_armed=false
+
+          if [ "$DEPLOYMENT_MODE" = security-cutover ]; then
+            candidate_spec_sha=$(jq -S -c '.' "$candidate_spec" \
+              | sha256sum | awk '{print $1}')
+            [[ "$candidate_spec_sha" =~ ^[0-9a-f]{64}$ ]]
+            candidate_version_index=$(<"$candidate_version")
+            [[ "$candidate_version_index" =~ ^[0-9]+$ ]]
+            incumbent_tasks_base64=$(base64 < "$incumbent_tasks" | tr -d '\n')
+            ssh jeeb-staging bash -s -- --execute verify \
+              "$service" "$incumbent_service_id" "$IMAGE" \
+              "$candidate_spec_sha" "$candidate_version_index" \
+              "$incumbent_tasks_base64" \
+              < scripts/staging-gateway-security-cutover.sh
+
+            # Edge freeze is never removed by this workflow. Re-prove it after
+            # all candidate/old-task checks, then close with one exact Spec read.
+            bash scripts/verify-staging-otp-verify-freeze.sh
+            verify_exact_candidate_after_checks
+            staging_gateway_lock_assert
+            [ "$recovery_armed" = false ]
+          else
+            recovery_armed=false
+          fi
           recovery_result=not-required
 
       - name: Clean up isolated remote Docker credentials

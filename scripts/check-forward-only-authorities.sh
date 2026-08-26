@@ -265,6 +265,14 @@ OWNER_ERROR = (
     "no image, SSH, provider, secret, or Swarm mutation was attempted."
 )
 OWNER_RUN_LINES = (f"echo '{OWNER_ERROR}' >&2", "exit 1")
+SECURITY_CUTOVER_OWNER_IF = "${{ inputs.deployment_mode != 'security-cutover' }}"
+SECURITY_CUTOVER_INPUT = {
+    "description": "Protected staging deployment mode",
+    "required": True,
+    "default": "normal",
+    "type": "choice",
+    "options": ["normal", "security-cutover"],
+}
 STATUS_BYPASS = re.compile(r"\b(?:always|failure|cancelled)\s*\(", re.I)
 SUCCESS_STATUS = re.compile(r"\bsuccess\s*\(", re.I)
 MUTATION_STEP_MARKERS = (
@@ -345,10 +353,47 @@ def validate_workflow_authority(name, document):
         if not isinstance(steps, list) or not steps:
             raise ValueError(f"{name}:{job_name} has no structurally parsed steps")
         owner = steps[0]
-        if not isinstance(owner, dict) or set(owner) != {"name", "run"}:
+        expected_owner_keys = (
+            {"name", "if", "run"}
+            if name == "jeeb-staging-deploy.yml"
+            else {"name", "run"}
+        )
+        if not isinstance(owner, dict) or set(owner) != expected_owner_keys:
             raise ValueError(f"{name}:{job_name} first executable step is not canonical")
         if owner.get("name") != OWNER_STEP_NAME:
             raise ValueError(f"{name}:{job_name} owner step is not first")
+        if name == "jeeb-staging-deploy.yml":
+            if owner.get("if") != SECURITY_CUTOVER_OWNER_IF:
+                raise ValueError(f"{name}:{job_name} security-cutover owner condition drifted")
+            dispatch = document.get("on", {}).get("workflow_dispatch")
+            inputs = dispatch.get("inputs") if isinstance(dispatch, dict) else None
+            if inputs != {"deployment_mode": SECURITY_CUTOVER_INPUT}:
+                raise ValueError(f"{name}:{job_name} deployment-mode input drifted")
+            if len(steps) < 4:
+                raise ValueError(f"{name}:{job_name} security-cutover gates are incomplete")
+            if set(steps[1]) != {"uses"} or not str(steps[1]["uses"]).startswith(
+                "actions/checkout@"
+            ):
+                raise ValueError(f"{name}:{job_name} protected checkout is not second")
+            freeze = steps[2]
+            if freeze != {
+                "name": "Prove public OTP verification freeze before any deploy action",
+                "run": "bash scripts/verify-staging-otp-verify-freeze.sh",
+            }:
+                raise ValueError(f"{name}:{job_name} first security-cutover gate drifted")
+            first_mutation = next(
+                (
+                    index
+                    for index, step in enumerate(steps)
+                    if any(
+                        marker in json.dumps(step, sort_keys=True)
+                        for marker in MUTATION_STEP_MARKERS
+                    )
+                ),
+                None,
+            )
+            if first_mutation is None or first_mutation <= 2:
+                raise ValueError(f"{name}:{job_name} mutation precedes the public freeze")
         body = owner.get("run")
         if not isinstance(body, str) or tuple(body.splitlines()) != OWNER_RUN_LINES:
             raise ValueError(f"{name}:{job_name} owner run body is not canonical")
@@ -473,6 +518,28 @@ for name, path in workflow_authority_paths.items():
         "second-job terminal-status mutation bypass", name, cross_job_bypass
     )
 
+    if name == "jeeb-staging-deploy.yml":
+        unsafe_condition = copy.deepcopy(document)
+        unsafe_condition["jobs"]["deploy"]["steps"][0]["if"] = "${{ false }}"
+        assert_workflow_rejected(
+            "security-cutover owner condition widened", name, unsafe_condition
+        )
+
+        extra_mode = copy.deepcopy(document)
+        extra_mode["on"]["workflow_dispatch"]["inputs"]["deployment_mode"][
+            "options"
+        ].append("bypass")
+        assert_workflow_rejected("extra deployment mode", name, extra_mode)
+
+        missing_freeze = copy.deepcopy(document)
+        del missing_freeze["jobs"]["deploy"]["steps"][2]
+        assert_workflow_rejected("public freeze removed", name, missing_freeze)
+
+        late_freeze = copy.deepcopy(document)
+        steps = late_freeze["jobs"]["deploy"]["steps"]
+        steps[2], steps[5] = steps[5], steps[2]
+        assert_workflow_rejected("public freeze moved after SSH", name, late_freeze)
+
 rotation_contract = subprocess.run(
     ["bash", "scripts/check-staging-probe-key-rotation-contract.sh"],
     cwd=repo_root,
@@ -513,7 +580,7 @@ for description, mutated in (
 
 print(
     "Structurally validated 3 single-job workflow authorities, dynamically executed "
-    "their owner steps under empty PATH, and rejected 15 adversarial workflow mutations."
+    "their owner steps under empty PATH, and rejected 19 adversarial workflow mutations."
 )
 print("Dynamically validated the blocked lifecycle authority and 2 adversarial mutations.")
 
