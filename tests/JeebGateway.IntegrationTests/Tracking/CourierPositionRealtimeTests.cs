@@ -479,7 +479,7 @@ public class CourierPositionRealtimeTests : IClassFixture<WebApplicationFactory<
         WebApplicationFactory<Program> factory)
     {
         var bootstrap = factory.CreateClient();
-        var phone = $"+9665{Random.Shared.NextInt64(10_000_000, 99_999_999)}";
+        const string phone = "+14155550100";
         var resp = await bootstrap.PostAsJsonAsync("/v1/auth/otp/verify", new { phone, code = "1234" });
         resp.StatusCode.Should().Be(HttpStatusCode.OK, "the OTP verify path mints a real session");
 
