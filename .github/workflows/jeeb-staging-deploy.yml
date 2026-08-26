@@ -11,6 +11,7 @@ name: jeeb-staging-deploy
         options:
           - normal
           - security-cutover
+          - otp-cutover
 
 permissions:
   contents: read
@@ -31,13 +32,13 @@ jobs:
     environment: staging
     steps:
       - name: Owner block - forward-only promotion pending
-        if: ${{ inputs.deployment_mode != 'security-cutover' }}
+        if: ${{ inputs.deployment_mode == 'normal' }}
         run: |
           echo '::error::Forward-only promotion pending owner-approved failure handling; no image, SSH, provider, secret, or Swarm mutation was attempted.' >&2
           exit 1
 
-      - name: Require designated security-cutover owner
-        if: ${{ inputs.deployment_mode == 'security-cutover' }}
+      - name: Require designated cutover owner
+        if: ${{ inputs.deployment_mode != 'normal' }}
         env:
           REQUESTING_ACTOR: ${{ github.actor }}
           TRIGGERING_ACTOR: ${{ github.triggering_actor }}
@@ -45,7 +46,7 @@ jobs:
           set -euo pipefail
           if [ "$REQUESTING_ACTOR" != oudaykhaled ] \
             || [ "$TRIGGERING_ACTOR" != oudaykhaled ]; then
-            echo '::error::Security cutover requires the designated owner.' >&2
+            echo '::error::Staging cutovers require the designated owner.' >&2
             exit 1
           fi
 
@@ -69,7 +70,7 @@ jobs:
             exit 1
           }
           [ "$DEPLOY_ENVIRONMENT" = staging ]
-          [ "$DEPLOYMENT_MODE" = security-cutover ]
+          case "$DEPLOYMENT_MODE" in security-cutover|otp-cutover) ;; *) exit 64 ;; esac
           [ "$GITHUB_REF" = "refs/heads/${DEFAULT_BRANCH}" ] || {
             echo '::error::Staging deploys may run only from the repository default branch' >&2
             exit 1
@@ -205,16 +206,17 @@ jobs:
           SETTLEMENT_SERVICE_TOKEN: ${{ secrets.SETTLEMENT_SERVICE_TOKEN }}
           BUNDLER_CMS_BEARER_TOKEN: ${{ secrets.BUNDLER_CMS_BEARER_TOKEN }}
           JEEB_GATEWAY_JOB_TOKEN: ${{ secrets.JEEB_GATEWAY_JOB_TOKEN }}
+          JEEB_OTP_SERVICE_AUTH_KEY: ${{ secrets.JEEB_OTP_SERVICE_AUTH_KEY }}
         run: |
           set -euo pipefail
           [ "$REPOSITORY" = jeeb-gateway ] || {
             echo '::error::This vendored workflow deploys only jeeb-gateway' >&2
             exit 1
           }
-          [ "$DEPLOYMENT_MODE" = security-cutover ] || {
-            echo '::error::Only the explicit security-cutover mode may pass the owner block' >&2
+          case "$DEPLOYMENT_MODE" in security-cutover|otp-cutover) ;; *)
+            echo '::error::Only an explicit cutover mode may pass the owner block' >&2
             exit 1
-          }
+          esac
           state_secret_name=''
           notification_secret_name=''
           settlement_secret_name=''
@@ -226,6 +228,7 @@ jobs:
           probe_secret_name=''
           membership_secret_name=''
           firebase_secret_name=''
+          service_auth_secret_name=''
           service=jeeb-staging-jeeb-gateway
           published=10000
           health=/health/ready
@@ -252,6 +255,13 @@ jobs:
             [ "$JEEB_STAGING_WSS_PROBE_MINT_KEY" != "$JEEB_RTC_MEMBERSHIP_TICKET_KEY" ]
             [ -z "$UMJWT_SIGNING_KEY" ] || \
               [ "$JEEB_STAGING_WSS_PROBE_MINT_KEY" != "$UMJWT_SIGNING_KEY" ]
+            if [ "$DEPLOYMENT_MODE" = otp-cutover ]; then
+              : "${JEEB_OTP_SERVICE_AUTH_KEY:?JEEB_OTP_SERVICE_AUTH_KEY is required}"
+              [ "${#JEEB_OTP_SERVICE_AUTH_KEY}" -ge 32 ]
+              [ "$JEEB_OTP_SERVICE_AUTH_KEY" != "$JWT_SIGNING_KEY" ]
+              [ -z "$UMJWT_SIGNING_KEY" ] || \
+                [ "$JEEB_OTP_SERVICE_AUTH_KEY" != "$UMJWT_SIGNING_KEY" ]
+            fi
             bash scripts/assert-distinct-staging-signing-keys.sh
             state_secret_name="jeeb_staging_gateway_state_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
             notification_secret_name="jeeb_staging_gateway_notification_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
@@ -263,6 +273,8 @@ jobs:
             probe_secret_name="jeeb_staging_gateway_wss_probe_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
             membership_secret_name="jeeb_staging_gateway_membership_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
             firebase_secret_name="jeeb_staging_gateway_firebase_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+            [ "$DEPLOYMENT_MODE" != otp-cutover ] || \
+              service_auth_secret_name="jeeb_staging_gateway_service_auth_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
             [ -z "$UMJWT_SIGNING_KEY" ] || \
               umjwt_secret_name="jeeb_staging_gateway_umjwt_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
             secret_stage=$(mktemp -d)
@@ -394,9 +406,10 @@ jobs:
           READINESS
             }
             verify_bootstrap_flags() {
-              ssh jeeb-staging bash -s -- "$service" <<'FLAGS'
+              ssh jeeb-staging bash -s -- "$service" "$DEPLOYMENT_MODE" <<'FLAGS'
                 set -euo pipefail
                 service=$1
+                deployment_mode=$2
                 environment=$(docker service inspect "$service" \
                   --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}')
                 expected_contract=(
@@ -416,6 +429,13 @@ jobs:
                   Operations__RealtimeProbe__MintKeyFile=/run/secrets/staging_wss_probe_mint_key
                   ASPNETCORE_ENVIRONMENT=Staging
                 )
+                if [ "$deployment_mode" = otp-cutover ]; then
+                  expected_contract+=(
+                    ServiceAuth__Enabled=true
+                    ServiceAuth__Caller=jeeb-gateway
+                    ServiceAuth__SigningKeyFile=/run/secrets/jeeb_gateway_service_auth
+                  )
+                fi
                 for expected_pair in "${expected_contract[@]}"; do
                   expected_key=${expected_pair%%=*}
                   expected_value=${expected_pair#*=}
@@ -648,7 +668,7 @@ jobs:
               local lock_cleanup_ok=true
               trap - EXIT
               set +e
-              if [ "$status" -ne 0 ] && [ "$DEPLOYMENT_MODE" = normal ] \
+              if [ "$status" -ne 0 ] && [ "$DEPLOYMENT_MODE" != security-cutover ] \
                 && [ "$recovery_armed" = true ]; then
                 if (
                   set -euo pipefail
@@ -686,7 +706,7 @@ jobs:
               for created in "$jwt_secret_name" "$umjwt_secret_name" "$guardian_secret_name" \
                 "$probe_secret_name" "$membership_secret_name" "$firebase_secret_name" "$state_secret_name" \
                 "$notification_secret_name" "$settlement_secret_name" "$bundler_secret_name" \
-                "$job_secret_name"; do
+                "$job_secret_name" "$service_auth_secret_name"; do
                 # The generated secret name is intentionally expanded by the runner.
                 # shellcheck disable=SC2029
                 if [ -n "$created" ] && [ "$STAGING_GATEWAY_LOCK_HELD" = true ]; then
@@ -749,12 +769,14 @@ jobs:
             stream_secret "$probe_secret_name" "$JEEB_STAGING_WSS_PROBE_MINT_KEY"
             stream_secret "$membership_secret_name" "$JEEB_RTC_MEMBERSHIP_TICKET_KEY"
             stream_secret_file "$firebase_secret_name" "$firebase_file"
+            [ -z "$service_auth_secret_name" ] || \
+              stream_secret "$service_auth_secret_name" "$JEEB_OTP_SERVICE_AUTH_KEY"
             unset JEEB_STATE_SERVICE_TOKEN NOTIFICATION_SERVICE_TOKEN SETTLEMENT_SERVICE_TOKEN \
               BUNDLER_CMS_BEARER_TOKEN \
               JEEB_GATEWAY_JOB_TOKEN JWT_SIGNING_KEY UMJWT_SIGNING_KEY \
               JEEB_RTC_GUARDIAN_SECRET_KEY JEEB_STAGING_WSS_PROBE_MINT_KEY \
               JEEB_RTC_MEMBERSHIP_TICKET_KEY \
-              JEEB_FIREBASE_JSON
+              JEEB_FIREBASE_JSON JEEB_OTP_SERVICE_AUTH_KEY
             capture_remote_spec "$incumbent_spec" "$incumbent_version" "$incumbent_id" || {
               echo 'Incumbent service Spec could not be captured at a stable Version.Index' >&2
               exit 1
@@ -791,12 +813,13 @@ jobs:
               STAGING_GATEWAY_LOCK_OWNER \
               state_secret_name notification_secret_name settlement_secret_name \
               bundler_secret_name job_secret_name jwt_secret_name umjwt_secret_name \
-              guardian_secret_name probe_secret_name membership_secret_name firebase_secret_name; do
+              guardian_secret_name probe_secret_name membership_secret_name firebase_secret_name \
+              service_auth_secret_name; do
               printf '%s=%q\n' "$variable" "${!variable}"
             done
             cat <<'REMOTE'
           set -euo pipefail
-          case "$DEPLOYMENT_MODE" in normal|security-cutover) ;; *) exit 64 ;; esac
+          case "$DEPLOYMENT_MODE" in normal|security-cutover|otp-cutover) ;; *) exit 64 ;; esac
           export DOCKER_CONFIG="$HOME/$REMOTE_DOCKER_CONFIG"
           lock_owner_file="$HOME/.jeeb-deploy/locks/jeeb-staging-gateway.owner"
           [[ "$STAGING_GATEWAY_LOCK_OWNER" =~ ^[0-9a-f]{64}$ ]]
@@ -931,12 +954,16 @@ jobs:
               add_rotated_secret "$probe_secret_name" staging_wss_probe_mint_key
               add_rotated_secret "$membership_secret_name" realtime_membership_ticket_key
               add_rotated_secret "$firebase_secret_name" firebase_admin_json
+              if [ "$DEPLOYMENT_MODE" = otp-cutover ]; then
+                add_rotated_secret "$service_auth_secret_name" jeeb_gateway_service_auth
+              fi
               remove_secret_target delivery_service_token
               remove_secret_target private_artifact_store_bearer_token
               remove_secret_target data_export_token_signing_key
               for stale_env in DELIVERY_SERVICE_TOKEN_FILE PRIVATE_ARTIFACT_STORE_BASE_URL \
                 PRIVATE_ARTIFACT_STORE_BEARER_TOKEN_FILE DATA_EXPORT_TOKEN_SIGNING_KEY_FILE \
                 Services__Settlement__ApiToken Jwt__SigningKey UmJwt__SigningKey \
+                ServiceAuth__SigningKey \
                 Services__Realtime__GuardianSecret Operations__RealtimeProbe__MintKey \
                 "${retired_gateway_env[@]}"; do
                 env_remove_keys+=("$stale_env")
@@ -966,6 +993,11 @@ jobs:
               add_env Auth__Otp__ApplicationId 0d51afe1-499f-4a29-a55a-36d2dd223b05
               add_env Auth__Otp__Phone__AllowedRegion LB
               add_env Auth__Otp__Phone__EnforceRegion false
+              if [ "$DEPLOYMENT_MODE" = otp-cutover ]; then
+                add_env ServiceAuth__Enabled true
+                add_env ServiceAuth__Caller jeeb-gateway
+                add_env ServiceAuth__SigningKeyFile /run/secrets/jeeb_gateway_service_auth
+              fi
               add_env FeatureFlags__UseUpstream__Compliment false
               # The existing gateway deploy is native and uses host loopback.
               # This staging gateway is containerized, so retain the same fleet
@@ -1179,10 +1211,9 @@ jobs:
           verify_candidate_readiness
           verify_staging_overlay_and_dns
           verify_bootstrap_flags
-          if [ "$DEPLOYMENT_MODE" = normal ]; then
-            # The normal path remains owner-blocked. Its established public
-            # contract includes an OTP-request validation probe and therefore
-            # must never execute during the security cutover.
+          if [ "$DEPLOYMENT_MODE" != security-cutover ]; then
+            # The recoverable path includes the public OTP request/validation
+            # contract; it must never execute during the stop-first security cutover.
             bash scripts/probe-staging-public-gateway-contract.sh
           fi
           probe_staging_proxy_source_contract

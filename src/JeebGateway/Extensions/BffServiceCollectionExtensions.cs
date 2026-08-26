@@ -1,4 +1,5 @@
 using JeebGateway.Services.Bff;
+using JeebGateway.Tokens;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 
 namespace JeebGateway.Extensions;
@@ -29,6 +30,16 @@ public static class BffServiceCollectionExtensions
 
         services.AddOptions<ServiceAuthOptions>()
             .Bind(config.GetSection(ServiceAuthOptions.SectionName))
+            .PostConfigure(options =>
+                options.SigningKey = JwtSigningKeySource.Resolve(
+                    options.SigningKey,
+                    options.SigningKeyFile,
+                    "ServiceAuth:SigningKeyFile"))
+            .Validate(
+                options => !options.Enabled
+                    || (!string.IsNullOrWhiteSpace(options.SigningKey)
+                        && options.SigningKey.Length >= 32),
+                "ServiceAuth:SigningKey or ServiceAuth:SigningKeyFile must resolve to at least 32 characters when ServiceAuth is enabled.")
             .ValidateOnStart();
 
         services.AddOptions<DownstreamServicesOptions>()

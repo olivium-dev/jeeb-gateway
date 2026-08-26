@@ -54,8 +54,9 @@ public sealed class ServiceAuthSigningHandler : DelegatingHandler
         if (string.IsNullOrWhiteSpace(opts.SigningKey))
         {
             throw new InvalidOperationException(
-                "ServiceAuth is enabled but ServiceAuth:SigningKey is not configured. " +
-                "Set the env var or disable ServiceAuth:Enabled for this environment.");
+                "ServiceAuth is enabled but neither ServiceAuth:SigningKey nor " +
+                "ServiceAuth:SigningKeyFile resolved key material. Configure one " +
+                "source or disable ServiceAuth:Enabled for this environment.");
         }
 
         var ts = _timeProvider.GetUtcNow().ToUnixTimeSeconds().ToString();

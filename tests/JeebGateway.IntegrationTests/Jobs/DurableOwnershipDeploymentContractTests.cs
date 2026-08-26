@@ -28,7 +28,8 @@ public sealed class DurableOwnershipDeploymentContractTests
         ("realtime_guardian_secret", "add_rotated_secret \"$guardian_secret_name\" realtime_guardian_secret"),
         ("staging_wss_probe_mint_key", "add_rotated_secret \"$probe_secret_name\" staging_wss_probe_mint_key"),
         ("realtime_membership_ticket_key", "add_rotated_secret \"$membership_secret_name\" realtime_membership_ticket_key"),
-        ("firebase_admin_json", "add_rotated_secret \"$firebase_secret_name\" firebase_admin_json")
+        ("firebase_admin_json", "add_rotated_secret \"$firebase_secret_name\" firebase_admin_json"),
+        ("jeeb_gateway_service_auth", "add_rotated_secret \"$service_auth_secret_name\" jeeb_gateway_service_auth")
     ];
 
     [Theory]
@@ -464,10 +465,11 @@ public sealed class DurableOwnershipDeploymentContractTests
         dispatch.Should().Contain("default: normal");
         dispatch.Should().Contain("type: choice");
         dispatch.Should().Contain("- security-cutover");
+        dispatch.Should().Contain("- otp-cutover");
         CountOccurrences(dispatch, "inputs:").Should().Be(1);
         CountOccurrences(dispatch, "deployment_mode:").Should().Be(1);
         workflow.Should().Contain(
-            "if: ${{ inputs.deployment_mode != 'security-cutover' }}");
+            "if: ${{ inputs.deployment_mode == 'normal' }}");
         workflow.Should().NotContain("${{ inputs.activate_");
 
         workflow.Should().Contain("capture_remote_spec() {");
@@ -506,6 +508,15 @@ public sealed class DurableOwnershipDeploymentContractTests
             "add_env Services__Realtime__PublicSocketUrl wss://app.jeeb.fds-1.com/socket/websocket");
         workflow.Should().Contain(
             "add_env Services__Realtime__BaseUrl http://jeeb-staging-realtime-comunication-service:4000");
+        workflow.Should().Contain(
+            "add_env Auth__Otp__Phone__EnforceRegion false");
+        workflow.Should().Contain(
+            "JEEB_OTP_SERVICE_AUTH_KEY: ${{ secrets.JEEB_OTP_SERVICE_AUTH_KEY }}");
+        workflow.Should().Contain(
+            "add_env ServiceAuth__SigningKeyFile /run/secrets/jeeb_gateway_service_auth");
+        workflow.Should().Contain(
+            "add_rotated_secret \"$service_auth_secret_name\" jeeb_gateway_service_auth");
+        workflow.Should().Contain("ServiceAuth__SigningKey \\");
         workflow.Should().NotContain(
             "add_env Services__Realtime__BaseUrl http://192.168.2.20:10069");
         workflow.Should().Contain("python3 scripts/probe-staging-authenticated-realtime.py");
@@ -516,7 +527,7 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().Contain("--execute capture");
         workflow.Should().Contain("--execute verify");
         workflow.Should().Contain("[ \"$recovery_armed\" = false ]");
-        workflow.Should().Contain("[ \"$DEPLOYMENT_MODE\" = normal ]");
+        workflow.Should().Contain("[ \"$DEPLOYMENT_MODE\" != security-cutover ]");
         CountOccurrences(workflow, "scripts/verify-swarm-service-image.sh").Should().Be(2,
             "the blocked template retains exact candidate and recovered-incumbent verifiers");
 

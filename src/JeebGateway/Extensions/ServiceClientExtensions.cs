@@ -3,6 +3,7 @@ using JeebGateway.Services.Bff;
 using JeebGateway.Services.Clients;
 using Microsoft.Extensions.Http.Resilience;
 using Polly;
+using Polly.Timeout;
 
 namespace JeebGateway.Extensions;
 
@@ -331,13 +332,13 @@ public static class ServiceClientExtensions
 
         // T-BE-019 (JEB-55): typed client over one-time-password service for the
         // delivery-HANDOVER OTP (ApplicationId delivery_handover_{deliveryId}).
-        // This is a POST-AUTH call inside the authenticated delivery flow, so it
-        // carries the same bearer/ServiceAuth/resilience chain as the other
-        // downstream clients (distinct from the PRE-AUTH sign-in OTP client in
-        // Auth/OtpSignIn, which must not). The NSwag-generated client takes
-        // (string baseUrl, HttpClient http); we resolve baseUrl via factory and
-        // let HttpClient be the pipeline-configured instance.
-        AttachStandardPipeline(
+        // Both send and validate are non-idempotent POSTs with no idempotency key:
+        // retrying send can duplicate an SMS, while retrying validate after a lost
+        // success response can turn a consumed valid OTP into an apparent failure.
+        // Preserve bearer/ServiceAuth plus breaker/timeout, but never retry. The
+        // NSwag-generated client takes (string baseUrl, HttpClient http); we resolve
+        // baseUrl via factory and let HttpClient be the pipeline-configured instance.
+        AttachOtpNoRetryPipeline(
             services.AddHttpClient<IServiceOTPClient, ServiceOTPClient>((sp, http) =>
             {
                 BindBaseAddress(http, config, "Services:ServiceOTP");
@@ -726,6 +727,66 @@ public static class ServiceClientExtensions
         builder.AddHttpMessageHandler<ServiceAuthSigningHandler>();
         builder.AddResilienceHandler("standard", ConfigureStandardResilience);
         return builder;
+    }
+
+    /// <summary>
+    /// Attaches the existing bearer + ServiceAuth chain and an OTP-specific
+    /// circuit-breaker/timeout pipeline with absolutely no retry. Send and validate
+    /// are non-idempotent POSTs: a repeated send may duplicate an SMS, and a repeated
+    /// validate may replay an OTP that the first attempt already consumed.
+    /// </summary>
+    private static IHttpClientBuilder AttachOtpNoRetryPipeline(IHttpClientBuilder builder)
+    {
+        builder.AddHttpMessageHandler<BearerForwardingHandler>();
+        builder.AddHttpMessageHandler<ServiceAuthSigningHandler>();
+        builder.AddResilienceHandler("otp-no-retry", ConfigureOtpBreakerAndTimeoutOnly);
+        return builder;
+    }
+
+    /// <summary>
+    /// Preserves the standard breaker thresholds and 10-second attempt timeout while
+    /// excluding retry. HTTP 429 is expected OTP flow control, so it is forwarded
+    /// without contributing to client-wide breaker state.
+    /// </summary>
+    private static void ConfigureOtpBreakerAndTimeoutOnly(
+        ResiliencePipelineBuilder<HttpResponseMessage> builder)
+    {
+        builder.AddCircuitBreaker(new HttpCircuitBreakerStrategyOptions
+        {
+            SamplingDuration = TimeSpan.FromSeconds(30),
+            FailureRatio = 0.5,
+            MinimumThroughput = 10,
+            BreakDuration = TimeSpan.FromSeconds(30),
+            ShouldHandle = args => ShouldBreakOtp(args.Outcome.Exception, args.Outcome.Result)
+                ? PredicateResult.True()
+                : PredicateResult.False(),
+        });
+
+        builder.AddTimeout(new HttpTimeoutStrategyOptions
+        {
+            Timeout = TimeSpan.FromSeconds(10),
+        });
+    }
+
+    /// <summary>
+    /// OTP breaker predicate: network/timeout exceptions, HTTP 5xx and 408 indicate
+    /// upstream failure; 429 and other client responses do not.
+    /// </summary>
+    internal static bool ShouldBreakOtp(Exception? exception, HttpResponseMessage? response)
+    {
+        if (exception is HttpRequestException or TimeoutRejectedException)
+            return true;
+
+        // Caller cancellation and programming/activation faults do not establish
+        // that the OTP upstream is unhealthy, so they must not pollute breaker state.
+        if (exception is not null)
+            return false;
+
+        if (response is null || response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+            return false;
+
+        var code = (int)response.StatusCode;
+        return code >= 500 || code == 408;
     }
 
     /// <summary>
