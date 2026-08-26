@@ -152,7 +152,10 @@ jobs:
           set -- docker service update --image "$image" --with-registry-auth
           set -- "$@" --update-order start-first --update-failure-action rollback --update-monitor 20s
           set -- "$@" \
+            --env-add Auth__Otp__ApplicationId=0d51afe1-499f-4a29-a55a-36d2dd223b05 \
             --env-add Auth__Otp__Phone__EnforceRegion=false \
+            --env-add Services__ServiceOTP__BaseUrl=http://jeeb-staging-one-time-password:8080 \
+            --env-add ServiceOTPApi__BaseUrl=http://jeeb-staging-one-time-password:8080 \
             --env-add ServiceAuth__Enabled=true \
             --env-add ServiceAuth__Caller=jeeb-gateway \
             --env-add ServiceAuth__SigningKeyFile=/run/secrets/jeeb_gateway_service_auth
@@ -172,4 +175,3 @@ jobs:
             sleep 4
           done
           exit 1
-
