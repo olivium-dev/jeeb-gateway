@@ -1,23 +1,26 @@
 using System.Net;
+using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using FluentAssertions;
 using JeebGateway.Auth.OtpSignIn;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
+using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using PhoneNumbers;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests;
 
 /// <summary>
-/// S02 F-E (JEB-37 / JEB-1422) — gateway-local phone admission policy + OTP-request
-/// burst guard on <c>POST /v1/auth/otp/request</c>. These assert the THREE reject
-/// outcomes the S02 strict suite freezes (N3/N4/N12) AND the security-critical
-/// invariant that a rejected/throttled request NEVER dials the upstream
-/// (<c>SendCalls == 0</c>) — a throttle must never cost an SMS.
+/// Gateway-local explicit E.164 admission/canonicalisation + OTP-request burst
+/// guard on <c>POST /v1/auth/otp/request</c>. These tests prove international
+/// eligibility, strict fail-closed parsing, one canonical downstream identity,
+/// and the security-critical invariant that a rejected/throttled request never
+/// dials the upstream (<c>SendCalls == 0</c>).
 ///
 /// The upstream is the same <see cref="StubServiceOtpClient"/> counter used by
 /// <c>AuthOtpControllerTests</c>; nothing is mocked away from the real controller
@@ -48,24 +51,23 @@ public class OtpPhonePolicyAndRateLimitTests
     }
 
     // ---------------------------------------------------------------
-    // N3 — non-LB (US) phone -> 400 invalid_country, no upstream
+    // International eligibility — a valid non-LB phone is canonicalised and
+    // reaches the typed OTP client exactly once even with legacy LB config.
     // ---------------------------------------------------------------
     [Fact]
-    public async Task N3_NonLebanesePhone_Returns400_InvalidCountry_AndDoesNotDialUpstream()
+    public async Task ValidNonLebanesePhone_IsAdmitted_Canonicalised_AndDialsUpstreamOnce()
     {
         var stub = new StubServiceOtpClient();
         using var factory = MakeFactory(stub);
         var http = factory.CreateClient();
 
-        // +1 415 555 0100 — a structurally valid US number, wrong country.
         var resp = await http.PostAsync("/v1/auth/otp/request",
-            JsonBody("""{ "phone": "+14155550100" }"""));
+            JsonBody("""{ "phone": "+1 (415) 555-0100" }"""));
 
-        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
-        var raw = await resp.Content.ReadAsStringAsync();
-        raw.Should().Contain("invalid_country");
-        raw.Should().Contain("https://problems.jeeb.lb/auth/invalid_country");
-        stub.SendCalls.Should().Be(0, "a non-LB phone must be rejected before the upstream is dialed");
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        stub.SendCalls.Should().Be(1);
+        stub.LastSendPhone.Should().Be("+14155550100",
+            "the typed OTP boundary receives one canonical international value");
     }
 
     // ---------------------------------------------------------------
@@ -86,6 +88,69 @@ public class OtpPhonePolicyAndRateLimitTests
         resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
         raw.Should().Contain("invalid_phone");
         raw.Should().NotContain("invalid_country");
+        stub.SendCalls.Should().Be(0);
+    }
+
+    [Theory]
+    [InlineData("03000001", "national format")]
+    [InlineData("009613000001", "international prefix without an explicit plus")]
+    [InlineData("+9611", "impossible number")]
+    [InlineData("+0123456789", "zero country-code prefix")]
+    [InlineData("+999123456789", "unknown country code")]
+    [InlineData("+1234567890123456", "overlong E.164")]
+    [InlineData("+961+9613000001", "double prefix")]
+    public async Task NonCanonicalOrImpossiblePhone_Returns400_AndNeverDialsUpstream(
+        string phone, string reason)
+    {
+        var stub = new StubServiceOtpClient();
+        using var factory = MakeFactory(stub);
+        var http = factory.CreateClient();
+
+        var resp = await http.PostAsync("/v1/auth/otp/request",
+            JsonBody(JsonSerializer.Serialize(new { phone })));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest, reason);
+        (await resp.Content.ReadAsStringAsync()).Should().Contain("invalid_phone");
+        stub.SendCalls.Should().Be(0, $"{reason} must fail before the typed OTP client");
+    }
+
+    [Fact]
+    public async Task LibPhoneNumberRepair_IsRejectedByRequestAndVerifyWithoutUpstreamCalls()
+    {
+        const string repairedInput = "+96103000001";
+        var util = PhoneNumberUtil.GetInstance();
+        var parsed = util.Parse(repairedInput, "ZZ");
+        util.IsValidNumber(parsed).Should().BeTrue("the vector must reach the exact round-trip guard");
+        util.Format(parsed, PhoneNumberFormat.E164).Should().Be("+9613000001");
+
+        var stub = new StubServiceOtpClient();
+        using var factory = MakeFactory(stub);
+        var http = factory.CreateClient();
+
+        var request = await http.PostAsync("/v1/auth/otp/request",
+            JsonBody(JsonSerializer.Serialize(new { phone = repairedInput })));
+        var verify = await http.PostAsync("/v1/auth/otp/verify",
+            JsonBody(JsonSerializer.Serialize(new { phone = repairedInput, code = "1234" })));
+
+        request.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        verify.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        stub.SendCalls.Should().Be(0);
+        stub.ValidateCalls.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task OversizedPhone_IsRejectedBeforeParsingAndNeverDialsUpstream()
+    {
+        var stub = new StubServiceOtpClient();
+        using var factory = MakeFactory(stub);
+        var http = factory.CreateClient();
+        var phone = "+1" + new string(' ', 64) + "4155550100";
+
+        var response = await http.PostAsync("/v1/auth/otp/request",
+            JsonBody(JsonSerializer.Serialize(new { phone })));
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        stub.SendCalls.Should().Be(0);
     }
 
     // ---------------------------------------------------------------
@@ -103,6 +168,58 @@ public class OtpPhonePolicyAndRateLimitTests
 
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         stub.SendCalls.Should().Be(1, "a valid LB phone must pass the policy and dial the upstream");
+        stub.LastSendPhone.Should().Be("+9613000001");
+    }
+
+    // ---------------------------------------------------------------
+    // Legacy typed compatibility — the controller still maps an
+    // InvalidCountry policy outcome to the frozen RFC 7807 response.
+    // ---------------------------------------------------------------
+    [Fact]
+    public async Task LegacyInvalidCountryOutcome_PreservesFrozenProblemDetailsContract()
+    {
+        var stub = new StubServiceOtpClient();
+        using var factory = MakeFactory(stub, phonePolicy: new InvalidCountryPhonePolicy());
+        var http = factory.CreateClient();
+
+        var resp = await http.PostAsync("/v1/auth/otp/request",
+            JsonBody("""{ "phone": "+14155550100" }"""));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        resp.Content.Headers.ContentType?.MediaType.Should().Be("application/problem+json");
+        var raw = await resp.Content.ReadAsStringAsync();
+        raw.Should().Contain("https://problems.jeeb.lb/auth/invalid_country");
+        stub.SendCalls.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task EmergencyRegionRestriction_WhenEnabled_RejectsNonLebanesePhone()
+    {
+        var stub = new StubServiceOtpClient();
+        using var factory = MakeFactory(stub, enforceRegion: true);
+        var http = factory.CreateClient();
+
+        var response = await http.PostAsync("/v1/auth/otp/request",
+            JsonBody("""{ "phone": "+14155550100" }"""));
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await response.Content.ReadAsStringAsync()).Should().Contain("invalid_country");
+        stub.SendCalls.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task AllowedOutcomeWithoutCanonicalPhone_FailsClosedBeforeUpstreamCall()
+    {
+        var stub = new StubServiceOtpClient();
+        using var factory = MakeFactory(stub, phonePolicy: new MissingCanonicalPhonePolicy());
+        var http = factory.CreateClient();
+
+        var response = await http.PostAsync("/v1/auth/otp/request",
+            JsonBody("""{ "phone": "+14155550100" }"""));
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        (await response.Content.ReadAsStringAsync()).Should().Contain("invalid_phone");
+        stub.SendCalls.Should().Be(0);
     }
 
     // ---------------------------------------------------------------
@@ -139,6 +256,26 @@ public class OtpPhonePolicyAndRateLimitTests
         stub.SendCalls.Should().Be(3, "a throttled OTP request must not cost an upstream SendOTP (no SMS)");
     }
 
+    [Fact]
+    public async Task FormattingVariants_ShareCanonicalPerPhoneThrottleBucket()
+    {
+        var stub = new StubServiceOtpClient();
+        using var factory = MakeFactory(stub, maxPerPhone: 1, maxPerIp: 100);
+        var http = factory.CreateClient();
+
+        var first = await http.PostAsync("/v1/auth/otp/request",
+            JsonBody("""{ "phone": "+1 415 555 0100" }"""));
+        first.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var samePhone = await http.PostAsync("/v1/auth/otp/request",
+            JsonBody("""{ "phone": "+1 (415) 555-0100" }"""));
+
+        samePhone.StatusCode.Should().Be(HttpStatusCode.TooManyRequests);
+        stub.SendCalls.Should().Be(1,
+            "presentation variants must not split the canonical per-phone throttle bucket");
+        stub.LastSendPhone.Should().Be("+14155550100");
+    }
+
     // ---------------------------------------------------------------
     // N12 (IP leg) — per-IP burst guard also trips 429 rate_limited even
     //                across DIFFERENT phones from the same source IP.
@@ -164,19 +301,75 @@ public class OtpPhonePolicyAndRateLimitTests
         stub.SendCalls.Should().Be(2, "the per-IP-throttled request must not dial the upstream");
     }
 
+    [Fact]
+    public async Task Verify_UsesCanonicalPhoneForTypedClientAndSessionIdentity()
+    {
+        var stub = new StubServiceOtpClient();
+        using var factory = MakeFactory(stub);
+        var http = factory.CreateClient();
+
+        var formatted = await http.PostAsync("/v1/auth/otp/verify",
+            JsonBody("""{ "phone": "+1 (415) 555-0100", "code": "1234" }"""));
+        var compact = await http.PostAsync("/v1/auth/otp/verify",
+            JsonBody("""{ "phone": "+14155550100", "code": "1234" }"""));
+
+        formatted.StatusCode.Should().Be(HttpStatusCode.OK);
+        compact.StatusCode.Should().Be(HttpStatusCode.OK);
+        stub.ValidatePhones.Should().Equal("+14155550100", "+14155550100");
+
+        var formattedSession = await formatted.Content.ReadFromJsonAsync<OtpVerifyResponse>();
+        var compactSession = await compact.Content.ReadFromJsonAsync<OtpVerifyResponse>();
+        formattedSession!.User.UserId.Should().Be(compactSession!.User.UserId,
+            "canonical formatting variants must resolve the same session identity");
+    }
+
+    [Theory]
+    [InlineData("4155550100")]
+    [InlineData("+1234567890123456")]
+    [InlineData("+1+14155550100")]
+    public async Task Verify_InvalidPhone_PreservesGeneric401_AndNeverDialsUpstream(string phone)
+    {
+        var stub = new StubServiceOtpClient();
+        using var factory = MakeFactory(stub);
+        var http = factory.CreateClient();
+
+        var resp = await http.PostAsync("/v1/auth/otp/verify",
+            JsonBody(JsonSerializer.Serialize(new { phone, code = "1234" })));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+        (await resp.Content.ReadAsStringAsync()).Should().Contain("invalid_otp");
+        stub.ValidateCalls.Should().Be(0);
+    }
+
     // ---------------------------------------------------------------
     // helpers
     // ---------------------------------------------------------------
 
     private static WebApplicationFactory<Program> MakeFactory(
-        IServiceOTPClient stub, int maxPerPhone = 3, int maxPerIp = 10) =>
+        IServiceOTPClient stub,
+        int maxPerPhone = 3,
+        int maxPerIp = 10,
+        IPhonePolicy? phonePolicy = null,
+        bool enforceRegion = false) =>
         new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.ConfigureServices(services =>
             {
                 services.RemoveAll<IServiceOTPClient>();
                 services.AddSingleton(stub);
-                services.Configure<UpstreamFeatureFlags>(f => f.Otp = true);
+                services.RemoveAll<IUserManagementDualRoleClient>();
+                services.AddSingleton<IUserManagementDualRoleClient,
+                    Fakes.TestUserManagementDualRoleClient>();
+                if (phonePolicy is not null)
+                {
+                    services.RemoveAll<IPhonePolicy>();
+                    services.AddSingleton(phonePolicy);
+                }
+                services.Configure<UpstreamFeatureFlags>(f =>
+                {
+                    f.Otp = true;
+                    f.UserManagement = true;
+                });
                 services.Configure<OtpSignInOptions>(o =>
                 {
                     o.ApplicationId = AppId;
@@ -185,7 +378,7 @@ public class OtpPhonePolicyAndRateLimitTests
                 services.Configure<PhonePolicyOptions>(o =>
                 {
                     o.AllowedRegion = "LB";
-                    o.EnforceRegion = true;
+                    o.EnforceRegion = enforceRegion;
                 });
                 services.Configure<OtpRequestRateLimitOptions>(o =>
                 {
@@ -204,6 +397,8 @@ public class OtpPhonePolicyAndRateLimitTests
     {
         public int SendCalls { get; private set; }
         public int ValidateCalls { get; private set; }
+        public string? LastSendPhone { get; private set; }
+        public List<string?> ValidatePhones { get; } = new();
 
         public Task SendOTPAsync(SendOTPRequestUserID? body)
             => SendOTPAsync(body, CancellationToken.None);
@@ -211,6 +406,7 @@ public class OtpPhonePolicyAndRateLimitTests
         public Task SendOTPAsync(SendOTPRequestUserID? body, CancellationToken cancellationToken)
         {
             SendCalls++;
+            LastSendPhone = body?.PhoneNumber;
             return Task.CompletedTask;
         }
 
@@ -220,10 +416,22 @@ public class OtpPhonePolicyAndRateLimitTests
         public Task ValidateOTPAsync(ValidateOTPRequestModel? body, CancellationToken cancellationToken)
         {
             ValidateCalls++;
+            ValidatePhones.Add(body?.PhoneNumber);
             return Task.CompletedTask;
         }
 
         public Task UserAsync() => Task.CompletedTask;
         public Task UserAsync(CancellationToken cancellationToken) => Task.CompletedTask;
+    }
+
+    private sealed class InvalidCountryPhonePolicy : IPhonePolicy
+    {
+        public PhonePolicyResult Evaluate(string? rawPhone) => PhonePolicyResult.InvalidCountry;
+    }
+
+    private sealed class MissingCanonicalPhonePolicy : IPhonePolicy
+    {
+        public PhonePolicyResult Evaluate(string? rawPhone) =>
+            new(PhonePolicyOutcome.Allowed);
     }
 }

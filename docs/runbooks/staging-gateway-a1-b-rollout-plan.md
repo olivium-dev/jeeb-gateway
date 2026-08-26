@@ -40,9 +40,10 @@ Swarm mutation, nginx change, Cloudflare change, or staging request.
    attached to that ID, and their running tasks must resolve one another through
    Swarm DNS before the CAS. The candidate attaches only that exact network ID.
 10. Candidate semantics are validated before CAS: both OTP configuration aliases
-    use `http://jeeb-staging-one-time-password:8080`, b05 is exact, Lebanese
-    region enforcement is active, realtime uses the reviewed overlay endpoint,
-    Voice remains off, and host-port OTP/realtime aliases are absent.
+    use `http://jeeb-staging-one-time-password:8080`, b05 is exact, international
+    phone eligibility is active (`AllowedRegion=LB` is retained only for the
+    default-off emergency restriction), realtime uses the reviewed overlay
+    endpoint, Voice remains off, and host-port OTP/realtime aliases are absent.
 
 ## Phase T — topology conversion handoff (dry run only)
 
@@ -99,7 +100,7 @@ the existing digest-pinned gateway with:
 | `Services__ServiceOTP__BaseUrl` | `http://jeeb-staging-one-time-password:8080` |
 | `ServiceOTPApi__BaseUrl` | `http://jeeb-staging-one-time-password:8080` |
 | `Auth__Otp__ApplicationId` | b05 GUID `0d51afe1-499f-4a29-a55a-36d2dd223b05` |
-| OTP phone policy | `AllowedRegion=LB`, `EnforceRegion=true` |
+| OTP phone policy | international eligibility: `AllowedRegion=LB`, `EnforceRegion=false` |
 | `Services__Realtime__BaseUrl` | `http://jeeb-staging-realtime-comunication-service:4000` |
 | `SuperLogin__OpenMode` | `false` |
 | `DemoUsers__Enabled` | `false` |

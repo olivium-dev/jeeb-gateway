@@ -24,7 +24,7 @@ cat > "$candidate" <<JSON
         "FeatureFlags__UseUpstream__Realtime=false",
         "Auth__Otp__ApplicationId=0d51afe1-499f-4a29-a55a-36d2dd223b05",
         "Auth__Otp__Phone__AllowedRegion=LB",
-        "Auth__Otp__Phone__EnforceRegion=true",
+        "Auth__Otp__Phone__EnforceRegion=false",
         "Services__Realtime__BaseUrl=http://jeeb-staging-realtime-comunication-service:4000",
         "FeatureFlags__UseUpstream__Voice=false",
         "SuperLogin__OpenMode=false",
@@ -117,8 +117,8 @@ reject_mutant 'WebSocket proxy activated in A1' \
   '(.TaskTemplate.ContainerSpec.Env[15]) = "Features__RealtimeWebSocketProxy__Enabled=true"'
 reject_mutant 'wrong b05 application ID' \
   '(.TaskTemplate.ContainerSpec.Env[5]) = "Auth__Otp__ApplicationId=wrong"'
-reject_mutant 'Lebanon enforcement disabled' \
-  '(.TaskTemplate.ContainerSpec.Env[7]) = "Auth__Otp__Phone__EnforceRegion=false"'
+reject_mutant 'international eligibility disabled' \
+  '(.TaskTemplate.ContainerSpec.Env[7]) = "Auth__Otp__Phone__EnforceRegion=true"'
 reject_mutant 'Voice activated' \
   '(.TaskTemplate.ContainerSpec.Env[9]) = "FeatureFlags__UseUpstream__Voice=true"'
 reject_mutant 'case-insensitive duplicate environment key' \

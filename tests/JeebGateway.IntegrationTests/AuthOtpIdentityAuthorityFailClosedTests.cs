@@ -152,7 +152,7 @@ public sealed class AuthOtpIdentityAuthorityFailClosedTests
     }
 
     [Fact]
-    public async Task Request_NonLebaneseNumber_PreservesInvalidCountry_AndCallsNoUpstream()
+    public async Task Request_ValidInternationalNumber_IsAccepted_WithoutConsultingIdentityAuthorities()
     {
         var fixture = AuthorityFixture.Valid();
         await using var factory = MakeFactory(fixture);
@@ -162,11 +162,8 @@ public sealed class AuthOtpIdentityAuthorityFailClosedTests
             "/v1/auth/otp/request",
             JsonBody("""{ "phone": "+12025550123" }"""));
 
-        response.StatusCode.Should().Be(HttpStatusCode.BadRequest);
-        using var problem = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
-        problem.RootElement.GetProperty("type").GetString().Should()
-            .Be("https://problems.jeeb.lb/auth/invalid_country");
-        fixture.Otp.SendCalls.Should().Be(0);
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        fixture.Otp.SendCalls.Should().Be(1);
         fixture.UserManagement.FindCalls.Should().Be(0);
         fixture.Tokens.IssueCalls.Should().Be(0);
     }

@@ -74,7 +74,7 @@ def forbidden_payment_gateway_reference:
   and $environment["features__realtimewebsocketproxy__enabled"] == "false"
   and $environment["auth__otp__applicationid"] == "0d51afe1-499f-4a29-a55a-36d2dd223b05"
   and $environment["auth__otp__phone__allowedregion"] == "LB"
-  and $environment["auth__otp__phone__enforceregion"] == "true"
+  and $environment["auth__otp__phone__enforceregion"] == "false"
   and $environment["services__realtime__baseurl"] == "http://jeeb-staging-realtime-comunication-service:4000"
   and $environment["featureflags__useupstream__voice"] == "false"
   and $environment["superlogin__openmode"] == "false"

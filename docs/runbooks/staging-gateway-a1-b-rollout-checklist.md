@@ -50,8 +50,8 @@ Mode: **PREPARE ONLY — no live authority granted**
 - [x] Voice OFF.
 - [x] OTP ON.
 - [x] Both OTP base-URL aliases use exact overlay DNS, never host port.
-- [x] Exact b05 application ID and Lebanese phone enforcement are candidate and
-      post-deploy invariants.
+- [x] Exact b05 application ID and international phone eligibility
+      (`EnforceRegion=false`) are candidate and post-deploy invariants.
 - [x] Realtime base URL uses exact reviewed overlay DNS, never host port.
 - [x] Super Login open mode OFF.
 - [x] Demo users OFF.
