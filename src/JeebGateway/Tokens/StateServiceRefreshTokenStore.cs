@@ -222,7 +222,12 @@ public sealed class StateServiceRefreshTokenStore : IRefreshTokenStore
         foreach (var id in ids)
         {
             var (latest, seq) = await ResolveLatestWithSeqAsync(id, ct);
-            if (latest is null || latest.RevokedAt is not null) continue;
+            if (latest is null
+                || !string.Equals(latest.UserId, userId, StringComparison.Ordinal)
+                || latest.RevokedAt is not null)
+            {
+                continue;
+            }
 
             latest.RevokedAt = now;
             latest.RevokedReason = reason.ToString();

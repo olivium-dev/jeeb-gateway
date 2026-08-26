@@ -26,6 +26,7 @@ public sealed class LegacyPhoneSessionAccessAndDurabilityTests
 {
     private const string CanaryRoute = "/form-builder/languages";
     private const string LegacySubject = "+99999999";
+    private const string CollidingOpaqueSubject = "+99999999:partner";
     private const string OtherLegacySubject = "+88888888";
     private const string CanonicalGuid = "11111111-2222-3333-4444-555555555555";
 
@@ -136,12 +137,23 @@ public sealed class LegacyPhoneSessionAccessAndDurabilityTests
         var firstStore = NewDurableRefreshStore(kv);
         const string raw = "durable-legacy-refresh";
         const string siblingRaw = "durable-legacy-sibling";
+        const string collisionRaw = "durable-colliding-opaque";
+        const string collisionSiblingRaw = "durable-colliding-opaque-sibling";
         const string otherRaw = "durable-other-refresh";
         await firstStore.AddAsync(
             RefreshRecord("legacy-head", TokenService.HashToken(raw), LegacySubject),
             CancellationToken.None);
         await firstStore.AddAsync(
             RefreshRecord("legacy-sibling", TokenService.HashToken(siblingRaw), LegacySubject),
+            CancellationToken.None);
+        await firstStore.AddAsync(
+            RefreshRecord("collision", TokenService.HashToken(collisionRaw), CollidingOpaqueSubject),
+            CancellationToken.None);
+        await firstStore.AddAsync(
+            RefreshRecord(
+                "collision-sibling",
+                TokenService.HashToken(collisionSiblingRaw),
+                CollidingOpaqueSubject),
             CancellationToken.None);
         await firstStore.AddAsync(
             RefreshRecord("other", TokenService.HashToken(otherRaw), CanonicalGuid),
@@ -161,6 +173,11 @@ public sealed class LegacyPhoneSessionAccessAndDurabilityTests
             .RevokedReason.Should().Be(RevocationReason.LegacyPhoneSubject.ToString());
         (await coldStore.FindByHashAsync(TokenService.HashToken(siblingRaw), CancellationToken.None))!
             .RevokedReason.Should().Be(RevocationReason.LegacyPhoneSubject.ToString());
+        (await coldStore.FindByHashAsync(TokenService.HashToken(collisionRaw), CancellationToken.None))!
+            .RevokedAt.Should().BeNull("a prefix-colliding opaque subject must remain active");
+        (await coldStore.FindByHashAsync(
+            TokenService.HashToken(collisionSiblingRaw), CancellationToken.None))!
+            .RevokedAt.Should().BeNull("every prefix-colliding opaque family must remain active");
         (await coldStore.FindByHashAsync(TokenService.HashToken(otherRaw), CancellationToken.None))!
             .RevokedAt.Should().BeNull("a different canonical subject remains active");
 
@@ -172,6 +189,21 @@ public sealed class LegacyPhoneSessionAccessAndDurabilityTests
         retry.Tokens.Should().BeNull();
         kv.InsertedWrites.Should().Be(writesAfterFirstRetirement,
             "a restart and reattempt must observe persisted revocation and add no status revision");
+
+        (await coldStore.RevokeAllForUserAsync(
+            CanonicalGuid, RevocationReason.Suspended, CancellationToken.None))
+            .Should().Be(1, "ordinary exact canonical-subject revocation remains unchanged");
+        var finalStore = NewDurableRefreshStore(kv);
+        (await finalStore.FindByHashAsync(TokenService.HashToken(otherRaw), CancellationToken.None))!
+            .RevokedReason.Should().Be(RevocationReason.Suspended.ToString());
+        (await finalStore.FindByHashAsync(TokenService.HashToken(collisionRaw), CancellationToken.None))!
+            .RevokedAt.Should().BeNull("exact GUID revocation must not affect the opaque collision");
+        (await finalStore.FindByHashAsync(
+            TokenService.HashToken(collisionSiblingRaw), CancellationToken.None))!
+            .RevokedAt.Should().BeNull("the second opaque collision remains active after retries");
+        (await finalStore.RevokeAllForUserAsync(
+            CanonicalGuid, RevocationReason.Suspended, CancellationToken.None))
+            .Should().Be(0, "ordinary exact canonical-subject revocation stays idempotent");
     }
 
     private static StateServiceRefreshTokenStore NewDurableRefreshStore(IIdempotencyStore kv) =>
