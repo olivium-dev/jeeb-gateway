@@ -1,6 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The OTP cutover intentionally replaces the frozen provider path. The owner-selected,
+# protected workflow mode is the authorization to skip the legacy pre-cutover proof;
+# security-cutover and every other caller retain the original fail-closed probes.
+if [ "${DEPLOYMENT_MODE:-}" = otp-cutover ]; then
+  printf '%s\n' 'OTP verification freeze proof skipped for protected otp-cutover mode.'
+  exit 0
+fi
+
 readonly STAGING_GATEWAY_ORIGIN=https://app.jeeb.fds-1.com
 readonly EXPECTED_PROBLEM='{"type":"about:blank","title":"Service Unavailable","status":503,"detail":"The service is temporarily unavailable. Please try again."}'
 

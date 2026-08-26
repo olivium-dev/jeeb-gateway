@@ -265,16 +265,16 @@ OWNER_ERROR = (
     "no image, SSH, provider, secret, or Swarm mutation was attempted."
 )
 OWNER_RUN_LINES = (f"echo '{OWNER_ERROR}' >&2", "exit 1")
-SECURITY_CUTOVER_OWNER_IF = "${{ inputs.deployment_mode != 'security-cutover' }}"
+SECURITY_CUTOVER_OWNER_IF = "${{ inputs.deployment_mode == 'normal' }}"
 SECURITY_CUTOVER_INPUT = {
     "description": "Protected staging deployment mode",
     "required": True,
     "default": "normal",
     "type": "choice",
-    "options": ["normal", "security-cutover"],
+    "options": ["normal", "security-cutover", "otp-cutover"],
 }
-SECURITY_CUTOVER_GATE_NAME = "Require designated security-cutover owner"
-SECURITY_CUTOVER_GATE_IF = "${{ inputs.deployment_mode == 'security-cutover' }}"
+SECURITY_CUTOVER_GATE_NAME = "Require designated cutover owner"
+SECURITY_CUTOVER_GATE_IF = "${{ inputs.deployment_mode != 'normal' }}"
 SECURITY_CUTOVER_GATE_ENV = {
     "REQUESTING_ACTOR": "${{ github.actor }}",
     "TRIGGERING_ACTOR": "${{ github.triggering_actor }}",
@@ -283,7 +283,7 @@ SECURITY_CUTOVER_GATE_LINES = (
     "set -euo pipefail",
     'if [ "$REQUESTING_ACTOR" != oudaykhaled ] \\',
     '  || [ "$TRIGGERING_ACTOR" != oudaykhaled ]; then',
-    "  echo '::error::Security cutover requires the designated owner.' >&2",
+    "  echo '::error::Staging cutovers require the designated owner.' >&2",
     "  exit 1",
     "fi",
 )
@@ -437,7 +437,7 @@ def validate_workflow_authority(name, document):
                     rejected.returncode != 1
                     or rejected.stdout
                     or rejected.stderr
-                    != "::error::Security cutover requires the designated owner.\n"
+                    != "::error::Staging cutovers require the designated owner.\n"
                     or actor in rejected.stderr
                     or triggering_actor in rejected.stderr
                 ):

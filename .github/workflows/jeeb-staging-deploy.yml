@@ -22,6 +22,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  DEPLOYMENT_MODE: ${{ inputs.deployment_mode }}
   IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
   IMAGE_TAG: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:${{ github.sha }}
   REMOTE_DOCKER_CONFIG: .jeeb-deploy/ghcr-${{ github.run_id }}-${{ github.run_attempt }}
