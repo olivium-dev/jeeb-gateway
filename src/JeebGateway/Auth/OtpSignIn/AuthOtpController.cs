@@ -115,9 +115,9 @@ public sealed class AuthOtpController : ControllerBase
                 "Invalid phone number", "phone is required.");
         }
 
-        // F-E (S02, JEB-37) — gateway-local phone admission policy, evaluated
-        // BEFORE the upstream is dialed (no upstream change). Parse-first so a
-        // malformed number is invalid_phone, not invalid_country (N4 vs N3).
+        // Gateway-local E.164 admission policy, evaluated BEFORE the upstream
+        // is dialed. The legacy invalid_country branch remains part of the wire
+        // contract, while the production policy admits every valid country.
         var policy = _phonePolicy.Evaluate(body.Phone);
         switch (policy.Outcome)
         {
@@ -129,11 +129,18 @@ public sealed class AuthOtpController : ControllerBase
                     "Unsupported country", "Sign-in is currently available only for Lebanese (LB) phone numbers.");
         }
 
+        var canonicalPhone = policy.CanonicalPhone;
+        if (string.IsNullOrWhiteSpace(canonicalPhone))
+        {
+            return OtpSignInProblems.Problem(this, StatusCodes.Status400BadRequest, "invalid_phone",
+                "Invalid phone number", "The phone number is not a valid E.164 number.");
+        }
+
         // F-E burst guard — per-IP AND per-phone sliding window. A throttled
         // request trips 429 rate_limited and MUST NOT dial the upstream (so a
         // throttle never costs an SMS; assertion-provable: SendOTP not called).
         var clientIp = JeebGateway.Security.RateLimitingExtensions.ResolveClientIp(HttpContext);
-        if (!_rateLimiter.TryAcquire(clientIp, body.Phone))
+        if (!_rateLimiter.TryAcquire(clientIp, canonicalPhone))
         {
             return OtpSignInProblems.Problem(this, StatusCodes.Status429TooManyRequests, "rate_limited",
                 "Too many requests", "Too many OTP requests. Please wait before requesting another code.");
@@ -143,7 +150,7 @@ public sealed class AuthOtpController : ControllerBase
         {
             await _otpClient.SendOTPAsync(new SendOTPRequestUserID
             {
-                PhoneNumber = body.Phone!,
+                PhoneNumber = canonicalPhone,
                 ApplicationId = _options.Value.ApplicationId,
             }, ct);
 
@@ -201,11 +208,22 @@ public sealed class AuthOtpController : ControllerBase
                 "Invalid code", "The OTP code is missing or empty.");
         }
 
+        // Verify uses the same public-ingress policy as request so the OTP row,
+        // rate-limit key, and identity key cannot diverge by formatting. Keep
+        // the verify route's frozen generic 401 contract for invalid input.
+        var policy = _phonePolicy.Evaluate(body.Phone);
+        var canonicalPhone = policy.CanonicalPhone;
+        if (!policy.IsAllowed || string.IsNullOrWhiteSpace(canonicalPhone))
+        {
+            return OtpSignInProblems.Problem(this, StatusCodes.Status401Unauthorized, "invalid_otp",
+                "Invalid code", "The OTP code is incorrect or expired.");
+        }
+
         try
         {
             await _otpClient.ValidateOTPAsync(new ValidateOTPRequestModel
             {
-                PhoneNumber = body.Phone!,
+                PhoneNumber = canonicalPhone,
                 Otp = body.Code!,
                 ApplicationId = _options.Value.ApplicationId,
             }, ct);
@@ -249,7 +267,7 @@ public sealed class AuthOtpController : ControllerBase
         // for the response body and STILL signs the sign-in session itself (the JWT
         // mint is orchestration and stays in the gateway — N11 split-signer: only the
         // role-switch path is UM-signed).
-        var key = (body.Phone ?? string.Empty).Trim();
+        var key = canonicalPhone;
         var (userId, opaqueRoles, opaqueActiveRole) = await ResolveIdentityAsync(key, ct);
 
         // Suspension used to be enforced ONLY on [RequireActiveUser] endpoints, so a
