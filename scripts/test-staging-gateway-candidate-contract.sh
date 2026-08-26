@@ -7,6 +7,7 @@ test_root=$(mktemp -d)
 trap 'rm -rf -- "$test_root"' EXIT
 candidate="$test_root/candidate.json"
 mutant="$test_root/mutant.json"
+cutover="$test_root/cutover.json"
 image=repo@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 network_id=networkabc
 
@@ -47,8 +48,10 @@ cat > "$candidate" <<JSON
 JSON
 
 validate() {
+  local document=$1 mode=${2:-normal}
   jq -e --arg image "$image" --arg network_id "$network_id" \
-    --argjson published 10000 -f "$contract" "$1" >/dev/null
+    --argjson published 10000 --arg deployment_mode "$mode" \
+    -f "$contract" "$document" >/dev/null
 }
 
 reject_mutant() {
@@ -70,6 +73,32 @@ accept_mutant() {
 }
 
 validate "$candidate"
+jq '
+  .UpdateConfig = {
+    Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"stop-first"
+  }
+  | .RollbackConfig = {
+    Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"stop-first"
+  }
+' "$candidate" > "$cutover"
+validate "$cutover" security-cutover
+if validate "$candidate" security-cutover || validate "$cutover" normal \
+  || validate "$cutover" invalid-mode; then
+  echo 'deployment-mode candidate separation is not fail-closed' >&2
+  exit 1
+fi
+for unsafe_filter in \
+  '.UpdateConfig.Parallelism = 2' \
+  '.UpdateConfig.Monitor = 19999999999' \
+  '.UpdateConfig.FailureAction = "rollback"' \
+  '.UpdateConfig.Order = "start-first"' \
+  '.RollbackConfig.Order = "start-first"'; do
+  jq "$unsafe_filter" "$cutover" > "$mutant"
+  if validate "$mutant" security-cutover; then
+    echo "security-cutover contract accepted unsafe mutant: $unsafe_filter" >&2
+    exit 1
+  fi
+done
 accept_mutant 'unrelated upgrade key and hostname contain a non-token UPG substring' \
   '.TaskTemplate.ContainerSpec.Env += ["Services__UpgradePolicy__BaseUrl=http://upgrade.internal"]'
 accept_mutant 'unrelated backup-gateway word contains a non-token UPG substring' \
@@ -127,4 +156,4 @@ reject_mutant 'mixed-case connection-string password' \
 reject_mutant 'URL-embedded credential' \
   '.TaskTemplate.ContainerSpec.Env += ["Database__ConnectionString=postgres://user:password@db/jeeb"]'
 
-echo 'staging gateway candidate semantic contract tests: PASS (3 positive, 25 negative)'
+echo 'staging gateway candidate semantic contract tests: PASS (4 positive, 33 negative)'

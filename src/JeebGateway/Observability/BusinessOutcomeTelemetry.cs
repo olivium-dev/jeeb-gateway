@@ -28,6 +28,19 @@ public static class BusinessOutcomeTelemetry
         Meter.CreateCounter<long>("auth.refresh.concurrent_grace_accepted",
             description: "Number of benign concurrent refresh double-uses accepted within the rotation grace window (JEBV4-260) — the loser's request did NOT burn the token family, so the concurrent winner's session was preserved. Watch this vs auth.refresh.reuse_detected to gauge benign-collision frequency.");
 
+    public static readonly Counter<long> LegacySessionRejections =
+        Meter.CreateCounter<long>("auth.session.legacy_phone_rejections",
+            description: "Retired legacy phone-subject access/refresh rejections and best-effort revocation failures, tagged only by a bounded reason.");
+
+    public static void RecordLegacySessionRejection(LegacySessionRejectionReason reason) =>
+        LegacySessionRejections.Add(1, new KeyValuePair<string, object?>("reason", reason switch
+        {
+            LegacySessionRejectionReason.AccessTokenLegacySubject => "access_legacy_subject",
+            LegacySessionRejectionReason.RefreshTokenLegacySubject => "refresh_legacy_subject",
+            LegacySessionRejectionReason.RevocationFailure => "revocation_failure",
+            _ => throw new ArgumentOutOfRangeException(nameof(reason), reason, null),
+        }));
+
     public static readonly Counter<long> HandoverEscalations =
         Meter.CreateCounter<long>("handover.escalations",
             description: "Number of admin handover escalations triggered by the gateway.");
@@ -102,4 +115,12 @@ public static class BusinessOutcomeTelemetry
     public static readonly Counter<long> CommissionStampFailures =
         Meter.CreateCounter<long>("settlement.commission.stamp_failures",
             description: "Fees that WERE collected but whose wallet transaction id could not be stamped onto the settlement row. Reconcile from the wallet ledger.");
+}
+
+/// <summary>Closed, low-cardinality vocabulary for retired-session telemetry.</summary>
+public enum LegacySessionRejectionReason
+{
+    AccessTokenLegacySubject,
+    RefreshTokenLegacySubject,
+    RevocationFailure,
 }

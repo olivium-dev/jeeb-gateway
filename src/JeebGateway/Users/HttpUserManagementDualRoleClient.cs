@@ -44,13 +44,12 @@ public sealed class HttpUserManagementDualRoleClient : IUserManagementDualRoleCl
         var dto = await resp.Content.ReadFromJsonAsync<PhoneFindOrCreateBodyResponse>(Json, ct)
             ?? throw new UserManagementCallException("phone/find-or-create", (int)HttpStatusCode.BadGateway);
 
-        // JEB-1480 (GR2): the shared user-management phone-identity endpoint is now
-        // IDENTITY-ONLY ({ userId, isNew, phone }) and performs NO role/claim shaping.
-        // The DEFAULT role ("customer") is decorated HERE; the user's FULL persisted
-        // role set (available_roles + active_role) is read separately via
-        // GetUserRolesAsync (GET /api/User/{userId}/roles) so an OTP login reflects an
-        // already-granted driver role (JEEBER-SPINE Defect 1). A freshly resolved
-        // identity with no roles row defaults to the gateway's single 'customer' role.
+        // JEB-1480 (GR2): this UM response is IDENTITY-ONLY ({ userId, isNew, phone }).
+        // A fresh UM create persists customer/customer on the same row before its 200.
+        // These customer fields are retained only as backward-compatible decoration for
+        // older non-security consumers of this seam. OTP security consumers ignore them,
+        // require a separate matching GetUserRolesAsync result, and fail closed if that
+        // authoritative read is unavailable; they never synthesize a caller-local default.
         return new PhoneFindOrCreateResult(
             dto.UserId ?? string.Empty,
             dto.IsNew,
@@ -63,8 +62,9 @@ public sealed class HttpUserManagementDualRoleClient : IUserManagementDualRoleCl
         // JEEBER-SPINE Defect 1 — read the user's PERSISTED role set so a gateway-minted
         // OTP session reflects an already-granted driver role (and the DB-set active_role)
         // WITHOUT inventing it. UM is the authority; the gateway only reads + projects.
-        // A 404 (no roles row yet) or any non-success is non-fatal: the caller keeps the
-        // safe default ('customer'), so a UM blip never hard-breaks an OTP login.
+        // Because a fresh successful create has already persisted roles on the same UM row,
+        // a 404 or any non-success is authority drift/unavailability, not an expected new-user
+        // state. It is surfaced as absent; security-sensitive callers fail closed.
         using var resp = await _http.GetAsync($"api/User/{Uri.EscapeDataString(userId)}/roles", ct);
 
         if (resp.StatusCode == HttpStatusCode.NotFound)
@@ -75,8 +75,8 @@ public sealed class HttpUserManagementDualRoleClient : IUserManagementDualRoleCl
         if (!resp.IsSuccessStatusCode)
         {
             _log.LogWarning(
-                "user-management get-roles returned {Status} for userId={UserId}",
-                (int)resp.StatusCode, userId);
+                "user-management get-roles returned {Status}",
+                (int)resp.StatusCode);
             return null;
         }
 
@@ -88,7 +88,10 @@ public sealed class HttpUserManagementDualRoleClient : IUserManagementDualRoleCl
 
         var roles = dto.AvailableRoles is { Length: > 0 } ? dto.AvailableRoles : Array.Empty<string>();
         var active = string.IsNullOrWhiteSpace(dto.ActiveRole) ? null : dto.ActiveRole;
-        return new UserRolesResult(dto.UserId ?? userId, roles, active);
+        // Do not replace a missing response identity with the requested identity. That
+        // would make malformed authority data indistinguishable from confirmed data to
+        // the OTP session-mint boundary. Other consumers retain the same nullable result.
+        return new UserRolesResult(dto.UserId ?? string.Empty, roles, active);
     }
 
     public async Task<RoleSwitchReissueResult> RoleSwitchAsync(string userId, string opaqueRole, CancellationToken ct)

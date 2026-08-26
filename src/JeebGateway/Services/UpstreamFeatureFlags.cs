@@ -229,13 +229,12 @@ public sealed class UpstreamFeatureFlags
     /// service as the identity authority (phone-keyed find-or-create + token-reissuing
     /// role switch) instead of the gateway-local in-memory identity.
     ///
-    /// Defaults <b>false</b> so existing fixtures keep exercising the in-memory path.
-    /// <c>appsettings.Production.json</c> flips it <b>true</b> for Jeeb. F-C degrades
-    /// SAFELY when UM is unreachable: a transient upstream fault on find-or-create
-    /// falls back to the legacy in-memory identity so a live OTP login is never hard-
-    /// broken by a UM blip (the session is still gateway-minted either way). F-A/F-B
-    /// require the flag on — they are net-new routes that 404 today, so there is no
-    /// behavior to preserve when off.
+    /// Defaults <b>false</b>; <c>appsettings.Production.json</c> flips it <b>true</b>
+    /// for Jeeb. F-C fails closed with <c>identity_unavailable</c> when the flag is
+    /// off or UM cannot establish canonical identity, roles, and account state. It
+    /// never falls back to gateway-local identity or mints a session under uncertain
+    /// authority. F-A/F-B require the flag on — they are net-new routes that 404
+    /// today, so there is no behavior to preserve when off.
     /// </summary>
     public bool UserManagement { get; set; }
 

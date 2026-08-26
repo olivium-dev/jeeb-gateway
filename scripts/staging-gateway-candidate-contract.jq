@@ -47,10 +47,25 @@ def forbidden_payment_gateway_reference:
   and $ports[0].PublishMode == "ingress"
   and .EndpointSpec.Mode == "vip"
   and .Mode.Replicated.Replicas == 1
-  and .UpdateConfig.Order == "start-first"
-  and .UpdateConfig.FailureAction == "rollback"
-  and .RollbackConfig.Order == "start-first"
-  and .RollbackConfig.FailureAction == "pause"
+  and (
+    if $deployment_mode == "normal" then
+      .UpdateConfig.Order == "start-first"
+      and .UpdateConfig.FailureAction == "rollback"
+      and .RollbackConfig.Order == "start-first"
+      and .RollbackConfig.FailureAction == "pause"
+    elif $deployment_mode == "security-cutover" then
+      .UpdateConfig.Parallelism == 1
+      and .UpdateConfig.Monitor == 20000000000
+      and .UpdateConfig.Order == "stop-first"
+      and .UpdateConfig.FailureAction == "pause"
+      and .RollbackConfig.Parallelism == 1
+      and .RollbackConfig.Monitor == 20000000000
+      and .RollbackConfig.Order == "stop-first"
+      and .RollbackConfig.FailureAction == "pause"
+    else
+      false
+    end
+  )
   and $environment["services__serviceotp__baseurl"] == "http://jeeb-staging-one-time-password:8080"
   and $environment["serviceotpapi__baseurl"] == "http://jeeb-staging-one-time-password:8080"
   and $environment["featureflags__useupstream__otp"] == "true"

@@ -80,7 +80,7 @@ public sealed class SessionMintSuspensionGateTests
 
         using var doc = JsonDocument.Parse(raw);
         doc.RootElement.GetProperty("type").GetString().Should()
-            .Be("https://problems.jeeb.lb/auth/moderation_unavailable");
+            .Be("https://problems.jeeb.lb/auth/identity_unavailable");
     }
 
     // -----------------------------------------------------------------
