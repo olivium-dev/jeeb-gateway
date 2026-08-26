@@ -48,7 +48,7 @@ def forbidden_payment_gateway_reference:
   and .EndpointSpec.Mode == "vip"
   and .Mode.Replicated.Replicas == 1
   and (
-    if $deployment_mode == "normal" then
+    if ($deployment_mode == "normal" or $deployment_mode == "otp-cutover") then
       .UpdateConfig.Order == "start-first"
       and .UpdateConfig.FailureAction == "rollback"
       and .RollbackConfig.Order == "start-first"
@@ -75,6 +75,20 @@ def forbidden_payment_gateway_reference:
   and $environment["auth__otp__applicationid"] == "0d51afe1-499f-4a29-a55a-36d2dd223b05"
   and $environment["auth__otp__phone__allowedregion"] == "LB"
   and $environment["auth__otp__phone__enforceregion"] == "false"
+  and (
+    if $deployment_mode == "otp-cutover" then
+      $environment["serviceauth__enabled"] == "true"
+      and $environment["serviceauth__caller"] == "jeeb-gateway"
+      and $environment["serviceauth__signingkeyfile"] == "/run/secrets/jeeb_gateway_service_auth"
+      and any(
+        .TaskTemplate.ContainerSpec.Secrets[]?;
+        .File.Name == "jeeb_gateway_service_auth"
+        and .File.Mode == 256
+      )
+    else
+      true
+    end
+  )
   and $environment["services__realtime__baseurl"] == "http://jeeb-staging-realtime-comunication-service:4000"
   and $environment["featureflags__useupstream__voice"] == "false"
   and $environment["superlogin__openmode"] == "false"

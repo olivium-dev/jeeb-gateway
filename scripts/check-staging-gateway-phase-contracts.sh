@@ -83,6 +83,7 @@ expected_dispatch = '''name: jeeb-staging-deploy
         options:
           - normal
           - security-cutover
+          - otp-cutover
 
 '''
 if dispatch_header != expected_dispatch:

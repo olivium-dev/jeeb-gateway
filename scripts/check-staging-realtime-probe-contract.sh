@@ -275,6 +275,7 @@ def validate_bootstrap_workflow(text):
         options:
           - normal
           - security-cutover
+          - otp-cutover
 
 '''
     if dispatch_header != expected_dispatch:

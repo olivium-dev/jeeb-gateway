@@ -8,6 +8,7 @@ trap 'rm -rf -- "$test_root"' EXIT
 candidate="$test_root/candidate.json"
 mutant="$test_root/mutant.json"
 cutover="$test_root/cutover.json"
+otp_cutover="$test_root/otp-cutover.json"
 image=repo@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 network_id=networkabc
 
@@ -87,6 +88,29 @@ if validate "$candidate" security-cutover || validate "$cutover" normal \
   echo 'deployment-mode candidate separation is not fail-closed' >&2
   exit 1
 fi
+jq '
+  .TaskTemplate.ContainerSpec.Env += [
+    "ServiceAuth__Enabled=true",
+    "ServiceAuth__Caller=jeeb-gateway",
+    "ServiceAuth__SigningKeyFile=/run/secrets/jeeb_gateway_service_auth"
+  ]
+  | .TaskTemplate.ContainerSpec.Secrets = [{
+      SecretID:"secretid",SecretName:"rotated-service-auth",
+      File:{Name:"jeeb_gateway_service_auth",UID:"65532",GID:"65532",Mode:256}
+    }]
+' "$candidate" > "$otp_cutover"
+validate "$otp_cutover" otp-cutover
+for unsafe_filter in \
+  'del(.TaskTemplate.ContainerSpec.Env[-1])' \
+  '(.TaskTemplate.ContainerSpec.Env[-1]) = "ServiceAuth__SigningKey=inline-secret"' \
+  'del(.TaskTemplate.ContainerSpec.Secrets)' \
+  '.TaskTemplate.ContainerSpec.Secrets[0].File.Mode = 292'; do
+  jq "$unsafe_filter" "$otp_cutover" > "$mutant"
+  if validate "$mutant" otp-cutover; then
+    echo "otp-cutover contract accepted unsafe mutant: $unsafe_filter" >&2
+    exit 1
+  fi
+done
 for unsafe_filter in \
   '.UpdateConfig.Parallelism = 2' \
   '.UpdateConfig.Monitor = 19999999999' \
@@ -156,4 +180,4 @@ reject_mutant 'mixed-case connection-string password' \
 reject_mutant 'URL-embedded credential' \
   '.TaskTemplate.ContainerSpec.Env += ["Database__ConnectionString=postgres://user:password@db/jeeb"]'
 
-echo 'staging gateway candidate semantic contract tests: PASS (4 positive, 33 negative)'
+echo 'staging gateway candidate semantic contract tests: PASS (5 positive, 37 negative)'
