@@ -28,8 +28,8 @@ ENV_COMMON=(
   "Jwt__SigningKey=zero-dsn-smoke-signing-key-not-for-prod-aaaaaaaaaaaaaaaaaaaaaaaa"
   "UmJwt__SigningKey=zero-dsn-smoke-um-signing-key-not-for-prod-aaaaaaaaaaaaaaaaaaaa"
   "Security__PhoneHash__Pepper=zero-dsn-smoke-pepper"
-  "SuperLogin__OpenMode=false"
-  "DemoUsers__Enabled=false"
+  "SuperLogin__OpenMode=true"
+  "DemoUsers__Enabled=true"
   "Features__DevEndpoints__Enabled=false"
 )
 ENV_DSNS=(
