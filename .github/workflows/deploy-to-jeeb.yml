@@ -179,6 +179,34 @@ on:
           - 'preserve'
           - 'true'
           - 'false'
+      # Super-Login+ DEMO roster (SuperLogin:OpenMode). Gates the ANONYMOUS
+      # GET /api/User/super-login/users user-picker roster in UserController, which
+      # 404s unless BOTH SuperLogin:OpenMode AND DemoUsers:Enabled are true.
+      # OpenMode defaults FALSE in code and appears in no appsettings file, so a
+      # flag-unset deploy can never enumerate users anonymously (SEC-13).
+      #
+      # Owner directive 2026-08-27: "the dev apis like super login plus must be
+      # available for staging". This input is the ONLY supported way to set it —
+      # never via a manual `docker service update --env-add` from an operator
+      # shell, and never committed to an appsettings file.
+      #
+      # READ THIS BEFORE SETTING true: the roster endpoint is [AllowAnonymous]
+      # and jeeb.fds-1.com is PUBLIC, so `true` exposes an unauthenticated user
+      # roster to anyone who can reach the host. That is acceptable for a staging
+      # demo surface by owner ruling; it is NOT acceptable for production.
+      #   'preserve' (DEFAULT)  => no mutation; existing state persists across
+      #                            `docker service update --image ...`.
+      #   'true'                => env-add  SuperLogin__OpenMode=true
+      #   'false'               => env-rm   SuperLogin__OpenMode   (scrub => 404)
+      super_login_open_mode:
+        description: 'Super-Login+ demo roster (SuperLogin__OpenMode). preserve (default) = leave as-is; true = enable ANONYMOUS roster; false = scrub (404).'
+        required: false
+        default: 'preserve'
+        type: choice
+        options:
+          - 'preserve'
+          - 'true'
+          - 'false'
       # Swagger UI / OpenAPI surface (/swagger*). This input is the ONLY supported way to
       # toggle Features__Swagger__Enabled on the running gateway — never set it via a manual
       # `docker service update --env-add/--env-rm` from an operator shell, and never commit
@@ -453,6 +481,23 @@ jobs:
               echo "dev_endpoints=preserve -> (no dev-flag mutation; existing /dev/* state persists)"
               ;;
           esac
+
+          # Super-Login+ demo roster (SuperLogin__OpenMode). Same three-state
+          # semantics as dev_endpoints. Applied on the same stop-first update.
+          case "${{ inputs.super_login_open_mode }}" in
+            true)
+              SUPERLOGIN_FLAG_ARG="--env-add SuperLogin__OpenMode=true"
+              echo "super_login_open_mode=true     -> $SUPERLOGIN_FLAG_ARG  (ANONYMOUS /api/User/super-login/users roster ON)"
+              ;;
+            false)
+              SUPERLOGIN_FLAG_ARG="--env-rm SuperLogin__OpenMode"
+              echo "super_login_open_mode=false    -> $SUPERLOGIN_FLAG_ARG  (roster scrubbed -> 404)"
+              ;;
+            *)
+              SUPERLOGIN_FLAG_ARG=""
+              echo "super_login_open_mode=preserve -> (no mutation; existing roster state persists)"
+              ;;
+          esac
           # Swagger /swagger* flag, controlled EXCLUSIVELY by the swagger_ui input (3-state),
           # mirroring dev_endpoints. preserve => no mutation (current state persists across the
           # --image update). true => env-add (admin-gated /swagger* ON). false => env-rm (404).
@@ -620,6 +665,7 @@ jobs:
               $FEATURE_FLAG_ARGS \
               $DEV_FLAG_ARG \
               $SWAGGER_FLAG_ARG \
+              $SUPERLOGIN_FLAG_ARG \
               "\${state_secret_args[@]}" \
               "\$SVC"
           [ "\$(docker service inspect "\$SVC" \
