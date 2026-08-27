@@ -28,8 +28,8 @@ cat > "$candidate" <<JSON
         "Auth__Otp__Phone__EnforceRegion=false",
         "Services__Realtime__BaseUrl=http://jeeb-staging-realtime-comunication-service:4000",
         "FeatureFlags__UseUpstream__Voice=false",
-        "SuperLogin__OpenMode=false",
-        "DemoUsers__Enabled=false",
+        "SuperLogin__OpenMode=true",
+        "DemoUsers__Enabled=true",
         "ForwardedHeaders__KnownProxies__0=172.18.0.1",
         "Jwt__SigningKeyFile=/run/secrets/jeeb_gateway_jwt",
         "ServiceNotificationClient__ServiceTokenFile=/run/secrets/notification_service_token",
@@ -153,8 +153,12 @@ reject_mutant 'invalid forwarded proxy value' \
   '(.TaskTemplate.ContainerSpec.Env[12]) = "ForwardedHeaders__KnownProxies__0=not-an-ip"'
 reject_mutant 'out-of-range forwarded proxy octet' \
   '(.TaskTemplate.ContainerSpec.Env[12]) = "ForwardedHeaders__KnownProxies__0=999.18.0.1"'
-reject_mutant 'Super Login opened' \
-  '(.TaskTemplate.ContainerSpec.Env[10]) = "SuperLogin__OpenMode=true"'
+# Owner ruling 2026-08-27: Super Login IS open on staging. The mutant keeps
+# its MECHANISM — any drift from the pinned Spec must be rejected — and only
+# flips polarity to match the new pinned value. Deleting it would have removed
+# drift detection on this env slot entirely.
+reject_mutant 'Super Login closed' \
+  '(.TaskTemplate.ContainerSpec.Env[10]) = "SuperLogin__OpenMode=false"'
 reject_mutant 'mixed-case unified payment gateway key' \
   '.TaskTemplate.ContainerSpec.Env += ["uNiFiEdPaYmEnTgAtEwAy__BaSeUrL=http://gateway.invalid"]'
 reject_mutant 'mixed-case unified payment gateway destination' \
