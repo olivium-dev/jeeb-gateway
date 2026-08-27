@@ -33,7 +33,7 @@ def read_contract(path):
 
 expected_a1 = {
     "ASPNETCORE_ENVIRONMENT": "Staging",
-    "DemoUsers__Enabled": "false",
+    "DemoUsers__Enabled": "true",
     "FeatureFlags__UseUpstream__Chat": "false",
     "FeatureFlags__UseUpstream__Otp": "true",
     "FeatureFlags__UseUpstream__Realtime": "false",
@@ -46,7 +46,7 @@ expected_a1 = {
     "Auth__Otp__Phone__EnforceRegion": "false",
     "Services__Realtime__BaseUrl": "http://jeeb-staging-realtime-comunication-service:4000",
     "Operations__RealtimeProbe__MintKeyFile": "/run/secrets/staging_wss_probe_mint_key",
-    "SuperLogin__OpenMode": "false",
+    "SuperLogin__OpenMode": "true",
 }
 expected_b = dict(expected_a1)
 for activated in (

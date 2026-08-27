@@ -425,8 +425,8 @@ jobs:
                   Auth__Otp__Phone__AllowedRegion=LB
                   Auth__Otp__Phone__EnforceRegion=false
                   Services__Realtime__BaseUrl=http://jeeb-staging-realtime-comunication-service:4000
-                  SuperLogin__OpenMode=false
-                  DemoUsers__Enabled=false
+                  SuperLogin__OpenMode=true
+                  DemoUsers__Enabled=true
                   Operations__RealtimeProbe__MintKeyFile=/run/secrets/staging_wss_probe_mint_key
                   ASPNETCORE_ENVIRONMENT=Staging
                 )
@@ -891,8 +891,8 @@ jobs:
               add_env UmJwt__Issuer user-management
               add_env UmJwt__Audience user-management
               add_env AdminOidc__Enabled false
-              add_env SuperLogin__OpenMode false
-              add_env DemoUsers__Enabled false
+              add_env SuperLogin__OpenMode true
+              add_env DemoUsers__Enabled true
               add_env Security__TokenMint__Enabled true
               # Canonical publication is ingress mode. docker_gwbridge is only a
               # prepared proxy candidate: independent live request-source evidence

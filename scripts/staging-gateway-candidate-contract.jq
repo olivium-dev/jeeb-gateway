@@ -91,8 +91,12 @@ def forbidden_payment_gateway_reference:
   )
   and $environment["services__realtime__baseurl"] == "http://jeeb-staging-realtime-comunication-service:4000"
   and $environment["featureflags__useupstream__voice"] == "false"
-  and $environment["superlogin__openmode"] == "false"
-  and $environment["demousers__enabled"] == "false"
+  # Owner ruling 2026-08-27: the dev APIs — Super Login Plus among them — must be
+  # available on STAGING. Still asserted EXACTLY, so the candidate Spec cannot
+  # drift or omit them; only the required value moved. Production uses a
+  # different deploy path and a different contract.
+  and $environment["superlogin__openmode"] == "true"
+  and $environment["demousers__enabled"] == "true"
   and ($environment["forwardedheaders__knownproxies__0"]
     | split(".") as $octets
     | ($octets | length) == 4

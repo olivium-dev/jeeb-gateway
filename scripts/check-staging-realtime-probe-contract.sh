@@ -185,8 +185,15 @@ def validate_bootstrap_workflow(text):
         "add_env Auth__Otp__Phone__EnforceRegion false",
         "add_env Auth__Otp__ApplicationId 0d51afe1-499f-4a29-a55a-36d2dd223b05",
         "add_env Services__Realtime__BaseUrl http://jeeb-staging-realtime-comunication-service:4000",
-        "add_env SuperLogin__OpenMode false",
-        "add_env DemoUsers__Enabled false",
+        # Owner ruling 2026-08-27: the dev APIs — Super Login Plus among them —
+        # must be available on STAGING (the Dev Tool ships to staging, never to
+        # production). These two markers stay PINNED rather than being deleted:
+        # the invariant they enforce is "staging sets these explicitly, never by
+        # drift or default", and that still holds. Only the pinned value moves.
+        # Flipping either back to false is a one-line change here plus the three
+        # sites in jeeb-staging-deploy.yml / deploy/staging-gateway/*.env.
+        "add_env SuperLogin__OpenMode true",
+        "add_env DemoUsers__Enabled true",
         "capture_remote_spec() {",
         "docker service inspect '$service' --format '{{json .Spec}}'",
         "docker service inspect '$service' --format '{{.ID}} {{.Version.Index}}'",

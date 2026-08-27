@@ -405,6 +405,7 @@ GatewayPostgres:ConnectionString                     setting - # DSN, deleted in
 GatewayRateLimit:RedisConnectionString               setting - # DSN
 NotificationCatalogSeeder:Enabled                    setting - # env-only seeder switch, in no appsettings file
 PushNotificationServiceApi:InternalApiKey            setting - # SECRET: push-service internal key
+ServiceAuth:SigningKeyFile                           setting - # SECRET: BFF service-auth signing key PATH (file ref, not the key)
 ServiceNotificationClient:ApiToken                   setting - # SECRET: notification-service token, read via a const key
 Services:JeebState:BaseUrl                           setting - # legacy alias of JeebStateService:BaseUrl
 Services:ServiceOTP                                  setting -
