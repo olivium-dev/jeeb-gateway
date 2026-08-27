@@ -150,7 +150,11 @@ jobs:
 
           old_secret=$(docker service inspect "$service" --format '{{range .Spec.TaskTemplate.ContainerSpec.Secrets}}{{if eq .File.Name "jeeb_gateway_service_auth"}}{{.SecretName}}{{end}}{{end}}')
           set -- docker service update --image "$image" --with-registry-auth
-          set -- "$@" --update-order start-first --update-failure-action rollback --update-monitor 20s
+          # Forward-only deployment policy: no automatic rollback. A failed
+          # update must FAIL VISIBLY and be corrected by a forward deploy, not
+          # silently reverted to an unknown prior state. `pause` stops the
+          # rollout at the first bad task and leaves it observable.
+          set -- "$@" --update-order start-first --update-failure-action pause --update-monitor 20s
           set -- "$@" \
             --env-add Auth__Otp__ApplicationId=0d51afe1-499f-4a29-a55a-36d2dd223b05 \
             --env-add Auth__Otp__Phone__EnforceRegion=false \
