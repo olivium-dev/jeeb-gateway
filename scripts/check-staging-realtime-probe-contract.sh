@@ -208,9 +208,8 @@ def validate_bootstrap_workflow(text):
         'cmp -s "$pre_update_id" "$incumbent_id"',
         "verify_exact_candidate_after_checks() {",
         'capture_remote_spec "$final_spec" "$final_version" "$final_id"',
-        'staging_gateway_specs_equal "$final_spec" "$candidate_spec"',
-        'cmp -s "$final_version" "$candidate_version"',
-        'cmp -s "$final_id" "$candidate_id"',
+        'scripts/staging-gateway-terminal-candidate-check.sh',
+        '"$DEPLOYMENT_MODE"',
         "write_snapshot_manifest() {",
         '"$incumbent_spec" "$incumbent_version" "$incumbent_id" "$incumbent_manifest"',
         'SecretNames: ([',
@@ -267,7 +266,11 @@ def validate_bootstrap_workflow(text):
         "inputs.deployment_mode != 'devtool-reassert'",
         "scripts/staging-gateway-devtool-reassert-candidate.jq",
         "scripts/staging-gateway-incumbent-devtool-posture.jq",
-        "probe-staging-public-gateway-contract.sh posture",
+        "posture_mode=posture",
+        "posture_mode=devtool-posture",
+        "scripts/staging-gateway-public-edge-backoff.sh \\",
+        'scripts/probe-staging-public-gateway-contract.sh "$posture_mode"',
+        '|| return 1',
         "scripts/staging-gateway-public-edge-backoff.sh",
         "scripts/test-super-login.sh https://app.jeeb.fds-1.com",
     )
@@ -576,6 +579,10 @@ negative_controls = (
         workflow.replace("          verify_exact_candidate_after_checks\n", "", 1),
     ),
     (
+        "terminal candidate semantic helper removed",
+        workflow.replace("              bash scripts/staging-gateway-terminal-candidate-check.sh \\\n", "              return 0\n", 1),
+    ),
+    (
         "case-insensitive duplicate bootstrap flag guard removed",
         workflow.replace("matches == 1 && exact_value == 1", "exact_value >= 1", 1),
     ),
@@ -714,6 +721,7 @@ bash scripts/test-staging-gateway-candidate-contract.sh
 bash scripts/test-staging-gateway-incumbent-devtool-posture.sh
 bash scripts/test-staging-gateway-readiness-backoff.sh
 bash scripts/test-staging-gateway-public-edge-backoff.sh
+bash scripts/test-staging-gateway-terminal-candidate-check.sh
 bash scripts/test-staging-public-gateway-probe-diagnostics.sh
 bash scripts/test-staging-gateway-transaction-summary.sh
 bash scripts/test-super-login-redaction-contract.sh
