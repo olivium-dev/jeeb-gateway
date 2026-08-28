@@ -480,15 +480,21 @@ namespace JeebGateway.Controllers
         /// <response code="200">User ID login successful</response>
         /// <response code="400">Bad request</response>
         /// <response code="401">Unauthorized</response>
+        /// <response code="404">The user was not found by user-management</response>
+        /// <response code="502">User-management returned inconsistent identity or role data</response>
         /// <response code="500">Internal server error</response>
-        // ADR-004 D1: public by design — super-login entry, gated by its own SuperAdminPassCode.
+        // ADR-004 D1: public by design — passcode-gated while OpenMode is false. Staging
+        // OpenMode deliberately bypasses the passcode but still requires authoritative UM
+        // identity + role verification before the gateway can mint a session.
         [Microsoft.AspNetCore.Authorization.AllowAnonymous]
-        [PublicEndpoint("Super-login entry, gated by SuperAdminPassCode — ADR-005 §M/§A public.")]
+        [PublicEndpoint("Super-login entry: SuperAdminPassCode-gated by default; staging OpenMode requires authoritative user-management identity + roles — ADR-005 §M/§A public.")]
         [HttpPost("user-id-login")]
         [HttpPost("userid-login")]
         [ProducesResponseType(typeof(SocialLoginResponse), StatusCodes.Status200OK)]
         [ProducesResponseType(typeof(string), StatusCodes.Status400BadRequest)]
         [ProducesResponseType(typeof(string), StatusCodes.Status401Unauthorized)]
+        [ProducesResponseType(typeof(Microsoft.AspNetCore.Mvc.ProblemDetails), StatusCodes.Status404NotFound)]
+        [ProducesResponseType(typeof(Microsoft.AspNetCore.Mvc.ProblemDetails), StatusCodes.Status502BadGateway)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
         public async Task<ActionResult<SocialLoginResponse>> UserIdLogin([FromBody] UserIdLoginRequest request)
         {
@@ -502,6 +508,11 @@ namespace JeebGateway.Controllers
                         Status = StatusCodes.Status400BadRequest,
                         Type = "https://jeeb.dev/errors/request-body-required"
                     });
+                }
+
+                if (_superLogin.Value.OpenMode)
+                {
+                    return await OpenModeUserIdLogin(request);
                 }
 
                 // GATE INTACT: user-management validates the SuperAdmin passcode. A wrong
@@ -539,6 +550,119 @@ namespace JeebGateway.Controllers
             {
                 return UpstreamProblem(ex);
             }
+        }
+
+        /// <summary>
+        /// Staging-only Super Login+ flow. Open mode intentionally ignores the legacy shared
+        /// passcode, but it does not trust the caller to establish identity or roles. The
+        /// generated user-management roles endpoint must confirm the requested identity and
+        /// return a complete, internally consistent role record before the gateway mints.
+        /// </summary>
+        private async Task<ActionResult<SocialLoginResponse>> OpenModeUserIdLogin(
+            UserIdLoginRequest request)
+        {
+            var userId = request.UserId?.Trim();
+            if (string.IsNullOrWhiteSpace(userId))
+            {
+                return BadRequest(new Microsoft.AspNetCore.Mvc.ProblemDetails
+                {
+                    Title = "User ID is required.",
+                    Status = StatusCodes.Status400BadRequest,
+                    Type = "https://jeeb.dev/errors/user-id-required"
+                });
+            }
+
+            UserRolesResponse authority;
+            try
+            {
+                authority = await _serviceUserManagementClient.RolesAsync(
+                    userId, HttpContext.RequestAborted);
+            }
+            catch (OperationCanceledException) when (HttpContext.RequestAborted.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex) when (ex is not UserManagementApiException)
+            {
+                _logger.LogWarning(ex,
+                    "user.user-id-login open-mode role authority unavailable for userId={UserId}; refusing session mint",
+                    userId);
+                return Problem(
+                    statusCode: StatusCodes.Status502BadGateway,
+                    title: "Upstream user-management error");
+            }
+
+            if (!TryResolveAuthoritativeSuperLoginRoles(
+                    userId, authority, out var roles, out var activeRole))
+            {
+                _logger.LogWarning(
+                    "user.user-id-login open-mode role authority returned inconsistent data for userId={UserId}; refusing session mint",
+                    userId);
+                return Problem(
+                    statusCode: StatusCodes.Status502BadGateway,
+                    title: "Upstream user-management error");
+            }
+
+            var pair = await _tokens.IssueAsync(
+                userId, roles, activeRole,
+                authentication: null, HttpContext.RequestAborted);
+
+            _logger.LogInformation(
+                "user.user-id-login open-mode gateway session minted userId={UserId}",
+                userId);
+
+            return Ok(new SocialLoginResponse
+            {
+                UserId = userId,
+                AuthToken = pair.AccessToken,
+                RefreshToken = pair.RefreshToken,
+                RecentlyCreated = false,
+            });
+        }
+
+        private static bool TryResolveAuthoritativeSuperLoginRoles(
+            string requestedUserId,
+            UserRolesResponse? authority,
+            out IReadOnlyList<string> roles,
+            out string activeRole)
+        {
+            roles = Array.Empty<string>();
+            activeRole = string.Empty;
+
+            if (authority is null
+                || !string.Equals(authority.UserId, requestedUserId, StringComparison.Ordinal)
+                || authority.Available_roles is not { Count: > 0 }
+                || string.IsNullOrWhiteSpace(authority.Active_role))
+            {
+                return false;
+            }
+
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var validatedRoles = new List<string>(authority.Available_roles.Count);
+            foreach (var role in authority.Available_roles)
+            {
+                if (string.IsNullOrWhiteSpace(role)
+                    || !string.Equals(role, role.Trim(), StringComparison.Ordinal)
+                    || !seen.Add(role))
+                {
+                    return false;
+                }
+
+                validatedRoles.Add(role);
+            }
+
+            if (!string.Equals(
+                    authority.Active_role,
+                    authority.Active_role.Trim(),
+                    StringComparison.Ordinal)
+                || !seen.Contains(authority.Active_role))
+            {
+                return false;
+            }
+
+            roles = validatedRoles;
+            activeRole = authority.Active_role;
+            return true;
         }
 
         /// <summary>
