@@ -6,42 +6,19 @@ umask 077
 # It never prints or leaves behind response bodies, JWTs, refresh tokens, or passcodes.
 # Optional inputs:
 #   $1: gateway origin (default: staging public origin)
-#   SUPER_LOGIN_PASSCODE: optional basic user-id-login passcode. When omitted,
-#     the first configured demo-roster passcode is used with a live roster user.
 
 test_root=''
-passcode_file=''
 cleanup() {
   local status=$?
-  [ -z "$passcode_file" ] || rm -f -- "$passcode_file"
   [ -z "$test_root" ] || rm -rf -- "$test_root"
   return "$status"
 }
 trap cleanup EXIT
 
-# SUPER_LOGIN_PASSCODE may arrive exported by the workflow. Persist it with
-# mode 0600 using shell builtins, then remove it from the environment before
-# even the first utility process can inherit it.
-if [ "${SUPER_LOGIN_PASSCODE+x}" = x ]; then
-  passcode_directory=${TMPDIR:-/tmp}
-  for passcode_attempt in 1 2 3 4 5 6 7 8; do
-    passcode_file="${passcode_directory%/}/jeeb-super-login-passcode.$$.$RANDOM.$passcode_attempt"
-    set -o noclobber
-    if : > "$passcode_file" 2>/dev/null; then
-      printf '%s' "$SUPER_LOGIN_PASSCODE" >| "$passcode_file"
-      break
-    fi
-    set +o noclobber
-    passcode_file=''
-  done
-  set +o noclobber
-  [ -n "$passcode_file" ] || {
-    unset SUPER_LOGIN_PASSCODE
-    echo 'Unable to allocate the private passcode file' >&2
-    exit 1
-  }
-  unset SUPER_LOGIN_PASSCODE
-fi
+# This smoke explicitly verifies OpenMode, where user-id-login must ignore the
+# legacy shared passcode. Drop any inherited value before spawning a child and
+# send only the selected pre-existing roster identity.
+unset SUPER_LOGIN_PASSCODE
 
 readonly GATEWAY_ORIGIN=${1:-https://app.jeeb.fds-1.com}
 
@@ -72,10 +49,14 @@ revoke_body="$test_root/revoke.json"
 swagger_body="$test_root/swagger.json"
 basic_login_body="$test_root/basic-login.json"
 basic_login_response="$test_root/basic-login-response.json"
-basic_identity="$test_root/basic-identity.json"
 basic_access_token_file="$test_root/basic-access-token"
+basic_refresh_token_file="$test_root/basic-refresh-token"
+basic_refresh_body="$test_root/basic-refresh.json"
+basic_refresh_response="$test_root/basic-refresh-response.json"
+basic_rotated_access_token_file="$test_root/basic-rotated-access-token"
+basic_rotated_refresh_token_file="$test_root/basic-rotated-refresh-token"
+basic_revoke_body="$test_root/basic-revoke.json"
 auth_config="$test_root/curl-auth.config"
-[ -z "$passcode_file" ] || chmod 600 "$passcode_file"
 
 request() {
   local destination=$1
@@ -244,36 +225,44 @@ expect_status 204 'current refresh-token revocation' "$response_body" \
   --request POST --header 'Content-Type: application/json' \
   --data-binary "@$revoke_body" "$GATEWAY_ORIGIN/auth/tokens/revoke"
 
-if [ -s "$passcode_file" ]; then
-  jq -n --arg user_id "$basic_live_user_id" --rawfile passcode "$passcode_file" \
-    '{userId:$user_id,passcode:$passcode}' > "$basic_identity"
-elif jq -e --arg user_id "$basic_live_user_id" '
-    first(.users[]? | select(
-      .passcode | type == "string" and length > 0
-    ) | {userId:$user_id,passcode}) // empty
-  ' "$demo_roster" > "$basic_identity"; then
-  :
-else
-  : > "$basic_identity"
+jq -n --arg user_id "$basic_live_user_id" '{userId:$user_id}' > "$basic_login_body"
+chmod 600 "$basic_login_body"
+expect_status 200 'basic user-id-login' "$basic_login_response" \
+  --request POST --header 'Content-Type: application/json' \
+  --data-binary "@$basic_login_body" "$GATEWAY_ORIGIN/api/User/user-id-login"
+jq -e --arg user_id "$basic_live_user_id" '.userId == $user_id' \
+  "$basic_login_response" >/dev/null || {
+  echo 'FAIL: basic user-id-login returned a different identity' >&2
+  exit 1
+}
+jq -er '.authToken | select(type == "string" and length > 0)' \
+  "$basic_login_response" > "$basic_access_token_file"
+jq -er '.refreshToken | select(type == "string" and length > 0)' \
+  "$basic_login_response" > "$basic_refresh_token_file"
+validate_gateway_token "$basic_live_user_id" '' "$basic_access_token_file"
+
+jq -n --rawfile refresh_token "$basic_refresh_token_file" \
+  '{refreshToken:($refresh_token | rtrimstr("\n"))}' > "$basic_refresh_body"
+chmod 600 "$basic_refresh_body"
+expect_status 200 'basic user-id-login refresh rotation' "$basic_refresh_response" \
+  --request POST --header 'Content-Type: application/json' \
+  --data-binary "@$basic_refresh_body" "$GATEWAY_ORIGIN/auth/tokens/refresh"
+jq -er '.accessToken | select(type == "string" and length > 0)' \
+  "$basic_refresh_response" > "$basic_rotated_access_token_file"
+jq -er '.refreshToken | select(type == "string" and length > 0)' \
+  "$basic_refresh_response" > "$basic_rotated_refresh_token_file"
+validate_gateway_token "$basic_live_user_id" '' "$basic_rotated_access_token_file"
+if cmp -s "$basic_rotated_refresh_token_file" "$basic_refresh_token_file"; then
+  echo 'FAIL: basic user-id-login refresh token did not rotate' >&2
+  exit 1
 fi
 
-if jq -e '
-  (.userId | type == "string" and length > 0)
-  and (.passcode | type == "string" and length > 0)
-' "$basic_identity" >/dev/null 2>&1; then
-  basic_user_id=$(jq -er '.userId' "$basic_identity")
-  jq '{userId,superAdminPassCode:.passcode}' \
-    "$basic_identity" > "$basic_login_body"
-  chmod 600 "$basic_login_body"
-  expect_status 200 'basic user-id-login' "$basic_login_response" \
-    --request POST --header 'Content-Type: application/json' \
-    --data-binary "@$basic_login_body" "$GATEWAY_ORIGIN/api/User/user-id-login"
-  jq -er '.authToken | select(type == "string" and length > 0)' \
-    "$basic_login_response" > "$basic_access_token_file"
-  validate_gateway_token "$basic_user_id" '' "$basic_access_token_file"
-  echo 'PASS: basic user-id-login returned a gateway-audience session.'
-else
-  echo 'INFO: basic user-id-login skipped because no configured demo passcode was available.'
-fi
+jq -n --rawfile refresh_token "$basic_rotated_refresh_token_file" \
+  '{refreshToken:($refresh_token | rtrimstr("\n"))}' > "$basic_revoke_body"
+chmod 600 "$basic_revoke_body"
+expect_status 204 'basic user-id-login rotated refresh-token revocation' "$response_body" \
+  --request POST --header 'Content-Type: application/json' \
+  --data-binary "@$basic_revoke_body" "$GATEWAY_ORIGIN/auth/tokens/revoke"
 
-echo 'PASS: required staging Dev Tool, Super Login Plus, token lifecycle, and Swagger contracts are exact; optional basic login result reported above.'
+echo 'PASS: basic user-id-login returned a gateway-audience session and its exact refresh token rotated and revoked.'
+echo 'PASS: required staging Dev Tool, Super Login Plus, both token lifecycles, and Swagger contracts are exact.'

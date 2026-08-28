@@ -27,6 +27,9 @@ namespace JeebGateway.Controllers
     [Route("api/[controller]")]
     public class UserController : ControllerBase
     {
+        private const int UserManagementRosterPageSize = 200;
+        private const int UserManagementRosterMaxPages = 100;
+
         private readonly ServiceUserManagementClient _serviceUserManagementClient;
         private readonly ITokenService _tokens;
         private readonly GwDualRoleClient _userManagement;
@@ -116,9 +119,10 @@ namespace JeebGateway.Controllers
         /// <c>GET /api/User/all</c>) — the gateway NEVER reads UM's database directly
         /// (service boundary). Returns the demo-users-compatible
         /// <c>{ users: [ { userId, name, role, roles } ] }</c> shape but carries
-        /// NO <c>passcode</c> field: real users never expose one. The picker re-POSTs
-        /// its shared dev SuperAdmin passcode to <c>/api/User/user-id-login</c>, which
-        /// user-management validates server-side (the admin gate is unchanged).
+        /// NO <c>passcode</c> field: real users never expose one. This roster exists only
+        /// while <c>SuperLogin:OpenMode</c> is enabled, so the picker posts the selected
+        /// opaque <c>userId</c> to <c>/api/User/user-id-login</c>; that action resolves the
+        /// same complete UM roster as its identity + role authority before minting.
         ///
         /// SECURITY: this endpoint ENUMERATES all users. It is gated behind the SAME
         /// two flags as demo-users (<c>SuperLogin:OpenMode</c> + <c>DemoUsers:Enabled</c>),
@@ -146,74 +150,58 @@ namespace JeebGateway.Controllers
                 return NotFound();
             }
 
-            // Source the FULL roster from user-management's own list API — page through
-            // until hasMore is exhausted (cap the loop so a misbehaving upstream can't
-            // spin us forever). NEVER touch UM's database directly (service boundary).
-            const int pageSize = 200;
-            const int maxPages = 100; // hard cap: 20k users
             var roster = new List<object>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             try
             {
-                var skip = 0;
-                for (var page = 0; page < maxPages; page++)
+                // Use the same strict, completion-proving pagination primitive as the
+                // OpenMode login authority lookup. Picker visibility and login authority
+                // must not drift: every identity presented by the picker must be resolved
+                // from the same complete UM roster contract.
+                var profiles = await LoadCompleteUserManagementRosterAsync();
+                foreach (var u in profiles)
                 {
-                    var batch = await _serviceUserManagementClient.AllAsync(skip, pageSize, null);
-                    var rows = batch?.Users;
-                    if (rows is null || rows.Count == 0)
+                    if (string.IsNullOrWhiteSpace(u.UserId) || !seen.Add(u.UserId!))
                     {
-                        break;
+                        continue;
                     }
 
-                    foreach (var u in rows)
+                    var available = (u.Available_roles ?? new List<string>())
+                        .Where(r => !string.IsNullOrWhiteSpace(r))
+                        .ToList();
+                    var role = !string.IsNullOrWhiteSpace(u.Active_role)
+                        ? u.Active_role!
+                        : (available.Count > 0 ? available[0] : "client");
+
+                    // NO passcode field for real users. OpenMode login reuses this same
+                    // complete UM roster as its identity + role authority.
+                    roster.Add(new
                     {
-                        if (string.IsNullOrWhiteSpace(u.UserId) || !seen.Add(u.UserId!))
-                        {
-                            continue;
-                        }
-
-                        var available = (u.Available_roles ?? new List<string>())
-                            .Where(r => !string.IsNullOrWhiteSpace(r))
-                            .ToList();
-                        var role = !string.IsNullOrWhiteSpace(u.Active_role)
-                            ? u.Active_role!
-                            : (available.Count > 0 ? available[0] : "client");
-
-                        // NO passcode field for real users — the picker submits the
-                        // shared dev SuperAdmin passcode, which UM validates server-side.
-                        roster.Add(new
-                        {
-                            userId = u.UserId,
-                            name = string.IsNullOrWhiteSpace(u.Username) ? u.UserId : u.Username,
-                            role,
-                            roles = available,
-                        });
-                    }
-
-                    if (batch is not null && !batch.HasMore)
-                    {
-                        break;
-                    }
-                    // Advance by the number of rows ACTUALLY returned, not the requested
-                    // pageSize. user-management caps its own page below pageSize (≈50), so a
-                    // fixed `skip += pageSize` overshot by ~150 every iteration and silently
-                    // skipped users 50..pageSize — the full-roster picker only ever surfaced
-                    // the first ~50 (oldest) users, so freshly-seeded users were unfindable
-                    // (which also broke Super-Login-Plus search, since it filters this roster
-                    // client-side).
-                    skip += rows.Count;
+                        userId = u.UserId,
+                        name = string.IsNullOrWhiteSpace(u.Username) ? u.UserId : u.Username,
+                        role,
+                        roles = available,
+                    });
                 }
+            }
+            catch (OperationCanceledException) when (HttpContext.RequestAborted.IsCancellationRequested)
+            {
+                throw;
             }
             catch (UserManagementApiException ex)
             {
-                _logger.LogError(ex, "user.super-login/users UM list failed (status={Status})", ex.StatusCode);
+                _logger.LogWarning(
+                    "user.super-login/users UM list failed on {Method} {Path} (status={Status})",
+                    Request.Method, Request.Path, ex.StatusCode);
                 return Problem(statusCode: StatusCodes.Status502BadGateway,
                     detail: "Failed to load the user roster from user-management.",
                     title: "Bad Gateway");
             }
-            catch (Exception ex)
+            catch (Exception)
             {
-                _logger.LogError(ex, "user.super-login/users unexpected failure loading roster");
+                _logger.LogWarning(
+                    "user.super-login/users unexpected failure loading roster on {Method} {Path}",
+                    Request.Method, Request.Path);
                 return Problem(statusCode: StatusCodes.Status502BadGateway,
                     detail: "Failed to load the user roster from user-management.",
                     title: "Bad Gateway");
@@ -556,8 +544,9 @@ namespace JeebGateway.Controllers
         /// <summary>
         /// Staging-only Super Login+ flow. Open mode intentionally ignores the legacy shared
         /// passcode, but it does not trust the caller to establish identity or roles. The
-        /// generated user-management roles endpoint must confirm the requested identity and
-        /// return a complete, internally consistent role record before the gateway mints.
+        /// generated user-management list endpoint must confirm exactly one requested
+        /// identity in a complete scan and return an internally consistent role record
+        /// before the gateway mints.
         /// </summary>
         private async Task<ActionResult<SocialLoginResponse>> OpenModeUserIdLogin(
             UserIdLoginRequest request)
@@ -573,32 +562,73 @@ namespace JeebGateway.Controllers
                 });
             }
 
-            UserRolesResponse authority;
+            IReadOnlyList<UserProfileResponse> profiles;
             try
             {
-                authority = await _serviceUserManagementClient.RolesAsync(
-                    userId, HttpContext.RequestAborted);
+                profiles = await LoadCompleteUserManagementRosterAsync();
             }
             catch (OperationCanceledException) when (HttpContext.RequestAborted.IsCancellationRequested)
             {
                 throw;
             }
-            catch (Exception ex) when (ex is not UserManagementApiException)
+            catch (UserManagementApiException ex)
             {
-                _logger.LogWarning(ex,
-                    "user.user-id-login open-mode role authority unavailable for userId={UserId}; refusing session mint",
-                    userId);
+                _logger.LogWarning(
+                    "user.user-id-login open-mode UM roster authority failed on {Method} {Path} (status={Status}); refusing session mint",
+                    Request.Method, Request.Path, ex.StatusCode);
+                return Problem(
+                    statusCode: StatusCodes.Status502BadGateway,
+                    title: "Upstream user-management error");
+            }
+            catch (Exception)
+            {
+                _logger.LogWarning(
+                    "user.user-id-login open-mode UM roster authority failed on {Method} {Path}; refusing session mint",
+                    Request.Method, Request.Path);
                 return Problem(
                     statusCode: StatusCodes.Status502BadGateway,
                     title: "Upstream user-management error");
             }
 
+            UserProfileResponse? authority = null;
+            foreach (var profile in profiles)
+            {
+                if (!string.Equals(profile.UserId, userId, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                if (authority is not null)
+                {
+                    _logger.LogWarning(
+                        "user.user-id-login open-mode UM roster authority returned duplicate identity data on {Method} {Path}; refusing session mint",
+                        Request.Method, Request.Path);
+                    return Problem(
+                        statusCode: StatusCodes.Status502BadGateway,
+                        title: "Upstream user-management error");
+                }
+
+                authority = profile;
+            }
+
+            if (authority is null)
+            {
+                return Problem(
+                    statusCode: StatusCodes.Status404NotFound,
+                    title: "Not Found");
+            }
+
             if (!TryResolveAuthoritativeSuperLoginRoles(
-                    userId, authority, out var roles, out var activeRole))
+                    userId,
+                    authority.UserId,
+                    authority.Available_roles,
+                    authority.Active_role,
+                    out var roles,
+                    out var activeRole))
             {
                 _logger.LogWarning(
-                    "user.user-id-login open-mode role authority returned inconsistent data for userId={UserId}; refusing session mint",
-                    userId);
+                    "user.user-id-login open-mode UM roster authority returned inconsistent identity or role data on {Method} {Path}; refusing session mint",
+                    Request.Method, Request.Path);
                 return Problem(
                     statusCode: StatusCodes.Status502BadGateway,
                     title: "Upstream user-management error");
@@ -623,24 +653,25 @@ namespace JeebGateway.Controllers
 
         private static bool TryResolveAuthoritativeSuperLoginRoles(
             string requestedUserId,
-            UserRolesResponse? authority,
+            string? authoritativeUserId,
+            ICollection<string>? authoritativeRoles,
+            string? authoritativeActiveRole,
             out IReadOnlyList<string> roles,
             out string activeRole)
         {
             roles = Array.Empty<string>();
             activeRole = string.Empty;
 
-            if (authority is null
-                || !string.Equals(authority.UserId, requestedUserId, StringComparison.Ordinal)
-                || authority.Available_roles is not { Count: > 0 }
-                || string.IsNullOrWhiteSpace(authority.Active_role))
+            if (!string.Equals(authoritativeUserId, requestedUserId, StringComparison.Ordinal)
+                || authoritativeRoles is not { Count: > 0 }
+                || string.IsNullOrWhiteSpace(authoritativeActiveRole))
             {
                 return false;
             }
 
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var validatedRoles = new List<string>(authority.Available_roles.Count);
-            foreach (var role in authority.Available_roles)
+            var validatedRoles = new List<string>(authoritativeRoles.Count);
+            foreach (var role in authoritativeRoles)
             {
                 if (string.IsNullOrWhiteSpace(role)
                     || !string.Equals(role, role.Trim(), StringComparison.Ordinal)
@@ -653,17 +684,74 @@ namespace JeebGateway.Controllers
             }
 
             if (!string.Equals(
-                    authority.Active_role,
-                    authority.Active_role.Trim(),
+                    authoritativeActiveRole,
+                    authoritativeActiveRole.Trim(),
                     StringComparison.Ordinal)
-                || !seen.Contains(authority.Active_role))
+                || !seen.Contains(authoritativeActiveRole))
             {
                 return false;
             }
 
             roles = validatedRoles;
-            activeRole = authority.Active_role;
+            activeRole = authoritativeActiveRole;
             return true;
+        }
+
+        /// <summary>
+        /// Loads a complete user-management roster using the upstream's capped paging
+        /// contract. A partial or structurally invalid roster cannot establish identity
+        /// authority, so every ambiguous completion state fails closed.
+        /// </summary>
+        private async Task<IReadOnlyList<UserProfileResponse>> LoadCompleteUserManagementRosterAsync()
+        {
+            var profiles = new List<UserProfileResponse>();
+            var skip = 0;
+
+            for (var page = 0; page < UserManagementRosterMaxPages; page++)
+            {
+                var batch = await _serviceUserManagementClient.AllAsync(
+                    skip,
+                    UserManagementRosterPageSize,
+                    null,
+                    HttpContext.RequestAborted);
+                if (batch?.Users is null)
+                {
+                    throw new InvalidOperationException(
+                        "User-management returned a malformed roster batch.");
+                }
+
+                var rows = batch.Users;
+                if (rows.Count == 0)
+                {
+                    if (batch.HasMore)
+                    {
+                        throw new InvalidOperationException(
+                            "User-management returned an empty non-terminal roster batch.");
+                    }
+
+                    return profiles;
+                }
+
+                foreach (var profile in rows)
+                {
+                    if (profile is null)
+                    {
+                        throw new InvalidOperationException(
+                            "User-management returned a malformed roster row.");
+                    }
+
+                    profiles.Add(profile);
+                }
+
+                skip = checked(skip + rows.Count);
+                if (!batch.HasMore)
+                {
+                    return profiles;
+                }
+            }
+
+            throw new InvalidOperationException(
+                "User-management roster pagination did not complete within the hard cap.");
         }
 
         /// <summary>

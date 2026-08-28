@@ -38,29 +38,14 @@ if rg -n -- '--arg[[:space:]]+(passcode|access_token|refresh_token)' "$subject" 
 fi
 
 runtime_bin="$test_root/runtime-bin"
-mkdir "$runtime_bin"
-access_token=$(python3 - <<'PY'
-import base64
-import json
-import time
+runtime_state="$test_root/runtime-state"
+mkdir "$runtime_bin" "$runtime_state"
+readonly live_user_id='11111111-1111-4111-8111-111111111111'
+readonly seeded_user_id='22222222-2222-4222-8222-222222222222'
 
-def encode(value):
-    return base64.urlsafe_b64encode(json.dumps(value).encode()).decode().rstrip("=")
-
-print(".".join((
-    encode({"alg": "none", "typ": "JWT"}),
-    encode({
-        "iss": "jeeb-gateway",
-        "aud": ["jeeb-clients"],
-        "sub": "seeded-user",
-        "roles": ["admin"],
-        "exp": int(time.time()) + 900,
-    }),
-    "signature",
-)))
-PY
-)
-basic_access_token=$(SMOKE_SUBJECT=live-user python3 - <<'PY'
+make_token() {
+  local subject=$1 role=$2
+  SMOKE_SUBJECT="$subject" SMOKE_ROLE="$role" python3 - <<'PY'
 import base64
 import json
 import os
@@ -75,13 +60,19 @@ print(".".join((
         "iss": "jeeb-gateway",
         "aud": ["jeeb-clients"],
         "sub": os.environ["SMOKE_SUBJECT"],
-        "roles": ["client"],
+        "roles": [os.environ["SMOKE_ROLE"]],
         "exp": int(time.time()) + 900,
     }),
     "signature",
 )))
 PY
-)
+}
+
+seed_access_token=$(make_token "$seeded_user_id" admin)
+seed_rotated_access_token=$(make_token "$seeded_user_id" admin)
+basic_access_token=$(make_token "$live_user_id" client)
+basic_rotated_access_token=$(make_token "$live_user_id" client)
+
 cat > "$runtime_bin/curl" <<'CURL'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -101,27 +92,53 @@ done
 [ -n "$destination" ] && [ -n "$url" ]
 case "$url" in
   */api/User/super-login/users)
-    printf '%s\n' '{"users":[{"userId":"live-user","name":"Live","role":"client","roles":["client"]},{"userId":"seeded-user","name":"Seeded","role":"admin","roles":["admin"]}]}' > "$destination"; status=200 ;;
-  */api/User/demo-users)
-    if [ "$SMOKE_DEMO_PASSCODE_AVAILABLE" = true ]; then
-      printf '%s\n' '{"users":[{"userId":"stale-demo-row","name":"Demo","role":"client","passcode":"PLACEHOLDER_PASSCODE_CANARY"}]}' > "$destination"
+    if [ -e "$SMOKE_STATE_DIR/seeded" ]; then
+      printf '%s\n' "{\"users\":[{\"userId\":\"$SMOKE_LIVE_USER_ID\",\"name\":\"Live\",\"role\":\"client\",\"roles\":[\"client\"]},{\"userId\":\"$SMOKE_SEEDED_USER_ID\",\"name\":\"Seeded\",\"role\":\"admin\",\"roles\":[\"admin\"]}]}" > "$destination"
     else
-      printf '%s\n' '{"users":[]}' > "$destination"
+      printf '%s\n' "{\"users\":[{\"userId\":\"$SMOKE_LIVE_USER_ID\",\"name\":\"Live\",\"role\":\"client\",\"roles\":[\"client\"]}]}" > "$destination"
     fi
     status=200
     ;;
-  */dev/data/user/seeded-user)
-    printf '%s\n' '{"userId":"seeded-user"}' > "$destination"; status=200 ;;
+  */api/User/demo-users)
+    printf '%s\n' '{"users":[]}' > "$destination"; status=200 ;;
+  */dev/data/user/*)
+    [ "${url##*/}" = "$SMOKE_SEEDED_USER_ID" ]
+    printf '%s\n' "{\"userId\":\"$SMOKE_SEEDED_USER_ID\"}" > "$destination"; status=200 ;;
   */dev/data/users*)
-    printf '%s\n' '{"users":[{"userId":"seeded-user"}]}' > "$destination"; status=200 ;;
+    printf '%s\n' "{\"users\":[{\"userId\":\"$SMOKE_SEEDED_USER_ID\"}]}" > "$destination"; status=200 ;;
   */dev/seed/user)
-    printf '%s\n' '{"userId":"seeded-user"}' > "$destination"; status=200 ;;
+    : > "$SMOKE_STATE_DIR/seeded"
+    printf '%s\n' "{\"userId\":\"$SMOKE_SEEDED_USER_ID\"}" > "$destination"; status=200 ;;
   */auth/tokens/refresh)
-    printf '{"refreshToken":"rotated-refresh"}\n' > "$destination"; status=200 ;;
+    [ "${data_source#@}" != "$data_source" ]
+    refresh_token=$(jq -er '.refreshToken' "${data_source#@}")
+    case "$refresh_token" in
+      MINT_INITIAL_REFRESH_CANARY)
+        printf '{"accessToken":"%s","refreshToken":"MINT_ROTATED_REFRESH_CANARY"}\n' \
+          "$SMOKE_SEED_ROTATED_ACCESS_TOKEN" > "$destination"
+        ;;
+      BASIC_INITIAL_REFRESH_CANARY)
+        : > "$SMOKE_STATE_DIR/basic-refresh"
+        printf '{"accessToken":"%s","refreshToken":"BASIC_ROTATED_REFRESH_CANARY"}\n' \
+          "$SMOKE_BASIC_ROTATED_ACCESS_TOKEN" > "$destination"
+        ;;
+      *) exit 71 ;;
+    esac
+    status=200
+    ;;
   */auth/tokens/revoke)
-    : > "$destination"; status=204 ;;
+    [ "${data_source#@}" != "$data_source" ]
+    refresh_token=$(jq -er '.refreshToken' "${data_source#@}")
+    case "$refresh_token" in
+      MINT_ROTATED_REFRESH_CANARY) : > "$SMOKE_STATE_DIR/mint-revoke" ;;
+      BASIC_ROTATED_REFRESH_CANARY) : > "$SMOKE_STATE_DIR/basic-revoke" ;;
+      *) exit 70 ;;
+    esac
+    : > "$destination"; status=204
+    ;;
   */auth/tokens)
-    printf '{"accessToken":"%s","refreshToken":"initial-refresh"}\n' "$SMOKE_ACCESS_TOKEN" > "$destination"; status=200 ;;
+    printf '{"accessToken":"%s","refreshToken":"MINT_INITIAL_REFRESH_CANARY"}\n' \
+      "$SMOKE_SEED_ACCESS_TOKEN" > "$destination"; status=200 ;;
   */swagger/v1/swagger.json)
     if [ "$has_config" = true ]; then
       printf '%s\n' '{"paths":{"/auth/tokens":{"post":{}},"/dev/seed/user":{"post":{}},"/dev/data/users":{"get":{}},"/api/User/user-id-login":{"post":{}}}}' > "$destination"; status=200
@@ -131,10 +148,14 @@ case "$url" in
     ;;
   */api/User/user-id-login)
     [ "${data_source#@}" != "$data_source" ]
-    jq -e '.userId == "live-user" and .superAdminPassCode == "PLACEHOLDER_PASSCODE_CANARY"' \
-      "${data_source#@}" >/dev/null
-    : >> "$SMOKE_BASIC_LOGIN_CALLS"
-    printf '{"authToken":"%s"}\n' "$SMOKE_BASIC_ACCESS_TOKEN" > "$destination"; status=200 ;;
+    jq -e --arg user_id "$SMOKE_LIVE_USER_ID" '
+      .userId == $user_id
+      and (keys == ["userId"])
+      and (has("superAdminPassCode") | not)
+    ' "${data_source#@}" >/dev/null
+    : > "$SMOKE_STATE_DIR/basic-login"
+    printf '{"userId":"%s","authToken":"%s","refreshToken":"BASIC_INITIAL_REFRESH_CANARY"}\n' \
+      "$SMOKE_LIVE_USER_ID" "$SMOKE_BASIC_ACCESS_TOKEN" > "$destination"; status=200 ;;
   *) exit 72 ;;
 esac
 printf '%s' "$status"
@@ -142,26 +163,25 @@ CURL
 chmod +x "$runtime_bin/curl"
 
 runtime_log="$test_root/runtime.log"
-basic_calls="$test_root/basic-calls"
-SMOKE_ACCESS_TOKEN="$access_token" SMOKE_BASIC_ACCESS_TOKEN="$basic_access_token" \
-  SMOKE_DEMO_PASSCODE_AVAILABLE=true SMOKE_BASIC_LOGIN_CALLS="$basic_calls" \
+SMOKE_LIVE_USER_ID="$live_user_id" \
+  SMOKE_SEEDED_USER_ID="$seeded_user_id" \
+  SMOKE_SEED_ACCESS_TOKEN="$seed_access_token" \
+  SMOKE_SEED_ROTATED_ACCESS_TOKEN="$seed_rotated_access_token" \
+  SMOKE_BASIC_ACCESS_TOKEN="$basic_access_token" \
+  SMOKE_BASIC_ROTATED_ACCESS_TOKEN="$basic_rotated_access_token" \
+  SMOKE_STATE_DIR="$runtime_state" \
   PATH="$runtime_bin:$PATH" \
   bash "$subject" https://example.invalid >"$runtime_log" 2>&1
-grep -Fq 'PASS: basic user-id-login returned a gateway-audience session.' "$runtime_log"
-[ -e "$basic_calls" ]
-grep -Fq 'PASS: required staging Dev Tool, Super Login Plus, token lifecycle, and Swagger contracts are exact; optional basic login result reported above.' "$runtime_log"
-if grep -Fq 'PLACEHOLDER_PASSCODE_CANARY' "$runtime_log"; then
-  echo 'Configured placeholder passcode or response body reached smoke logs' >&2
+
+grep -Fq 'PASS: basic user-id-login returned a gateway-audience session and its exact refresh token rotated and revoked.' "$runtime_log"
+grep -Fq 'PASS: required staging Dev Tool, Super Login Plus, both token lifecycles, and Swagger contracts are exact.' "$runtime_log"
+[ -e "$runtime_state/basic-login" ]
+[ -e "$runtime_state/basic-refresh" ]
+[ -e "$runtime_state/basic-revoke" ]
+[ -e "$runtime_state/mint-revoke" ]
+if grep -Eq 'MINT_(INITIAL|ROTATED)_REFRESH_CANARY|BASIC_(INITIAL|ROTATED)_REFRESH_CANARY|process-environment-canary' "$runtime_log"; then
+  echo 'A refresh token or passcode canary reached smoke logs' >&2
   exit 1
 fi
 
-no_passcode_log="$test_root/no-passcode.log"
-rm -f -- "$basic_calls"
-SMOKE_ACCESS_TOKEN="$access_token" SMOKE_BASIC_ACCESS_TOKEN="$basic_access_token" \
-  SMOKE_DEMO_PASSCODE_AVAILABLE=false SMOKE_BASIC_LOGIN_CALLS="$basic_calls" \
-  PATH="$runtime_bin:$PATH" \
-  bash "$subject" https://example.invalid >"$no_passcode_log" 2>&1
-grep -Fq 'basic user-id-login skipped because no configured demo passcode was available' "$no_passcode_log"
-[ ! -e "$basic_calls" ]
-
-echo 'Super Login smoke redaction contract: PASS (credentials redacted; shared passcode uses a live roster identity; only absent passcode skips)'
+echo 'Super Login smoke redaction contract: PASS (OpenMode omits passcode; pre-existing canonical identity login and exact refresh rotation/revocation verified; credentials redacted)'
