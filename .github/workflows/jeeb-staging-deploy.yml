@@ -1249,8 +1249,13 @@ jobs:
           verify_candidate_readiness
           verify_bootstrap_flags
           if [ "$DEPLOYMENT_MODE" = devtool-reassert ]; then
-            bash scripts/probe-staging-public-gateway-contract.sh devtool
+            echo 'staging phase=devtool-public-edge-stabilization result=started (redacted)'
+            bash scripts/staging-gateway-public-edge-backoff.sh \
+              scripts/probe-staging-public-gateway-contract.sh
+            echo 'staging phase=devtool-public-edge-stabilization result=passed (redacted)'
+            echo 'staging phase=devtool-mutating-smoke result=started (redacted)'
             bash scripts/test-super-login.sh https://app.jeeb.fds-1.com
+            echo 'staging phase=devtool-mutating-smoke result=passed (redacted)'
           else
             verify_staging_overlay_and_dns
             if [ "$DEPLOYMENT_MODE" != security-cutover ]; then

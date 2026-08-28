@@ -245,6 +245,7 @@ def validate_bootstrap_workflow(text):
         r'[ ! -e \"\$credential_dir\" ] || [ -d \"\$credential_dir\" ] || exit 98',
         'scripts/staging-gateway-transaction-summary.sh',
         'scripts/staging-gateway-readiness-backoff.sh',
+        'scripts/staging-gateway-public-edge-backoff.sh',
         'staging_gateway_lock_init jeeb-staging "$secret_stage"',
         "staging_gateway_lock_acquire",
         "staging_gateway_lock_assert",
@@ -267,7 +268,7 @@ def validate_bootstrap_workflow(text):
         "scripts/staging-gateway-devtool-reassert-candidate.jq",
         "scripts/staging-gateway-incumbent-devtool-posture.jq",
         "probe-staging-public-gateway-contract.sh posture",
-        "probe-staging-public-gateway-contract.sh devtool",
+        "scripts/staging-gateway-public-edge-backoff.sh",
         "scripts/test-super-login.sh https://app.jeeb.fds-1.com",
     )
     missing = [marker for marker in required if marker not in text]
@@ -396,7 +397,7 @@ def validate_bootstrap_workflow(text):
     readiness = text.index("verify_candidate_readiness", verifier)
     false_flags = text.index("          verify_bootstrap_flags\n", readiness)
     public_probe = text.index(
-        "bash scripts/probe-staging-public-gateway-contract.sh", verifier
+        "bash scripts/staging-gateway-public-edge-backoff.sh", verifier
     )
     network = text.index("verify_staging_overlay_and_dns", public_probe)
     proxy_probe = text.index("probe_staging_proxy_source_contract", public_probe)
@@ -712,6 +713,8 @@ bash scripts/test-staging-gateway-security-cutover.sh
 bash scripts/test-staging-gateway-candidate-contract.sh
 bash scripts/test-staging-gateway-incumbent-devtool-posture.sh
 bash scripts/test-staging-gateway-readiness-backoff.sh
+bash scripts/test-staging-gateway-public-edge-backoff.sh
+bash scripts/test-staging-public-gateway-probe-diagnostics.sh
 bash scripts/test-staging-gateway-transaction-summary.sh
 bash scripts/test-super-login-redaction-contract.sh
 bash scripts/test-verify-staging-otp-verify-freeze.sh

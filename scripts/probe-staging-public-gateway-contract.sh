@@ -71,17 +71,22 @@ probe_origin() {
   local response_file status
 
   response_file=$(mktemp)
-  status=$(request "$response_file" --request POST \
-    --header "Origin: ${supplied_scheme}://${host}" \
-    --header 'Sec-Fetch-Site: same-origin' \
-    "https://${host}${path}")
+  if ! status=$(request "$response_file" --request POST \
+      --header "Origin: ${supplied_scheme}://${host}" \
+      --header 'Sec-Fetch-Site: same-origin' \
+      "https://${host}${path}"); then
+    echo "${host}${path}: curl transport failed during origin contract probe" >&2
+    rm -f -- "$response_file"
+    return 1
+  fi
   if [ "$status" != 403 ]; then
     echo "${host}${path}: expected HTTP 403, received ${status}" >&2
     rm -f -- "$response_file"
     return 1
   fi
   if ! jq -e --arg expected "$expected_type" '.type == $expected' \
-    "$response_file" >/dev/null; then
+    "$response_file" >/dev/null 2>&1; then
+    echo "${host}${path}: HTTP 403 problem type did not match the expected origin contract" >&2
     rm -f -- "$response_file"
     return 1
   fi
