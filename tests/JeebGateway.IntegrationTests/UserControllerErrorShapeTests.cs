@@ -201,9 +201,10 @@ public class UserControllerErrorShapeTests
     /// <summary>
     /// Source-scan regression guard (JEBV4-249): pins zero LIVE <c>detail: ex.Message</c> in
     /// UserController, that the class-level <c>[Produces("application/json")]</c> downgrade is
-    /// gone, and that every delegating <c>catch (UserManagementApiException)</c> routes through
-    /// <c>UpstreamProblem(ex)</c>. The single SuperLoginUsers roster-load catch has its own
-    /// sanitized 502 handler and is the one non-delegating upstream catch.
+    /// gone, and that every ordinary <c>catch (UserManagementApiException)</c> routes through
+    /// <c>UpstreamProblem(ex)</c>. The two open-mode roster callers deliberately translate every
+    /// list-authority failure to a sanitized 502; this guard pins their safe metadata-only logs,
+    /// and pins that their shared pagination helper has no HTTP response or logging side effects.
     /// </summary>
     [Fact]
     public void UserController_Source_Has_No_Live_Upstream_Detail_Leak_And_No_Produces_Downgrade()
@@ -218,11 +219,66 @@ public class UserControllerErrorShapeTests
             "#254: the class-level application/json downgrade must be removed so Problem() emits problem+json");
 
         var catches = Count(liveCode, "catch (UserManagementApiException");
-        var sanitized = Count(liveCode, "UpstreamProblem(ex)");
+        var delegated = Count(liveCode, "return UpstreamProblem(ex);");
         catches.Should().BeGreaterThan(0, "the guard must actually see the upstream catch sites");
-        sanitized.Should().Be(catches - 1,
-            "every catch (UserManagementApiException) delegates to UpstreamProblem(ex) EXCEPT the single "
-            + "SuperLoginUsers roster-load catch, which has its own sanitized 502 handler");
+        catches.Should().Be(delegated + 2,
+            "only SuperLoginUsers and OpenModeUserIdLogin may translate UM list-authority faults directly");
+
+        var superLoginUsers = Slice(
+            liveCode,
+            "public async Task<ActionResult> SuperLoginUsers()",
+            "private ActionResult UpstreamProblem(UserManagementApiException ex)");
+        var openModeLogin = Slice(
+            liveCode,
+            "private async Task<ActionResult<SocialLoginResponse>> OpenModeUserIdLogin(",
+            "private static bool TryResolveAuthoritativeSuperLoginRoles(");
+        var rosterLoader = Slice(
+            liveCode,
+            "private async Task<IReadOnlyList<UserProfileResponse>> LoadCompleteUserManagementRosterAsync()",
+            "private async Task<(IReadOnlyList<string> roles, string activeRole)> ResolveSuperLoginRolesAsync(");
+
+        AssertRosterCallerFailsClosed(superLoginUsers, "SuperLoginUsers");
+        AssertRosterCallerFailsClosed(openModeLogin, "OpenModeUserIdLogin");
+
+        Count(rosterLoader, "_serviceUserManagementClient.AllAsync(").Should().Be(1,
+            "the shared roster helper must remain the single generated-client pagination seam");
+        Count(rosterLoader, "catch (").Should().Be(0,
+            "the shared helper must leave error translation to each HTTP caller");
+        Count(rosterLoader, "Problem(").Should().Be(0,
+            "the shared helper must not construct an HTTP response");
+        Count(rosterLoader, "_logger.").Should().Be(0,
+            "the shared helper must not log exception messages or upstream bodies");
+    }
+
+    private static void AssertRosterCallerFailsClosed(string source, string caller)
+    {
+        Count(source, "LoadCompleteUserManagementRosterAsync()").Should().Be(1,
+            $"{caller} must use the shared complete-roster authority scan");
+        Count(source, "catch (UserManagementApiException ex)").Should().Be(1,
+            $"{caller} must translate generated-client list faults at its HTTP boundary");
+        Count(source, "catch (Exception)").Should().Be(1,
+            $"{caller} must fail closed on malformed, truncated, and unexpected roster faults");
+        Count(source, "StatusCodes.Status502BadGateway").Should().BeGreaterOrEqualTo(2,
+            $"{caller} must sanitize both generated-client and unexpected roster faults as 502");
+        Count(source, "Request.Method, Request.Path").Should().BeGreaterOrEqualTo(2,
+            $"{caller} logs may carry only safe request metadata (plus status for ApiException)");
+        Count(source, "ex.StatusCode").Should().Be(1,
+            $"{caller}'s generated-client log should carry only the safe upstream status");
+        Count(source, "LogWarning(ex").Should().Be(0,
+            $"{caller} must not serialize the upstream exception into logs");
+        Count(source, "ex.Message").Should().Be(0,
+            $"{caller} must not expose the generated-client message/body");
+        Count(source, "ex.Response").Should().Be(0,
+            $"{caller} must not expose the generated-client response body");
+    }
+
+    private static string Slice(string source, string startMarker, string endMarker)
+    {
+        var start = source.IndexOf(startMarker, StringComparison.Ordinal);
+        start.Should().BeGreaterThanOrEqualTo(0, $"source marker must exist: {startMarker}");
+        var end = source.IndexOf(endMarker, start + startMarker.Length, StringComparison.Ordinal);
+        end.Should().BeGreaterThan(start, $"source marker must exist after {startMarker}: {endMarker}");
+        return source[start..end];
     }
 
     private static string? LocateSource(string controllerFileName)
