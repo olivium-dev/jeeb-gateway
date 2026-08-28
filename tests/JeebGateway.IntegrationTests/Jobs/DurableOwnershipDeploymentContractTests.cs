@@ -530,6 +530,9 @@ public sealed class DurableOwnershipDeploymentContractTests
             "Services__Realtime__GuardianSecret Operations__RealtimeProbe__MintKey \\\n" +
             "                  ServiceAuth__SigningKey \"${retired_gateway_env[@]}\"");
         workflow.Should().Contain("scripts/staging-gateway-devtool-reassert-candidate.jq");
+        workflow.Should().Contain("scripts/staging-gateway-public-edge-backoff.sh");
+        workflow.Should().Contain(
+            "staging phase=devtool-public-edge-stabilization result=started (redacted)");
         workflow.Should().NotContain(
             "add_env Services__Realtime__BaseUrl http://192.168.2.20:10069");
         workflow.Should().Contain("python3 scripts/probe-staging-authenticated-realtime.py");
