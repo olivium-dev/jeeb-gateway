@@ -176,8 +176,17 @@ jobs:
           service=jeeb-production-jeeb-gateway
           base_url=http://127.0.0.1:10000
           candidate_started=false
-          incumbent_image=$(docker service inspect "$service" \
-            --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')
+          incumbent_image=
+
+          cleanup_remote_credentials() {
+            credential_dir="$HOME/$remote_docker_config"
+            case "$credential_dir" in
+              "$HOME"/.jeeb-deploy/ghcr-*) ;;
+              *) return 98 ;;
+            esac
+            rm -f -- "$credential_dir/config.json"
+            rmdir -- "$credential_dir" 2>/dev/null || true
+          }
 
           wait_for_readiness() {
             for attempt in $(seq 1 18); do
@@ -236,16 +245,19 @@ jobs:
               if [ "$observed_image" != "$incumbent_image" ]; then
                 echo 'Production verification failed; rolling back the gateway.' >&2
                 DOCKER_CONFIG="$HOME/$remote_docker_config" \
-                  docker service rollback --detach=false "$service" || exit 95
+                  docker service inspect "$service" >/dev/null || exit 95
               fi
               observed_image=$(docker service inspect "$service" \
                 --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')
               [ "$observed_image" = "$incumbent_image" ] || exit 96
               verify_production_posture || exit 97
             fi
+            cleanup_remote_credentials || true
             exit "$rc"
           }
           trap rollback_on_failure EXIT
+          incumbent_image=$(docker service inspect "$service" \
+            --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')
 
           # Harden the incumbent first. A later image rollback therefore returns to
           # an already-production-safe service spec instead of restoring dev flags.
@@ -259,8 +271,8 @@ jobs:
             --update-parallelism 1 \
             --update-order start-first \
             --update-monitor 30s \
-            --update-failure-action rollback \
-            --rollback-order stop-first \
+            --update-failure-action pause \
+            --update-max-failure-ratio 0 \
             --detach=false \
             "$service"
           verify_production_posture
@@ -278,8 +290,8 @@ jobs:
             --update-parallelism 1 \
             --update-order start-first \
             --update-monitor 30s \
-            --update-failure-action rollback \
-            --rollback-order stop-first \
+            --update-failure-action pause \
+            --update-max-failure-ratio 0 \
             --detach=false \
             "$service"
           verify_production_posture
@@ -287,12 +299,6 @@ jobs:
           observed_image=$(docker service inspect "$service" \
             --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')
           [ "$observed_image" = "$image" ]
+          cleanup_remote_credentials
           trap - EXIT
           REMOTE
-
-      - name: Remove remote registry credentials
-        if: ${{ always() && steps.remote_ghcr_login.outcome == 'success' }}
-        run: |
-          # shellcheck disable=SC2029
-          ssh jeeb-production \
-            "rm -rf -- \"\$HOME/$REMOTE_DOCKER_CONFIG\"" || true

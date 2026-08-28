@@ -196,6 +196,7 @@ deploy_inventory = {
 }
 expected_inventory = {
     "deploy-to-jeeb.yml",
+    "jeeb-production-deploy.yml",
     "jeeb-staging-deploy.yml",
 }
 if deploy_inventory != expected_inventory:
@@ -242,6 +243,7 @@ expected_mutation_inventory = {
     ".github/scripts/jeeb-gateway-secret-lifecycle.sh",
     ".github/scripts/rotate-staging-gateway-probe-key.sh",
     ".github/workflows/deploy-to-jeeb.yml",
+    ".github/workflows/jeeb-production-deploy.yml",
     ".github/workflows/jeeb-staging-deploy.yml",
     ".github/workflows/jeeb-staging-state-auth-smoke.yml",
 }
@@ -287,6 +289,42 @@ SECURITY_CUTOVER_GATE_LINES = (
     "  exit 1",
     "fi",
 )
+PRODUCTION_WORKFLOW_NAME = "jeeb-production-deploy.yml"
+PRODUCTION_CONFIRMATION_INPUT = {
+    "description": "Type deploy-jeeb-production",
+    "required": True,
+    "type": "string",
+}
+PRODUCTION_GATE_NAME = "Require protected production source and owner confirmation"
+PRODUCTION_GATE_ENV = {
+    "CONFIRM_PRODUCTION": "${{ inputs.confirm_production }}",
+    "DEFAULT_BRANCH": "${{ github.event.repository.default_branch }}",
+    "GITHUB_REF_PROTECTED": "${{ github.ref_protected }}",
+    "REQUESTING_ACTOR": "${{ github.actor }}",
+    "TRIGGERING_ACTOR": "${{ github.triggering_actor }}",
+}
+PRODUCTION_GATE_LINES = (
+    "set -euo pipefail",
+    '[ "$GITHUB_REPOSITORY" = olivium-dev/jeeb-gateway ]',
+    '[ "$CONFIRM_PRODUCTION" = deploy-jeeb-production ] || {',
+    "  echo '::error::Production confirmation is incorrect.' >&2",
+    "  exit 64",
+    "}",
+    '[ "$REQUESTING_ACTOR" = oudaykhaled ] \\',
+    '  && [ "$TRIGGERING_ACTOR" = oudaykhaled ] || {',
+    "    echo '::error::Production deploys require the designated owner.' >&2",
+    "    exit 65",
+    "  }",
+    ': "${DEFAULT_BRANCH:?repository default branch is required}"',
+    '[ "$GITHUB_REF" = "refs/heads/${DEFAULT_BRANCH}" ] || {',
+    "  echo '::error::Production deploys may run only from the default branch.' >&2",
+    "  exit 66",
+    "}",
+    '[ "$GITHUB_REF_PROTECTED" = true ] || {',
+    "  echo '::error::The production source branch must be protected.' >&2",
+    "  exit 67",
+    "}",
+)
 STATUS_BYPASS = re.compile(r"\b(?:always|failure|cancelled)\s*\(", re.I)
 SUCCESS_STATUS = re.compile(r"\bsuccess\s*\(", re.I)
 CREDENTIAL_CLEANUP_CONDITION = (
@@ -321,6 +359,7 @@ MUTATION_STEP_MARKERS = (
 )
 EXPECTED_AUTHORITY_JOBS = {
     "deploy-to-jeeb.yml": "deploy",
+    "jeeb-production-deploy.yml": "deploy",
     "jeeb-staging-deploy.yml": "deploy",
     "jeeb-staging-state-auth-smoke.yml": "smoke",
 }
@@ -367,6 +406,28 @@ def run_security_cutover_gate(body, actor, triggering_actor):
     )
 
 
+def run_production_gate(body, **overrides):
+    environment = {
+        "PATH": "",
+        "CONFIRM_PRODUCTION": "deploy-jeeb-production",
+        "DEFAULT_BRANCH": "main",
+        "GITHUB_REF": "refs/heads/main",
+        "GITHUB_REF_PROTECTED": "true",
+        "GITHUB_REPOSITORY": "olivium-dev/jeeb-gateway",
+        "REQUESTING_ACTOR": "oudaykhaled",
+        "TRIGGERING_ACTOR": "oudaykhaled",
+    }
+    environment.update(overrides)
+    return subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", body],
+        cwd=repo_root,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
 def reject_bypass(name, node):
     if "continue-on-error" in node:
         raise ValueError(f"{name} declares continue-on-error")
@@ -384,6 +445,79 @@ def reject_bypass(name, node):
         normalized = re.sub(r"\s+", "", condition).lower()
         if normalized not in {"success()", "${{success()}}"}:
             raise ValueError(f"{name} has a non-canonical success condition: {condition}")
+
+
+def validate_production_authority(document, job_name, job, steps):
+    dispatch = document.get("on")
+    expected_dispatch = {
+        "workflow_dispatch": {
+            "inputs": {"confirm_production": PRODUCTION_CONFIRMATION_INPUT}
+        }
+    }
+    if dispatch != expected_dispatch:
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} dispatch contract drifted")
+    if job.get("environment") != "production":
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} environment drifted")
+
+    gate = steps[0]
+    if not isinstance(gate, dict) or set(gate) != {"name", "env", "run"}:
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} gate shape drifted")
+    if gate.get("name") != PRODUCTION_GATE_NAME or gate.get("env") != PRODUCTION_GATE_ENV:
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} gate identity drifted")
+    body = gate.get("run")
+    if not isinstance(body, str) or tuple(body.splitlines()) != PRODUCTION_GATE_LINES:
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} gate body drifted")
+
+    accepted = run_production_gate(body)
+    if accepted.returncode != 0 or accepted.stdout or accepted.stderr:
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} valid owner gate was rejected")
+    rejected_cases = (
+        ({"GITHUB_REPOSITORY": "another/repository"}, 1),
+        ({"CONFIRM_PRODUCTION": "wrong"}, 64),
+        ({"REQUESTING_ACTOR": "another-actor"}, 65),
+        ({"TRIGGERING_ACTOR": "rerun-by-another-actor"}, 65),
+        ({"DEFAULT_BRANCH": "release"}, 66),
+        ({"GITHUB_REF": "refs/heads/feature"}, 66),
+        ({"GITHUB_REF_PROTECTED": "false"}, 67),
+    )
+    for overrides, expected_code in rejected_cases:
+        rejected = run_production_gate(body, **overrides)
+        if rejected.returncode != expected_code or rejected.stdout:
+            raise ValueError(
+                f"{PRODUCTION_WORKFLOW_NAME}:{job_name} gate predicate is not fail-closed"
+            )
+
+    if len(steps) < 2 or set(steps[1]) != {"uses"} or not str(
+        steps[1]["uses"]
+    ).startswith("actions/checkout@"):
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} checkout is not after the gate")
+    for index, step in enumerate(steps):
+        if not isinstance(step, dict):
+            raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name}:step-{index} is not a mapping")
+        reject_bypass(f"{PRODUCTION_WORKFLOW_NAME}:{job_name}:step-{index}", step)
+    first_mutation = next(
+        (
+            index
+            for index, step in enumerate(steps)
+            if any(marker in json.dumps(step, sort_keys=True) for marker in MUTATION_STEP_MARKERS)
+        ),
+        None,
+    )
+    if first_mutation is None or first_mutation <= 0:
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} mutation precedes the gate")
+
+    surface = json.dumps(document, sort_keys=True)
+    if "docker service update" not in surface:
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} lacks update authority")
+    for forbidden_command in (
+        "docker service create",
+        "docker service scale",
+        "docker stack ",
+    ):
+        if forbidden_command in surface:
+            raise ValueError(
+                f"{PRODUCTION_WORKFLOW_NAME}:{job_name} is not update-only: {forbidden_command}"
+            )
 
 
 def validate_workflow_authority(name, document):
@@ -407,6 +541,9 @@ def validate_workflow_authority(name, document):
         steps = job.get("steps")
         if not isinstance(steps, list) or not steps:
             raise ValueError(f"{name}:{job_name} has no structurally parsed steps")
+        if name == PRODUCTION_WORKFLOW_NAME:
+            validate_production_authority(document, job_name, job, steps)
+            continue
         owner = steps[0]
         expected_owner_keys = (
             {"name", "if", "run"}
@@ -586,6 +723,7 @@ for name, text in deploy_text.items():
 
 workflow_authority_paths = {
     "deploy-to-jeeb.yml": workflow_dir / "deploy-to-jeeb.yml",
+    "jeeb-production-deploy.yml": workflow_dir / "jeeb-production-deploy.yml",
     "jeeb-staging-deploy.yml": workflow_dir / "jeeb-staging-deploy.yml",
     "jeeb-staging-state-auth-smoke.yml": workflow_dir / "jeeb-staging-state-auth-smoke.yml",
 }
