@@ -3,6 +3,13 @@
 # Security-cutover-only forward transaction and runtime proof. The normal
 # staging transaction remains in staging-gateway-spec-recovery.sh unchanged.
 
+if ! declare -F staging_gateway_canonicalize_spec_file >/dev/null; then
+  _staging_gateway_script_root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+  # shellcheck source=staging-gateway-spec-canonicalization.sh disable=SC1091
+  source "$_staging_gateway_script_root/staging-gateway-spec-canonicalization.sh"
+  unset _staging_gateway_script_root
+fi
+
 staging_gateway_security_cutover_write_result() {
   local destination=$1 result=$2
   case "$result" in
@@ -27,7 +34,7 @@ staging_gateway_security_cutover_exact_state() {
   local observed_spec=$1 observed_id=$2 expected_spec=$3 expected_id=$4
   [ -s "$observed_spec" ] && [ -s "$observed_id" ] \
     && [ -s "$expected_spec" ] && [ -s "$expected_id" ] \
-    && cmp -s "$observed_spec" "$expected_spec" \
+    && staging_gateway_specs_equal "$observed_spec" "$expected_spec" \
     && cmp -s "$observed_id" "$expected_id"
 }
 
@@ -54,8 +61,9 @@ staging_gateway_security_cutover_forward_apply() {
       return 1
     }
   done
-  jq -e 'type == "object"' "$incumbent_spec" "$candidate_spec" >/dev/null
-  cmp -s "$incumbent_spec" "$candidate_spec" && {
+  staging_gateway_canonicalize_spec_file "$incumbent_spec" || return 1
+  staging_gateway_canonicalize_spec_file "$candidate_spec" || return 1
+  staging_gateway_specs_equal "$incumbent_spec" "$candidate_spec" && {
     echo 'RED: security-cutover candidate equals incumbent; no mutation attempted' >&2
     return 1
   }
@@ -145,14 +153,29 @@ staging_gateway_security_cutover_require_identity() {
 
 staging_gateway_security_cutover_service_document() {
   local service=$1 destination=$2
-  docker service inspect "$service" --format '{{json .}}' > "$destination" 2>/dev/null \
-    || return 1
-  jq -e 'type == "object" and (.ID | type == "string")' "$destination" >/dev/null
+  local raw_document="${destination}.raw"
+  docker service inspect "$service" --format '{{json .}}' > "$raw_document" 2>/dev/null \
+    || { rm -f -- "$raw_document"; return 1; }
+  if jq -e -S -c -s '
+      if length == 1
+        and (.[0] | type == "object")
+        and (.[0].ID | type == "string")
+        and (.[0].Spec | type == "object")
+      then .[0]
+      else error("service document must contain exactly one object Spec")
+      end
+    ' "$raw_document" > "$destination"; then
+    rm -f -- "$raw_document"
+    return 0
+  fi
+  rm -f -- "$raw_document" "$destination"
+  return 1
 }
 
 staging_gateway_security_cutover_capture() {
   local service=$1 expected_service_id=$2 incumbent_image=$3
-  local root before after task_rows task_id task container_id container
+  local root before after before_spec after_spec before_id after_id
+  local before_version after_version task_rows task_id task container_id container
   root=$(mktemp -d)
   chmod 700 "$root"
   STAGING_GATEWAY_CUTOVER_RUNTIME_ROOT=$root
@@ -200,10 +223,23 @@ staging_gateway_security_cutover_capture() {
 
   staging_gateway_security_cutover_service_document "$service" "$after" \
     || { staging_gateway_security_cutover_remote_fail service-confirm-inspect; return 1; }
-  [ "$(jq -r '.ID' "$before")" = "$(jq -r '.ID' "$after")" ] \
-    && [ "$(jq -r '.Version.Index' "$before")" = "$(jq -r '.Version.Index' "$after")" ] \
-    && [ "$(jq -S -c '.Spec' "$before")" = "$(jq -S -c '.Spec' "$after")" ] \
+  before_spec="$root/before-spec.json"; after_spec="$root/after-spec.json"
+  before_id=$(jq -er '.ID' "$before") \
     || { staging_gateway_security_cutover_remote_fail incumbent-capture-drift; return 1; }
+  after_id=$(jq -er '.ID' "$after") \
+    || { staging_gateway_security_cutover_remote_fail incumbent-capture-drift; return 1; }
+  before_version=$(jq -er '.Version.Index' "$before") \
+    || { staging_gateway_security_cutover_remote_fail incumbent-capture-drift; return 1; }
+  after_version=$(jq -er '.Version.Index' "$after") \
+    || { staging_gateway_security_cutover_remote_fail incumbent-capture-drift; return 1; }
+  if ! jq -e '.Spec' "$before" > "$before_spec" \
+    || ! jq -e '.Spec' "$after" > "$after_spec" \
+    || [ "$before_id" != "$after_id" ] \
+    || [ "$before_version" != "$after_version" ] \
+    || ! staging_gateway_specs_equal "$before_spec" "$after_spec"; then
+    staging_gateway_security_cutover_remote_fail incumbent-capture-drift
+    return 1
+  fi
 
   jq -cn --arg service_id "$expected_service_id" \
     --arg image "$incumbent_image" --arg task_id "$task_id" \
@@ -241,7 +277,10 @@ staging_gateway_security_cutover_observe() {
       and .Spec.UpdateConfig.Order == "stop-first"
       and .Spec.UpdateConfig.FailureAction == "pause"
     ' "$service_document" >/dev/null || return 41
-  actual_spec_sha=$(jq -S -c '.Spec' "$service_document" | sha256sum | awk '{print $1}')
+  actual_spec_sha=$(jq -e -S -c -s '
+    if length == 1 and (.[0].Spec | type) == "object" then .[0].Spec
+    else error("service document must contain exactly one object Spec") end
+  ' "$service_document" | sha256sum | awk '{print $1}')
   [ "$actual_spec_sha" = "$expected_spec_sha" ] || return 41
   update_state=$(jq -er '.UpdateStatus.State // ""' "$service_document") || return 40
   case "$update_state" in

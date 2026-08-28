@@ -415,7 +415,8 @@ public sealed class DurableOwnershipDeploymentContractTests
             workflow.Should().Contain("recovery_armed=true");
             workflow.Should().Contain("docker service inspect '$service' --format '{{json .Spec}}'");
             workflow.Should().Contain("docker service inspect '$service' --format '{{.ID}} {{.Version.Index}}'");
-            workflow.Should().Contain("cmp -s \"$pre_update_spec\" \"$incumbent_spec\"");
+            workflow.Should().Contain(
+                "staging_gateway_specs_equal \"$pre_update_spec\" \"$incumbent_spec\"");
             workflow.Should().Contain("cmp -s \"$pre_update_version\" \"$incumbent_version\"");
             workflow.Should().Contain("cmp -s \"$pre_update_id\" \"$incumbent_id\"");
             workflow.Should().Contain("verify_exact_candidate_after_checks");
@@ -484,18 +485,26 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().Contain("SecretNames: ([");
         workflow.Should().Contain("{{json .Spec}}");
         workflow.Should().Contain("{{.ID}} {{.Version.Index}}");
-        workflow.Should().Contain("cmp -s \"$pre_update_spec\" \"$incumbent_spec\"");
+        workflow.Should().Contain(
+            "staging_gateway_specs_equal \"$pre_update_spec\" \"$incumbent_spec\"");
         workflow.Should().Contain("cmp -s \"$pre_update_version\" \"$incumbent_version\"");
         workflow.Should().Contain("cmp -s \"$pre_update_id\" \"$incumbent_id\"");
         workflow.Should().Contain("tolower($1) == tolower(expected)");
         workflow.Should().Contain("matches == 1 && exact_value == 1");
         workflow.Should().Contain("verify_exact_candidate_after_checks() {");
-        workflow.Should().Contain("cmp -s \"$final_spec\" \"$candidate_spec\"");
+        workflow.Should().Contain(
+            "staging_gateway_specs_equal \"$final_spec\" \"$candidate_spec\"");
         workflow.Should().Contain("cmp -s \"$final_version\" \"$candidate_version\"");
         workflow.Should().Contain("cmp -s \"$final_id\" \"$candidate_id\"");
         workflow.Should().Contain("group: jeeb-staging-gateway-mutation");
         workflow.Should().Contain("source scripts/staging-gateway-mutation-lock.sh");
         workflow.Should().Contain("source scripts/staging-gateway-security-cutover.sh");
+        workflow.Should().Contain("scripts/staging-gateway-spec-canonicalization.sh");
+        workflow.Should().Contain("staging_gateway_canonicalize_spec_file \"$snapshot\"");
+        workflow.Should().Contain(
+            "if: ${{ always() && steps.remote_ghcr_login.outcome != 'skipped' }}");
+        workflow.Should().Contain("[ \"$status\" -ne 0 ] || status=99");
+        workflow.Should().NotContain("append_sanitized_transaction_summary || status=99");
         workflow.Should().Contain("staging_gateway_lock_acquire");
         workflow.Should().Contain("staging_gateway_lock_assert");
         workflow.Should().Contain("staging_gateway_lock_release");
@@ -542,7 +551,7 @@ public sealed class DurableOwnershipDeploymentContractTests
             "capture_remote_spec \"$pre_update_spec\" \"$pre_update_version\" \"$pre_update_id\"",
             StringComparison.Ordinal);
         var candidate = workflow.IndexOf(
-            "> \"$candidate_spec\"",
+            "staging_gateway_canonicalize_spec_file \"$candidate_raw_spec\" \"$candidate_spec\"",
             preUpdate,
             StringComparison.Ordinal);
         var candidateSemantics = workflow.IndexOf(

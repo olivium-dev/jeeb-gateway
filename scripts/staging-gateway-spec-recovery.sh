@@ -11,6 +11,11 @@
 # Engine version-CAS requests. They never select a mutable image/tag and never
 # overwrite an unrecognised concurrent Spec.
 
+_staging_gateway_script_root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source=staging-gateway-spec-canonicalization.sh disable=SC1091
+source "$_staging_gateway_script_root/staging-gateway-spec-canonicalization.sh"
+unset _staging_gateway_script_root
+
 staging_gateway_require_recovery_callbacks() {
   local callback
   for callback in capture_remote_spec staging_gateway_lock_assert \
@@ -26,7 +31,7 @@ staging_gateway_exact_state() {
   local observed_spec=$1 observed_id=$2 expected_spec=$3 expected_id=$4
   [ -s "$observed_spec" ] && [ -s "$observed_id" ] \
     && [ -s "$expected_spec" ] && [ -s "$expected_id" ] \
-    && cmp -s "$observed_spec" "$expected_spec" \
+    && staging_gateway_specs_equal "$observed_spec" "$expected_spec" \
     && cmp -s "$observed_id" "$expected_id"
 }
 
@@ -74,8 +79,9 @@ staging_gateway_forward_apply() {
       return 1
     }
   done
-  jq -e 'type == "object"' "$incumbent_spec" "$candidate_spec" >/dev/null
-  cmp -s "$incumbent_spec" "$candidate_spec" && {
+  staging_gateway_canonicalize_spec_file "$incumbent_spec" || return 1
+  staging_gateway_canonicalize_spec_file "$candidate_spec" || return 1
+  staging_gateway_specs_equal "$incumbent_spec" "$candidate_spec" && {
     echo 'RED: desired candidate equals the incumbent; no mutation attempted' >&2
     return 1
   }
@@ -223,6 +229,8 @@ staging_gateway_external_gate_recover() {
       return 1
     }
   done
+  staging_gateway_canonicalize_spec_file "$incumbent_spec" || return 1
+  staging_gateway_canonicalize_spec_file "$candidate_spec" || return 1
 
   observed_spec="$recovery_root/recovery-observed-spec.json"
   observed_version="$recovery_root/recovery-observed-version"
@@ -255,7 +263,7 @@ staging_gateway_external_gate_recover() {
 
   # A second stable read closes the gap between classification and CAS.
   capture_remote_spec "$confirm_spec" "$confirm_version" "$confirm_id" || return 1
-  if ! cmp -s "$confirm_spec" "$candidate_spec" \
+  if ! staging_gateway_specs_equal "$confirm_spec" "$candidate_spec" \
     || ! cmp -s "$confirm_version" "$observed_version" \
     || ! cmp -s "$confirm_id" "$candidate_id"; then
     echo 'RED: candidate changed before recovery CAS; recovery refused' >&2
