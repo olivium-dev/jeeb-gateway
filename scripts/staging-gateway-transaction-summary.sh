@@ -17,7 +17,10 @@ read_identity() {
     return 0
   fi
   [ -s "$spec" ] && [ -s "$manifest" ]
-  spec_hash=$(sha256sum "$spec" | awk '{print $1}')
+  spec_hash=$(jq -e -S -c -s '
+    if length == 1 and (.[0] | type == "object") then .[0]
+    else error("service Spec must be exactly one JSON object") end
+  ' "$spec" | sha256sum | awk '{print $1}')
   IFS=$'\t' read -r image digest service_id version manifest_hash < <(
     jq -er '[.Image,.ImageDigest,.ServiceID,(.VersionIndex | tostring),.SpecSha256] | @tsv' \
       "$manifest"

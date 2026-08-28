@@ -289,6 +289,25 @@ SECURITY_CUTOVER_GATE_LINES = (
 )
 STATUS_BYPASS = re.compile(r"\b(?:always|failure|cancelled)\s*\(", re.I)
 SUCCESS_STATUS = re.compile(r"\bsuccess\s*\(", re.I)
+CREDENTIAL_CLEANUP_CONDITION = (
+    "${{ always() && steps.remote_ghcr_login.outcome != 'skipped' }}"
+)
+CREDENTIAL_CLEANUP_LINES = (
+    "set -euo pipefail",
+    "# The run-scoped credential path is intentionally expanded by the runner.",
+    "# shellcheck disable=SC2029",
+    'ssh jeeb-staging "set -eu',
+    '  credential_dir=\\"\\$HOME/$REMOTE_DOCKER_CONFIG\\"',
+    '  case \\"\\$credential_dir\\" in \\"\\$HOME/.jeeb-deploy/ghcr-${{ github.run_id }}-${{ github.run_attempt }}\\") ;; *) exit 97 ;; esac',
+    '  [ ! -L \\"\\$credential_dir\\" ] || exit 98',
+    '  [ ! -e \\"\\$credential_dir\\" ] || [ -d \\"\\$credential_dir\\" ] || exit 98',
+    '  if [ -d \\"\\$credential_dir\\" ]; then',
+    '    DOCKER_CONFIG=\\"\\$credential_dir\\" docker logout ghcr.io >/dev/null 2>&1 || true',
+    '    rm -f -- \\"\\$credential_dir/config.json\\"',
+    '    rmdir -- \\"\\$credential_dir\\"',
+    "  fi",
+    '  [ ! -e \\"\\$credential_dir\\" ]"',
+)
 MUTATION_STEP_MARKERS = (
     "docker/login-action@",
     "docker/build-push-action@",
@@ -352,7 +371,14 @@ def reject_bypass(name, node):
     if "continue-on-error" in node:
         raise ValueError(f"{name} declares continue-on-error")
     condition = str(node.get("if", ""))
-    if STATUS_BYPASS.search(condition):
+    allowed_failure_cleanup = (
+        name.startswith("jeeb-staging-deploy.yml:deploy:step-")
+        and node.get("name") == "Clean up isolated remote Docker credentials"
+        and condition == CREDENTIAL_CLEANUP_CONDITION
+        and tuple(str(node.get("run", "")).splitlines())
+        == CREDENTIAL_CLEANUP_LINES
+    )
+    if STATUS_BYPASS.search(condition) and not allowed_failure_cleanup:
         raise ValueError(f"{name} declares a terminal-status bypass: {condition}")
     if SUCCESS_STATUS.search(condition):
         normalized = re.sub(r"\s+", "", condition).lower()
@@ -468,6 +494,20 @@ def validate_workflow_authority(name, document):
             )
             if first_mutation is None or first_mutation <= 3:
                 raise ValueError(f"{name}:{job_name} mutation precedes the public freeze")
+            cleanup_indices = [
+                index
+                for index, step in enumerate(steps)
+                if step.get("name") == "Clean up isolated remote Docker credentials"
+            ]
+            if cleanup_indices != [len(steps) - 1]:
+                raise ValueError(f"{name}:{job_name} remote credential cleanup count drifted")
+            cleanup = steps[cleanup_indices[0]]
+            if set(cleanup) != {"name", "if", "run"}:
+                raise ValueError(f"{name}:{job_name} remote credential cleanup shape drifted")
+            if cleanup.get("if") != CREDENTIAL_CLEANUP_CONDITION:
+                raise ValueError(f"{name}:{job_name} remote credential cleanup is not failure-safe")
+            if tuple(str(cleanup.get("run", "")).splitlines()) != CREDENTIAL_CLEANUP_LINES:
+                raise ValueError(f"{name}:{job_name} remote credential cleanup body drifted")
         body = owner.get("run")
         if not isinstance(body, str) or tuple(body.splitlines()) != OWNER_RUN_LINES:
             raise ValueError(f"{name}:{job_name} owner run body is not canonical")
@@ -574,6 +614,13 @@ for name, path in workflow_authority_paths.items():
     find_later_mutation_step(terminal_bypass)["if"] = "${{ always() }}"
     assert_workflow_rejected("later mutation always() bypass", name, terminal_bypass)
 
+    cleanup_name_spoof = copy.deepcopy(document)
+    spoofed_step = find_later_mutation_step(cleanup_name_spoof)
+    spoofed_step["name"] = "Clean up isolated remote Docker credentials"
+    spoofed_step["if"] = CREDENTIAL_CLEANUP_CONDITION
+    spoofed_step["run"] = "docker service update --force jeeb-gateway"
+    assert_workflow_rejected("cleanup-name mutation spoof", name, cleanup_name_spoof)
+
     commented_owner = copy.deepcopy(document)
     commented_owner["jobs"][next(iter(commented_owner["jobs"]))]["steps"][0]["run"] = (
         f"# {OWNER_STEP_NAME}\n# echo '{OWNER_ERROR}' >&2\n# exit 1\ntrue\n"
@@ -604,6 +651,18 @@ for name, path in workflow_authority_paths.items():
             "options"
         ].append("bypass")
         assert_workflow_rejected("extra deployment mode", name, extra_mode)
+
+        duplicate_cleanup = copy.deepcopy(document)
+        duplicate_cleanup["jobs"]["deploy"]["steps"].append(
+            copy.deepcopy(duplicate_cleanup["jobs"]["deploy"]["steps"][-1])
+        )
+        assert_workflow_rejected("duplicate credential cleanup", name, duplicate_cleanup)
+
+        mutating_cleanup = copy.deepcopy(document)
+        mutating_cleanup["jobs"]["deploy"]["steps"][-1]["run"] += (
+            "\ndocker service update --force jeeb-staging-jeeb-gateway"
+        )
+        assert_workflow_rejected("credential cleanup mutation append", name, mutating_cleanup)
 
         missing_security_gate = copy.deepcopy(document)
         del missing_security_gate["jobs"]["deploy"]["steps"][1]
@@ -720,7 +779,7 @@ for description, mutated in (
 
 print(
     "Structurally validated 3 single-job workflow authorities, dynamically executed "
-    "their owner steps under empty PATH, and rejected 28 adversarial workflow mutations."
+    "their owner steps under empty PATH, and rejected 33 adversarial workflow mutations."
 )
 print("Dynamically validated the blocked lifecycle authority and 2 adversarial mutations.")
 

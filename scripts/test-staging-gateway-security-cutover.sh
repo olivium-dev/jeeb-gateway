@@ -27,7 +27,11 @@ capture_remote_spec() {
   count=$(cat "$forward_capture_count")
   printf '%s\n' "$((count + 1))" > "$forward_capture_count"
   state=$(cat "$forward_state_file")
-  cp "$test_root/${state}.json" "$spec"
+  if [ "$state" = candidate ]; then
+    jq '.' "$test_root/candidate.json" > "$spec"
+  else
+    cp "$test_root/incumbent.json" "$spec"
+  fi
   if [ "$state" = incumbent ]; then
     cp "$test_root/incumbent-version" "$version"
   else
@@ -70,6 +74,12 @@ FORWARD_MUTATE=true run_forward
 [ "$(cat "$test_root/result")" = security-cutover-http-200-exact-candidate ]
 [ "$(cat "$test_root/candidate-version")" = 11 ]
 [ "$(cat "$forward_submit_count")" -eq 1 ]
+if cmp -s "$test_root/security-cutover-observed-spec.json" "$test_root/candidate.json"; then
+  echo 'semantic security-cutover fixture unexpectedly remained byte-identical' >&2
+  exit 1
+fi
+staging_gateway_specs_equal \
+  "$test_root/security-cutover-observed-spec.json" "$test_root/candidate.json"
 
 for rejected_status in 409 500 error; do
   reset_forward
@@ -239,7 +249,8 @@ candidate_service="$test_root/candidate-service.json"
 CUTOVER_TEST_PHASE=verify CUTOVER_TEST_SCENARIO=success PATH="$fake_bin:$PATH" \
   docker service inspect jeeb-staging-jeeb-gateway --format '{{json .}}' \
   > "$candidate_service"
-candidate_spec_sha=$(jq -S -c '.Spec' "$candidate_service" | sha256sum | awk '{print $1}')
+candidate_spec_sha=$(jq -e -S -c '.Spec | if type == "object" then . else error("Spec") end' \
+  "$candidate_service" | sha256sum | awk '{print $1}')
 
 run_verify_case() {
   local scenario=$1 expected=$2 supplied_sha=${3:-$candidate_spec_sha}

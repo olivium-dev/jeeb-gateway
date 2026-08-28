@@ -183,6 +183,7 @@ jobs:
           echo "image=${IMAGE_REPOSITORY}@$IMAGE_DIGEST" >> "$GITHUB_OUTPUT"
 
       - name: Log remote Docker in to GHCR
+        id: remote_ghcr_login
         run: |
           # Local expansion of the run-scoped credential directory is intentional.
           # shellcheck disable=SC2029
@@ -292,6 +293,7 @@ jobs:
             incumbent_id="$secret_stage/incumbent-service-id"
             incumbent_manifest="$secret_stage/incumbent-service-manifest.json"
             candidate_spec="$secret_stage/candidate-service-spec.json"
+            candidate_raw_spec="$secret_stage/candidate-service-spec.raw.json"
             candidate_version="$secret_stage/candidate-service-version"
             candidate_id="$secret_stage/candidate-service-id"
             candidate_manifest="$secret_stage/candidate-service-manifest.json"
@@ -342,7 +344,7 @@ jobs:
                   after_id=''; after=''
                   read -r after_id after <<< "$identity" || true
                   if [ "$before_id" = "$after_id" ] && [ "$before" = "$after" ] \
-                    && jq -e 'type == "object"' "$snapshot" >/dev/null \
+                    && staging_gateway_canonicalize_spec_file "$snapshot" \
                     && staging_gateway_lock_assert; then
                     mv "$snapshot" "$destination"
                     chmod 600 "$destination"
@@ -390,7 +392,7 @@ jobs:
             }
             verify_exact_candidate_after_checks() {
               capture_remote_spec "$final_spec" "$final_version" "$final_id" \
-                && cmp -s "$final_spec" "$candidate_spec" \
+                && staging_gateway_specs_equal "$final_spec" "$candidate_spec" \
                 && cmp -s "$final_version" "$candidate_version" \
                 && cmp -s "$final_id" "$candidate_id"
             }
@@ -610,7 +612,7 @@ jobs:
               local observed_spec=$1 observed_version=$2 observed_id=$3
               local open_mode demo_users dev_endpoints swagger token_mint
               : "$observed_version"
-              cmp -s "$observed_spec" "$incumbent_spec"
+              staging_gateway_specs_equal "$observed_spec" "$incumbent_spec"
               cmp -s "$observed_id" "$incumbent_id"
               [ "$(jq -er '.TaskTemplate.ContainerSpec.Image' "$observed_spec")" = "$incumbent_image" ]
               ssh jeeb-staging bash -s -- "$service" "$incumbent_image" \
@@ -624,7 +626,7 @@ jobs:
                 "$open_mode" "$demo_users" "$dev_endpoints" "$swagger" "$token_mint"
               capture_remote_spec \
                 "$recovery_terminal_spec" "$recovery_terminal_version" "$recovery_terminal_id"
-              cmp -s "$recovery_terminal_spec" "$incumbent_spec"
+              staging_gateway_specs_equal "$recovery_terminal_spec" "$incumbent_spec"
               cmp -s "$recovery_terminal_id" "$incumbent_id"
             }
             append_sanitized_transaction_summary() {
@@ -701,7 +703,9 @@ jobs:
                 staging_gateway_lock_release || lock_cleanup_ok=false
               fi
               [ "$lock_cleanup_ok" = true ] || status=98
-              append_sanitized_transaction_summary || status=99
+              if ! append_sanitized_transaction_summary; then
+                [ "$status" -ne 0 ] || status=99
+              fi
               rm -rf "$secret_stage"
               exit "$status"
             }
@@ -766,7 +770,7 @@ jobs:
             }
           fi
           if ! capture_remote_spec "$pre_update_spec" "$pre_update_version" "$pre_update_id" \
-            || ! cmp -s "$pre_update_spec" "$incumbent_spec" \
+            || ! staging_gateway_specs_equal "$pre_update_spec" "$incumbent_spec" \
             || ! cmp -s "$pre_update_version" "$incumbent_version" \
             || ! cmp -s "$pre_update_id" "$incumbent_id"; then
             echo 'RED: incumbent service Spec drifted before update; deploy made no mutation' >&2
@@ -1049,7 +1053,11 @@ jobs:
           secret_additions_json="$build_root/secret-additions.json"
           secret_remove_json="$build_root/secret-remove.json"
           candidate="$build_root/candidate.json"
-          docker service inspect "$service" --format '{{json .Spec}}' > "$current_spec"
+          docker service inspect "$service" --format '{{json .Spec}}' \
+            | jq -e -S -c -s '
+                if length == 1 and (.[0] | type == "object") then .[0]
+                else error("service Spec must be exactly one JSON object") end
+              ' > "$current_spec"
           [ "$(sha256sum "$current_spec" | awk '{print $1}')" = \
             "$EXPECTED_INCUMBENT_SPEC_SHA" ] || {
             echo 'Incumbent full Spec changed before candidate construction' >&2
@@ -1067,7 +1075,7 @@ jobs:
             # This mode is a surgical incumbent patch. Its exact-delta contract below
             # proves that no unrelated environment row, secret, network, resource,
             # endpoint, or service setting changes.
-            jq -e --arg image "$IMAGE" '
+            jq -e -S -c --arg image "$IMAGE" '
               def env_key: (split("=")[0] | ascii_downcase);
               def is_devtool_flag:
                 env_key as $key
@@ -1101,7 +1109,7 @@ jobs:
           else
             # jq variables intentionally remain literal inside the filter.
             # shellcheck disable=SC2016
-            jq -e \
+            jq -e -S -c \
               --arg image "$IMAGE" \
               --arg network_id "$network_id" \
               --arg deployment_mode "$DEPLOYMENT_MODE" \
@@ -1164,7 +1172,9 @@ jobs:
           trap - EXIT
           rm -rf -- "$build_root"
           REMOTE
-          } | ssh jeeb-staging bash -se > "$candidate_spec"
+          } | ssh jeeb-staging bash -se > "$candidate_raw_spec"
+          staging_gateway_canonicalize_spec_file "$candidate_raw_spec" "$candidate_spec"
+          rm -f -- "$candidate_raw_spec"
           chmod 600 "$candidate_spec"
           [ "$(jq -er '.TaskTemplate.ContainerSpec.Image' "$candidate_spec")" = "$IMAGE" ]
           candidate_network_id=$(jq -er '
@@ -1202,9 +1212,11 @@ jobs:
           if [ "$DEPLOYMENT_MODE" = security-cutover ]; then
             incumbent_service_id=$(<"$incumbent_id")
             [[ "$incumbent_service_id" =~ ^[a-z0-9]+$ ]]
-            ssh jeeb-staging bash -s -- --execute capture \
+            { cat scripts/staging-gateway-spec-canonicalization.sh
+              cat scripts/staging-gateway-security-cutover.sh
+            } | ssh jeeb-staging bash -s -- --execute capture \
               "$service" "$incumbent_service_id" "$incumbent_image" \
-              < scripts/staging-gateway-security-cutover.sh > "$incumbent_tasks"
+              > "$incumbent_tasks"
             chmod 600 "$incumbent_tasks"
             jq -e --arg service_id "$incumbent_service_id" '
               .ServiceID == $service_id
@@ -1252,17 +1264,21 @@ jobs:
           verify_exact_candidate_after_checks
 
           if [ "$DEPLOYMENT_MODE" = security-cutover ]; then
-            candidate_spec_sha=$(jq -S -c '.' "$candidate_spec" \
+            candidate_spec_sha=$(jq -e -S -c -s '
+              if length == 1 and (.[0] | type == "object") then .[0]
+              else error("service Spec must be exactly one JSON object") end
+            ' "$candidate_spec" \
               | sha256sum | awk '{print $1}')
             [[ "$candidate_spec_sha" =~ ^[0-9a-f]{64}$ ]]
             candidate_version_index=$(<"$candidate_version")
             [[ "$candidate_version_index" =~ ^[0-9]+$ ]]
             incumbent_tasks_base64=$(base64 < "$incumbent_tasks" | tr -d '\n')
-            ssh jeeb-staging bash -s -- --execute verify \
+            { cat scripts/staging-gateway-spec-canonicalization.sh
+              cat scripts/staging-gateway-security-cutover.sh
+            } | ssh jeeb-staging bash -s -- --execute verify \
               "$service" "$incumbent_service_id" "$IMAGE" \
               "$candidate_spec_sha" "$candidate_version_index" \
-              "$incumbent_tasks_base64" \
-              < scripts/staging-gateway-security-cutover.sh
+              "$incumbent_tasks_base64"
 
             # Edge freeze is never removed by this workflow. Re-prove it after
             # all candidate/old-task checks, then close with one exact Spec read.
@@ -1276,7 +1292,7 @@ jobs:
           recovery_result=not-required
 
       - name: Clean up isolated remote Docker credentials
-        if: ${{ success() }}
+        if: ${{ always() && steps.remote_ghcr_login.outcome != 'skipped' }}
         run: |
           set -euo pipefail
           # The run-scoped credential path is intentionally expanded by the runner.
@@ -1284,8 +1300,11 @@ jobs:
           ssh jeeb-staging "set -eu
             credential_dir=\"\$HOME/$REMOTE_DOCKER_CONFIG\"
             case \"\$credential_dir\" in \"\$HOME/.jeeb-deploy/ghcr-${{ github.run_id }}-${{ github.run_attempt }}\") ;; *) exit 97 ;; esac
+            [ ! -L \"\$credential_dir\" ] || exit 98
+            [ ! -e \"\$credential_dir\" ] || [ -d \"\$credential_dir\" ] || exit 98
             if [ -d \"\$credential_dir\" ]; then
               DOCKER_CONFIG=\"\$credential_dir\" docker logout ghcr.io >/dev/null 2>&1 || true
               rm -f -- \"\$credential_dir/config.json\"
               rmdir -- \"\$credential_dir\"
-            fi"
+            fi
+            [ ! -e \"\$credential_dir\" ]"

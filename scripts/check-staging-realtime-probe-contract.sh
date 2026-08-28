@@ -202,12 +202,13 @@ def validate_bootstrap_workflow(text):
         "docker service inspect '$service' --format '{{json .Spec}}'",
         "docker service inspect '$service' --format '{{.ID}} {{.Version.Index}}'",
         'chmod 600 "$snapshot"',
-        'cmp -s "$pre_update_spec" "$incumbent_spec"',
+        'staging_gateway_canonicalize_spec_file "$snapshot"',
+        'staging_gateway_specs_equal "$pre_update_spec" "$incumbent_spec"',
         'cmp -s "$pre_update_version" "$incumbent_version"',
         'cmp -s "$pre_update_id" "$incumbent_id"',
         "verify_exact_candidate_after_checks() {",
         'capture_remote_spec "$final_spec" "$final_version" "$final_id"',
-        'cmp -s "$final_spec" "$candidate_spec"',
+        'staging_gateway_specs_equal "$final_spec" "$candidate_spec"',
         'cmp -s "$final_version" "$candidate_version"',
         'cmp -s "$final_id" "$candidate_id"',
         "write_snapshot_manifest() {",
@@ -226,6 +227,7 @@ def validate_bootstrap_workflow(text):
         "source scripts/staging-gateway-mutation-lock.sh",
         "source scripts/staging-gateway-spec-recovery.sh",
         "source scripts/staging-gateway-security-cutover.sh",
+        "scripts/staging-gateway-spec-canonicalization.sh",
         "staging_gateway_external_gate_recover",
         "staging_gateway_forward_apply",
         "staging_gateway_security_cutover_forward_apply",
@@ -233,9 +235,14 @@ def validate_bootstrap_workflow(text):
         "staging_gateway_submit_spec_cas() {",
         "registryAuthFrom=previous-spec",
         'EXPECTED_INCUMBENT_SPEC_SHA=$(sha256sum "$incumbent_spec"',
-        'docker service inspect "$service" --format \'{{json .Spec}}\' > "$current_spec"',
+        'if length == 1 and (.[0] | type == "object") then .[0]',
         'recovery_result=armed-pending',
         'append_sanitized_transaction_summary',
+        'if ! append_sanitized_transaction_summary; then',
+        '[ "$status" -ne 0 ] || status=99',
+        "always() && steps.remote_ghcr_login.outcome != 'skipped'",
+        r'[ ! -L \"\$credential_dir\" ] || exit 98',
+        r'[ ! -e \"\$credential_dir\" ] || [ -d \"\$credential_dir\" ] || exit 98',
         'scripts/staging-gateway-transaction-summary.sh',
         'scripts/staging-gateway-readiness-backoff.sh',
         'staging_gateway_lock_init jeeb-staging "$secret_stage"',
@@ -277,6 +284,8 @@ def validate_bootstrap_workflow(text):
     present = [marker for marker in forbidden if marker in text]
     if present:
         raise ValueError(f"unsafe staging mutation behavior remains: {present}")
+    if 'append_sanitized_transaction_summary || status=99' in text:
+        raise ValueError("summary failure overwrites the original deploy status")
     if text.count('FailureAction:"rollback",Order:"start-first"') != 2:
         raise ValueError("recoverable deployment policies are not exact for generic and Dev Tool modes")
 
@@ -363,7 +372,9 @@ def validate_bootstrap_workflow(text):
     pre_update = text.index(
         'capture_remote_spec "$pre_update_spec" "$pre_update_version" "$pre_update_id"'
     )
-    candidate = text.index('> "$candidate_spec"')
+    candidate = text.index(
+        'staging_gateway_canonicalize_spec_file "$candidate_raw_spec" "$candidate_spec"'
+    )
     candidate_validation = text.index(
         '[ "$(jq -er \'.TaskTemplate.ContainerSpec.Image\' "$candidate_spec")" = "$IMAGE" ]',
         candidate,
@@ -695,6 +706,7 @@ PY
 
 python3 scripts/test-staging-authenticated-realtime-probe.py
 bash scripts/test-staging-gateway-mutation-lock.sh
+bash scripts/test-staging-gateway-spec-canonicalization.sh
 bash scripts/test-staging-gateway-spec-recovery.sh
 bash scripts/test-staging-gateway-security-cutover.sh
 bash scripts/test-staging-gateway-candidate-contract.sh

@@ -16,8 +16,8 @@ printf '%s\n' '{"TaskTemplate":{"ContainerSpec":{"Image":"repo@sha256:aaaaaaaaaa
   > "$incumbent_spec"
 printf '%s\n' '{"TaskTemplate":{"ContainerSpec":{"Image":"repo@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}}}' \
   > "$candidate_spec"
-incumbent_hash=$(sha256sum "$incumbent_spec" | awk '{print $1}')
-candidate_hash=$(sha256sum "$candidate_spec" | awk '{print $1}')
+incumbent_hash=$(jq -e -S -c . "$incumbent_spec" | sha256sum | awk '{print $1}')
+candidate_hash=$(jq -e -S -c . "$candidate_spec" | sha256sum | awk '{print $1}')
 jq -n --arg hash "$incumbent_hash" '{
   Image:"repo@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   ImageDigest:"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -66,4 +66,20 @@ if bash "$subject" "$incumbent_spec" "$incumbent_manifest" \
 fi
 [ ! -e "$test_root/rejected.md" ] || [ ! -s "$test_root/rejected.md" ]
 
-echo 'staging gateway durable transaction summary: PASS (10 identity fields, malformed manifest rejected)'
+# A failure before the candidate manifest is durable must not erase the
+# deployment's original nonzero status while the summary remains unwritten.
+partial_candidate="$test_root/partial-candidate.json"
+partial_manifest="$test_root/missing-candidate-manifest.json"
+partial_summary="$test_root/partial-summary.md"
+cp "$candidate_spec" "$partial_candidate"
+original_status=37
+status=$original_status
+if ! bash "$subject" "$incumbent_spec" "$incumbent_manifest" \
+  "$partial_candidate" "$partial_manifest" "$forward" not-required \
+  "$partial_summary" >/dev/null 2>&1; then
+  [ "$status" -ne 0 ] || status=99
+fi
+[ "$status" -eq "$original_status" ]
+[ ! -e "$partial_summary" ] || [ ! -s "$partial_summary" ]
+
+echo 'staging gateway durable transaction summary: PASS (10 identity fields, malformed/partial state rejected)'

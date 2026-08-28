@@ -39,7 +39,9 @@ cas_mode=apply_200
 verify_mode=pass
 
 reset_candidate() {
-  cp "$candidate_spec" "$state_spec"
+  # Docker may render the same object with different whitespace/key order.
+  jq '{TaskTemplate:.TaskTemplate,Name:.Name,Labels:.Labels}' \
+    "$candidate_spec" > "$state_spec"
   # A prior forward case deliberately truncates this output before simulating
   # an ambiguous capture. Every recovery case must rebuild its own complete
   # candidate fixture instead of inheriting that empty file.
@@ -138,7 +140,8 @@ staging_gateway_submit_spec_cas() {
       printf '%s\n' 200
       ;;
     conflict_exact_candidate)
-      cp "$candidate_spec" "$state_spec"
+      jq '{TaskTemplate:.TaskTemplate,Name:.Name,Labels:.Labels}' \
+        "$candidate_spec" > "$state_spec"
       printf '%s\n' 41 > "$state_version"
       printf '%s\n' 409
       ;;
@@ -218,18 +221,23 @@ cmp -s "$state_spec" "$third_spec"
 [ "$(<"$last_forward_result")" = unknown-third-preserved ]
 echo 'forward case pre-submit third Spec yields 409 and zero overwrite: PASS'
 
-# A 409 can also mean another request already established the byte-exact desired
-# candidate. Exact reconciliation accepts it without a duplicate request.
+# A 409 can also mean another request already established the semantically exact
+# candidate with different JSON formatting/key order. Reconciliation accepts it
+# without a duplicate request.
 reset_incumbent
 cas_mode=conflict_exact_candidate
 [ "$(forward)" = http-409-exact-candidate ]
 [ "$(<"$cas_count_file")" -eq 1 ]
 [ "$(<"$apply_count_file")" -eq 0 ]
-cmp -s "$state_spec" "$candidate_spec"
+if cmp -s "$state_spec" "$candidate_spec"; then
+  echo 'semantic candidate fixture unexpectedly remained byte-identical' >&2
+  exit 1
+fi
+staging_gateway_specs_equal "$state_spec" "$candidate_spec"
 echo 'forward case HTTP 409 exact candidate reconciliation: PASS'
 
 # A response lost before acceptance receives one bounded retry only while the
-# byte-exact incumbent and original Version.Index remain authoritative.
+# semantically exact incumbent and original Version.Index remain authoritative.
 reset_incumbent
 cas_mode=lost_without_apply_then_200
 [ "$(forward)" = lost-before-acceptance-bounded-retry-exact-candidate ]
