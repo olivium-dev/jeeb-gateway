@@ -1,0 +1,298 @@
+name: jeeb-production-deploy
+
+"on":
+  workflow_dispatch:
+    inputs:
+      confirm_production:
+        description: Type deploy-jeeb-production
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: jeeb-production-gateway-mutation
+  cancel-in-progress: false
+
+env:
+  IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}
+  IMAGE_TAG: ghcr.io/${{ github.repository_owner }}/${{ github.event.repository.name }}:${{ github.sha }}
+  REMOTE_DOCKER_CONFIG: .jeeb-deploy/ghcr-${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+  deploy:
+    runs-on: ubuntu-22.04
+    environment: production
+    timeout-minutes: 30
+    steps:
+      - name: Require protected production source and owner confirmation
+        env:
+          CONFIRM_PRODUCTION: ${{ inputs.confirm_production }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GITHUB_REF_PROTECTED: ${{ github.ref_protected }}
+          REQUESTING_ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REPOSITORY" = olivium-dev/jeeb-gateway ]
+          [ "$CONFIRM_PRODUCTION" = deploy-jeeb-production ] || {
+            echo '::error::Production confirmation is incorrect.' >&2
+            exit 64
+          }
+          [ "$REQUESTING_ACTOR" = oudaykhaled ] \
+            && [ "$TRIGGERING_ACTOR" = oudaykhaled ] || {
+              echo '::error::Production deploys require the designated owner.' >&2
+              exit 65
+            }
+          : "${DEFAULT_BRANCH:?repository default branch is required}"
+          [ "$GITHUB_REF" = "refs/heads/${DEFAULT_BRANCH}" ] || {
+            echo '::error::Production deploys may run only from the default branch.' >&2
+            exit 66
+          }
+          [ "$GITHUB_REF_PROTECTED" = true ] || {
+            echo '::error::The production source branch must be protected.' >&2
+            exit 67
+          }
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Verify checked-out immutable source
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_SHA" = "$(git rev-parse HEAD)" ]
+
+      - name: Install cloudflared and configure strict SSH
+        env:
+          SSH_HOST: ${{ secrets.JEEB_PRODUCTION_SSH_HOST }}
+          SSH_USER: ${{ secrets.JEEB_PRODUCTION_DEPLOY_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.JEEB_PRODUCTION_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.JEEB_PRODUCTION_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          : "${SSH_HOST:?JEEB_PRODUCTION_SSH_HOST is required}"
+          : "${SSH_USER:?JEEB_PRODUCTION_DEPLOY_USER is required}"
+          : "${SSH_PRIVATE_KEY:?JEEB_PRODUCTION_SSH_PRIVATE_KEY is required}"
+          : "${SSH_KNOWN_HOSTS:?JEEB_PRODUCTION_SSH_KNOWN_HOSTS is required}"
+          curl -fsSL --retry 3 -o cloudflared.deb \
+            https://github.com/cloudflare/cloudflared/releases/download/2026.8.2/cloudflared-linux-amd64.deb
+          printf '%s  %s\n' \
+            'c805c7c8102190c04dfc16e3b4cc4acc9007d5b19b3afbcd608ea6fed7645a43' \
+            cloudflared.deb | sha256sum --check --strict
+          sudo dpkg -i cloudflared.deb || sudo apt-get install -f -y
+          install -d -m 700 "$HOME/.ssh"
+          if printf '%s' "$SSH_PRIVATE_KEY" | grep -q '^-----BEGIN'; then
+            printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          else
+            printf '%s' "$SSH_PRIVATE_KEY" | base64 --decode > "$HOME/.ssh/id_ed25519"
+          fi
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+          ssh-keygen -F "$SSH_HOST" -f "$HOME/.ssh/known_hosts" >/dev/null || {
+            echo '::error::Known-hosts does not pin JEEB_PRODUCTION_SSH_HOST.' >&2
+            exit 68
+          }
+          {
+            printf '%s\n' 'Host jeeb-production'
+            printf '  HostName %s\n' "$SSH_HOST"
+            printf '  User %s\n' "$SSH_USER"
+            printf '%s\n' \
+              '  IdentityFile ~/.ssh/id_ed25519' \
+              '  ProxyCommand cloudflared access ssh --hostname %h' \
+              '  UserKnownHostsFile ~/.ssh/known_hosts' \
+              '  StrictHostKeyChecking yes' \
+              '  ConnectTimeout 20' \
+              '  ServerAliveInterval 10' \
+              '  ServerAliveCountMax 2'
+          } > "$HOME/.ssh/config"
+          chmod 600 "$HOME/.ssh/config"
+
+      - name: Assert exact production host and canonical service
+        run: |
+          ssh jeeb-production 'set -euo pipefail
+            [ "$(hostname -s)" = jeeb-production ] || exit 91
+            approved_ip_count=$(ip -4 -o addr show scope global \
+              | awk '\''{ split($4, address, "/"); print address[1] }'\'' \
+              | grep -Fxc 192.168.2.120 || true)
+            [ "$approved_ip_count" -eq 1 ] || exit 92
+            [ "$(docker info --format "{{.Swarm.LocalNodeState}}")" = active ]
+            [ "$(docker info --format "{{.Swarm.ControlAvailable}}")" = true ]
+            service=jeeb-production-jeeb-gateway
+            docker service inspect "$service" >/dev/null
+            [ "$(docker service inspect "$service" --format "{{.Spec.EndpointSpec.Mode}}")" = vip ]
+            [ "$(docker service inspect "$service" --format "{{.Spec.Mode.Replicated.Replicas}}")" = 1 ]
+            ports=$(docker service inspect "$service" \
+              --format "{{range .Endpoint.Spec.Ports}}{{.PublishedPort}}:{{.TargetPort}}:{{.PublishMode}}{{end}}")
+            [ "$ports" = 10000:8080:ingress ]'
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push immutable image
+        id: image_build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ env.IMAGE_TAG }}
+
+      - name: Capture build-produced immutable digest
+        id: immutable
+        env:
+          IMAGE_DIGEST: ${{ steps.image_build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "image=${IMAGE_REPOSITORY}@${IMAGE_DIGEST}" >> "$GITHUB_OUTPUT"
+
+      - name: Log remote Docker in to GHCR
+        id: remote_ghcr_login
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2029
+          ssh jeeb-production \
+            "install -d -m 700 \"\$HOME/.jeeb-deploy\" \"\$HOME/$REMOTE_DOCKER_CONFIG\""
+          # shellcheck disable=SC2029
+          printf '%s' "${{ secrets.GITHUB_TOKEN }}" \
+            | ssh jeeb-production \
+                "DOCKER_CONFIG=\"\$HOME/$REMOTE_DOCKER_CONFIG\" docker login ghcr.io -u '${{ github.actor }}' --password-stdin >/dev/null"
+
+      - name: Update production gateway and verify production posture
+        env:
+          IMAGE: ${{ steps.immutable.outputs.image }}
+        run: |
+          set -euo pipefail
+          ssh jeeb-production bash -s -- "$IMAGE" "$REMOTE_DOCKER_CONFIG" <<'REMOTE'
+          set -euo pipefail
+          image=$1
+          remote_docker_config=$2
+          service=jeeb-production-jeeb-gateway
+          base_url=http://127.0.0.1:10000
+          candidate_started=false
+          incumbent_image=$(docker service inspect "$service" \
+            --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')
+
+          wait_for_readiness() {
+            for attempt in $(seq 1 18); do
+              if curl -fsS --max-time 5 "$base_url/health/ready" >/dev/null; then
+                return 0
+              fi
+              if [ "$attempt" -eq 18 ]; then
+                echo 'Production readiness did not become healthy.' >&2
+                return 1
+              fi
+              sleep 5
+            done
+          }
+
+          expect_404() {
+            path=$1
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 "$base_url$path")
+            [ "$code" = 404 ] || {
+              echo "Expected 404 from $path, received $code." >&2
+              return 1
+            }
+          }
+
+          verify_production_posture() {
+            service_env=$(docker service inspect "$service" \
+              --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}')
+            for required in \
+              ASPNETCORE_ENVIRONMENT=Production \
+              DOTNET_ENVIRONMENT=Production \
+              SuperLogin__OpenMode=false \
+              DemoUsers__Enabled=false \
+              Features__DevEndpoints__Enabled=false \
+              Features__Swagger__Enabled=false; do
+              [ "$(printf '%s\n' "$service_env" | grep -Fxc "$required")" -eq 1 ]
+            done
+            wait_for_readiness
+            expect_404 /api/User/demo-users
+            expect_404 /api/User/super-login/users
+            expect_404 /swagger/v1/swagger.json
+            expect_404 /swagger/index.html
+            dev_code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
+              -X POST -H 'Content-Type: application/json' --data '{}' \
+              "$base_url/dev/seed/user")
+            [ "$dev_code" = 404 ] || {
+              echo "Expected 404 from /dev/seed/user, received $dev_code." >&2
+              return 1
+            }
+          }
+
+          rollback_on_failure() {
+            rc=$?
+            trap - EXIT
+            if [ "$rc" -ne 0 ] && [ "$candidate_started" = true ]; then
+              observed_image=$(docker service inspect "$service" \
+                --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')
+              if [ "$observed_image" != "$incumbent_image" ]; then
+                echo 'Production verification failed; rolling back the gateway.' >&2
+                DOCKER_CONFIG="$HOME/$remote_docker_config" \
+                  docker service rollback --detach=false "$service" || exit 95
+              fi
+              observed_image=$(docker service inspect "$service" \
+                --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')
+              [ "$observed_image" = "$incumbent_image" ] || exit 96
+              verify_production_posture || exit 97
+            fi
+            exit "$rc"
+          }
+          trap rollback_on_failure EXIT
+
+          # Harden the incumbent first. A later image rollback therefore returns to
+          # an already-production-safe service spec instead of restoring dev flags.
+          DOCKER_CONFIG="$HOME/$remote_docker_config" docker service update \
+            --env-add ASPNETCORE_ENVIRONMENT=Production \
+            --env-add DOTNET_ENVIRONMENT=Production \
+            --env-add SuperLogin__OpenMode=false \
+            --env-add DemoUsers__Enabled=false \
+            --env-add Features__DevEndpoints__Enabled=false \
+            --env-add Features__Swagger__Enabled=false \
+            --update-parallelism 1 \
+            --update-order start-first \
+            --update-monitor 30s \
+            --update-failure-action rollback \
+            --rollback-order stop-first \
+            --detach=false \
+            "$service"
+          verify_production_posture
+
+          candidate_started=true
+          DOCKER_CONFIG="$HOME/$remote_docker_config" docker service update \
+            --image "$image" \
+            --with-registry-auth \
+            --env-add ASPNETCORE_ENVIRONMENT=Production \
+            --env-add DOTNET_ENVIRONMENT=Production \
+            --env-add SuperLogin__OpenMode=false \
+            --env-add DemoUsers__Enabled=false \
+            --env-add Features__DevEndpoints__Enabled=false \
+            --env-add Features__Swagger__Enabled=false \
+            --update-parallelism 1 \
+            --update-order start-first \
+            --update-monitor 30s \
+            --update-failure-action rollback \
+            --rollback-order stop-first \
+            --detach=false \
+            "$service"
+          verify_production_posture
+
+          observed_image=$(docker service inspect "$service" \
+            --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')
+          [ "$observed_image" = "$image" ]
+          trap - EXIT
+          REMOTE
+
+      - name: Remove remote registry credentials
+        if: ${{ always() && steps.remote_ghcr_login.outcome == 'success' }}
+        run: |
+          # shellcheck disable=SC2029
+          ssh jeeb-production \
+            "rm -rf -- \"\$HOME/$REMOTE_DOCKER_CONFIG\"" || true
