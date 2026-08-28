@@ -32,10 +32,25 @@ set -e
   echo 'SUPER_LOGIN_PASSCODE reached the first child process' >&2
   exit 1
 }
-if rg -n -- '--arg[[:space:]]+(passcode|access_token|refresh_token)' "$subject" >/dev/null; then
+contains_credential_argv() {
+  grep -En -- '--arg[[:space:]]+(passcode|access_token|refresh_token)([[:space:]]|$)' "$1" >/dev/null
+}
+
+if contains_credential_argv "$subject"; then
   echo 'Super Login smoke puts a credential in child argv' >&2
   exit 1
 fi
+
+# Prove the static detector itself fails closed on every forbidden credential
+# name. Keep this portable: GitHub's runner has POSIX grep but not ripgrep.
+credential_argv_fixture="$test_root/credential-argv-fixture.sh"
+for credential_name in passcode access_token refresh_token; do
+  printf '%s\n' "jq -n --arg ${credential_name} \"\$secret\"" > "$credential_argv_fixture"
+  if ! contains_credential_argv "$credential_argv_fixture"; then
+    echo "Credential argv detector missed --arg ${credential_name}" >&2
+    exit 1
+  fi
+done
 
 runtime_bin="$test_root/runtime-bin"
 runtime_state="$test_root/runtime-state"
@@ -183,5 +198,15 @@ if grep -Eq 'MINT_(INITIAL|ROTATED)_REFRESH_CANARY|BASIC_(INITIAL|ROTATED)_REFRE
   echo 'A refresh token or passcode canary reached smoke logs' >&2
   exit 1
 fi
+for access_token in \
+  "$seed_access_token" \
+  "$seed_rotated_access_token" \
+  "$basic_access_token" \
+  "$basic_rotated_access_token"; do
+  if grep -Fq -- "$access_token" "$runtime_log"; then
+    echo 'An access-token canary reached smoke logs' >&2
+    exit 1
+  fi
+done
 
 echo 'Super Login smoke redaction contract: PASS (OpenMode omits passcode; pre-existing canonical identity login and exact refresh rotation/revocation verified; credentials redacted)'
