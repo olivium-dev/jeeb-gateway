@@ -227,8 +227,9 @@ namespace JeebGateway.Controllers
         /// <see cref="UserManagementApiException"/> to a sanitized RFC 7807 ProblemDetails.
         /// The upstream status is preserved (clamped to a valid 4xx/5xx; anything else →
         /// 502 Bad Gateway), but the upstream exception message / response body is NEVER
-        /// echoed to the caller — it is logged server-side only. The prior JEBV4-63 partial
-        /// fix wrapped the leak in an RFC 7807 envelope but still forwarded the raw upstream
+        /// echoed to the caller or written to logs; only safe status/request metadata is
+        /// logged. The prior JEBV4-63 partial fix wrapped the leak in an RFC 7807 envelope
+        /// but still forwarded the raw upstream
         /// <c>ex.Message</c> as the response <c>detail</c>; that information-disclosure leak
         /// is removed here. Mirrors the JEBV4-242 <c>ChatController.UpstreamProblem</c> idiom.
         /// </summary>
@@ -238,7 +239,7 @@ namespace JeebGateway.Controllers
                 ? ex.StatusCode
                 : StatusCodes.Status502BadGateway;
 
-            _logger.LogWarning(ex,
+            _logger.LogWarning(
                 "User BFF: user-management call failed on {Method} {Path} → {Status}.",
                 Request.Method, Request.Path, status);
 

@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.IdentityModel.Tokens.Jwt;
 using System.Net;
 using System.Net.Http.Json;
@@ -11,6 +12,7 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
+using Microsoft.Extensions.Logging;
 using Xunit;
 using UmApiException = JeebGateway.service.ServiceUserManagement.ApiException;
 using UmClient = JeebGateway.service.ServiceUserManagement.ServiceUserManagementClient;
@@ -199,22 +201,30 @@ public sealed class UserIdLoginGatewayTokenTests
         um.UserIdLoginCalls.Should().Be(0);
     }
 
-    [Fact]
-    public async Task OpenMode_UpstreamAuthorityFailure_PreservesSanitizedStatusWithoutMinting()
+    [Theory]
+    [InlineData("/api/User/user-id-login")]
+    [InlineData("/api/User/userid-login")]
+    public async Task OpenMode_UpstreamAuthorityFailure_DoesNotLeakResponseToHttpOrLogs(
+        string route)
     {
+        const string canary = "SECRET_CANARY_openmode_roles_response";
         var um = new RecordingUmClient
         {
-            RolesFailure = ApiFailure(StatusCodes.Status503ServiceUnavailable),
+            RolesFailure = ApiFailure(StatusCodes.Status503ServiceUnavailable, canary),
         };
         var tokens = new RecordingTokenService();
-        using var factory = MakeFactory(openMode: true, um, tokens);
+        using var logs = new CapturingLoggerProvider();
+        using var factory = MakeFactory(openMode: true, um, tokens, loggerProvider: logs);
 
         var response = await factory.CreateClient().PostAsJsonAsync(
-            "/api/User/user-id-login", new { userId = UserId });
+            route, new { userId = UserId });
 
         response.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
         var raw = await response.Content.ReadAsStringAsync();
-        raw.Should().NotContain("sensitive-upstream-body");
+        raw.Should().NotContain(canary);
+        logs.Entries.Should().Contain(entry =>
+            entry.Contains("User BFF: user-management call failed", StringComparison.Ordinal));
+        logs.Entries.Should().NotContain(entry => entry.Contains(canary, StringComparison.Ordinal));
         tokens.Issues.Should().BeEmpty();
     }
 
@@ -319,7 +329,8 @@ public sealed class UserIdLoginGatewayTokenTests
         bool openMode,
         RecordingUmClient um,
         RecordingTokenService tokens,
-        TestUserManagementDualRoleClient? legacyRoles = null)
+        TestUserManagementDualRoleClient? legacyRoles = null,
+        ILoggerProvider? loggerProvider = null)
         => new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.ConfigureAppConfiguration((_, configuration) =>
@@ -337,6 +348,10 @@ public sealed class UserIdLoginGatewayTokenTests
                 services.RemoveAll<IUserManagementDualRoleClient>();
                 services.AddSingleton<IUserManagementDualRoleClient>(
                     legacyRoles ?? new TestUserManagementDualRoleClient());
+                if (loggerProvider is not null)
+                {
+                    services.AddSingleton(loggerProvider);
+                }
             });
         });
 
@@ -373,13 +388,59 @@ public sealed class UserIdLoginGatewayTokenTests
             Active_role = activeRole,
         };
 
-    private static UmApiException ApiFailure(int status)
+    private static UmApiException ApiFailure(
+        int status,
+        string response = "sensitive-upstream-body")
         => new(
             "upstream failure",
             status,
-            "sensitive-upstream-body",
+            response,
             new Dictionary<string, IEnumerable<string>>(),
             null);
+
+    private sealed class CapturingLoggerProvider : ILoggerProvider
+    {
+        private readonly ConcurrentQueue<string> _entries = new();
+
+        internal IReadOnlyCollection<string> Entries => _entries.ToArray();
+
+        public ILogger CreateLogger(string categoryName) => new CapturingLogger(_entries);
+
+        public void Dispose()
+        {
+        }
+
+        private sealed class CapturingLogger(ConcurrentQueue<string> entries) : ILogger
+        {
+            public IDisposable? BeginScope<TState>(TState state) where TState : notnull
+                => NullScope.Instance;
+
+            public bool IsEnabled(LogLevel logLevel) => true;
+
+            public void Log<TState>(
+                LogLevel logLevel,
+                EventId eventId,
+                TState state,
+                Exception? exception,
+                Func<TState, Exception?, string> formatter)
+            {
+                entries.Enqueue(formatter(state, exception));
+                if (exception is not null)
+                {
+                    entries.Enqueue(exception.ToString());
+                }
+            }
+        }
+
+        private sealed class NullScope : IDisposable
+        {
+            internal static NullScope Instance { get; } = new();
+
+            public void Dispose()
+            {
+            }
+        }
+    }
 
     private sealed class RecordingUmClient : UmClient
     {
