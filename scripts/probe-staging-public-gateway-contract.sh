@@ -93,10 +93,14 @@ probe_origin() {
   rm -f -- "$response_file"
 }
 
-probe_origin app.jeeb.fds-1.com /admin/v1/auth/refresh https "$CSRF_TYPE"
-probe_origin app.jeeb.fds-1.com /admin/v1/auth/refresh http "$ORIGIN_TYPE"
-probe_origin "${CMS_ORIGIN#https://}" /gateway/admin/v1/auth/refresh https "$CSRF_TYPE"
-probe_origin "${CMS_ORIGIN#https://}" /gateway/admin/v1/auth/refresh http "$ORIGIN_TYPE"
+if [ "$PROBE_MODE" != devtool ]; then
+  # These admin-cookie security invariants belong to the default and recovered
+  # posture gates. They are not part of the staging Dev Tool API contract.
+  probe_origin app.jeeb.fds-1.com /admin/v1/auth/refresh https "$CSRF_TYPE"
+  probe_origin app.jeeb.fds-1.com /admin/v1/auth/refresh http "$ORIGIN_TYPE"
+  probe_origin "${CMS_ORIGIN#https://}" /gateway/admin/v1/auth/refresh https "$CSRF_TYPE"
+  probe_origin "${CMS_ORIGIN#https://}" /gateway/admin/v1/auth/refresh http "$ORIGIN_TYPE"
+fi
 
 expect_status 400 'OTP request validation contract' \
   --header 'Content-Type: application/json' --data '{}' \
@@ -158,4 +162,8 @@ if [ "$PROBE_MODE" != invariant ]; then
   fi
 fi
 
-echo "Staging public origin, CSRF, OTP, and ${PROBE_MODE} contracts are exact."
+if [ "$PROBE_MODE" = devtool ]; then
+  echo 'Staging public OTP and devtool contracts are exact.'
+else
+  echo "Staging public origin, CSRF, OTP, and ${PROBE_MODE} contracts are exact."
+fi
