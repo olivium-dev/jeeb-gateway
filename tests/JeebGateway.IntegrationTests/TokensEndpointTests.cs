@@ -232,6 +232,44 @@ public class TokensEndpointTests : IClassFixture<WebApplicationFactory<Program>>
         body!.AccessToken.Should().NotBeNullOrWhiteSpace();
     }
 
+    [Fact]
+    public async Task Mint_OpenMode_Bypasses_Key_And_Returns_Gateway_Audience_Session()
+    {
+        using var openFactory = _factory.WithWebHostBuilder(builder =>
+            builder.ConfigureAppConfiguration((_, cfg) =>
+                cfg.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["SuperLogin:OpenMode"] = "true",
+                    ["Security:TokenMint:Enabled"] = "true",
+                    ["Security:TokenMint:Key"] = MintKey,
+                })));
+        const string userId = "open-mode-user";
+        openFactory.Services.GetRequiredService<InMemoryUsersStore>().Seed(new UserProfile
+        {
+            Id = userId,
+            Phone = string.Empty,
+            Name = userId,
+            Roles = new List<string> { Roles.Admin },
+            ActiveRole = Roles.Admin,
+            CreatedAt = DateTimeOffset.UtcNow,
+            UpdatedAt = DateTimeOffset.UtcNow,
+        });
+
+        var response = await openFactory.CreateClient().PostAsJsonAsync(
+            "/auth/tokens", new { userId, roles = new[] { Roles.Admin } });
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK,
+            "staging OpenMode intentionally bypasses the service-key gate");
+        var pair = await response.Content.ReadFromJsonAsync<TokenPairResponse>();
+        var token = new JwtSecurityTokenHandler().ReadJwtToken(pair!.AccessToken);
+        var options = openFactory.Services.GetRequiredService<IOptions<JwtOptions>>().Value;
+        token.Issuer.Should().Be(options.Issuer);
+        token.Audiences.Should().Contain(options.Audience);
+        token.Subject.Should().Be(userId);
+        token.Claims.Where(claim => claim.Type == "roles").Select(claim => claim.Value)
+            .Should().Contain(Roles.Admin);
+    }
+
     private async Task<TokenPairResponse> Issue(string userId)
     {
         var store = _factory.Services.GetRequiredService<InMemoryUsersStore>();

@@ -271,9 +271,9 @@ SECURITY_CUTOVER_INPUT = {
     "required": True,
     "default": "normal",
     "type": "choice",
-    "options": ["normal", "security-cutover", "otp-cutover"],
+    "options": ["normal", "security-cutover", "otp-cutover", "devtool-reassert"],
 }
-SECURITY_CUTOVER_GATE_NAME = "Require designated cutover owner"
+SECURITY_CUTOVER_GATE_NAME = "Require designated staging owner"
 SECURITY_CUTOVER_GATE_IF = "${{ inputs.deployment_mode != 'normal' }}"
 SECURITY_CUTOVER_GATE_ENV = {
     "REQUESTING_ACTOR": "${{ github.actor }}",
@@ -283,7 +283,7 @@ SECURITY_CUTOVER_GATE_LINES = (
     "set -euo pipefail",
     'if [ "$REQUESTING_ACTOR" != oudaykhaled ] \\',
     '  || [ "$TRIGGERING_ACTOR" != oudaykhaled ]; then',
-    "  echo '::error::Staging cutovers require the designated owner.' >&2",
+    "  echo '::error::Protected staging deployments require the designated owner.' >&2",
     "  exit 1",
     "fi",
 )
@@ -437,7 +437,7 @@ def validate_workflow_authority(name, document):
                     rejected.returncode != 1
                     or rejected.stdout
                     or rejected.stderr
-                    != "::error::Staging cutovers require the designated owner.\n"
+                    != "::error::Protected staging deployments require the designated owner.\n"
                     or actor in rejected.stderr
                     or triggering_actor in rejected.stderr
                 ):
@@ -451,6 +451,7 @@ def validate_workflow_authority(name, document):
             freeze = steps[3]
             if freeze != {
                 "name": "Prove public OTP verification freeze before any deploy action",
+                "if": "${{ inputs.deployment_mode != 'devtool-reassert' }}",
                 "run": "bash scripts/verify-staging-otp-verify-freeze.sh",
             }:
                 raise ValueError(f"{name}:{job_name} first security-cutover gate drifted")
@@ -745,7 +746,18 @@ for token in (
     "add_env AdminPortal__AllowedOrigins__0 https://app.jeeb.fds-1.com",
     "add_env AdminPortal__AllowedOrigins__1 https://cms.jeeb.fds-1.com",
     "scripts/probe-staging-public-gateway-contract.sh",
+    "probe-staging-public-gateway-contract.sh posture",
+    "probe-staging-public-gateway-contract.sh devtool",
+    "scripts/test-super-login.sh https://app.jeeb.fds-1.com",
     "add_env Security__TokenMint__Enabled true",
+    "add_env SuperLogin__OpenMode true",
+    "add_env DemoUsers__Enabled true",
+    "add_env Features__DevEndpoints__Enabled true",
+    "add_env Features__Swagger__Enabled true",
+    "scripts/staging-gateway-devtool-reassert-candidate.jq",
+    "scripts/staging-gateway-readiness-backoff.sh",
+    "scripts/staging-gateway-transaction-summary.sh",
+    "scripts/staging-gateway-incumbent-devtool-posture.jq",
     "source scripts/staging-gateway-mutation-lock.sh",
     "staging_gateway_lock_acquire",
     "staging_gateway_lock_assert",

@@ -12,6 +12,7 @@ name: jeeb-staging-deploy
           - normal
           - security-cutover
           - otp-cutover
+          - devtool-reassert
 
 permissions:
   contents: read
@@ -38,7 +39,7 @@ jobs:
           echo '::error::Forward-only promotion pending owner-approved failure handling; no image, SSH, provider, secret, or Swarm mutation was attempted.' >&2
           exit 1
 
-      - name: Require designated cutover owner
+      - name: Require designated staging owner
         if: ${{ inputs.deployment_mode != 'normal' }}
         env:
           REQUESTING_ACTOR: ${{ github.actor }}
@@ -47,13 +48,14 @@ jobs:
           set -euo pipefail
           if [ "$REQUESTING_ACTOR" != oudaykhaled ] \
             || [ "$TRIGGERING_ACTOR" != oudaykhaled ]; then
-            echo '::error::Staging cutovers require the designated owner.' >&2
+            echo '::error::Protected staging deployments require the designated owner.' >&2
             exit 1
           fi
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Prove public OTP verification freeze before any deploy action
+        if: ${{ inputs.deployment_mode != 'devtool-reassert' }}
         run: bash scripts/verify-staging-otp-verify-freeze.sh
 
       - name: Require immutable default-branch source
@@ -71,7 +73,7 @@ jobs:
             exit 1
           }
           [ "$DEPLOY_ENVIRONMENT" = staging ]
-          case "$DEPLOYMENT_MODE" in security-cutover|otp-cutover) ;; *) exit 64 ;; esac
+          case "$DEPLOYMENT_MODE" in security-cutover|otp-cutover|devtool-reassert) ;; *) exit 64 ;; esac
           [ "$GITHUB_REF" = "refs/heads/${DEFAULT_BRANCH}" ] || {
             echo '::error::Staging deploys may run only from the repository default branch' >&2
             exit 1
@@ -214,8 +216,8 @@ jobs:
             echo '::error::This vendored workflow deploys only jeeb-gateway' >&2
             exit 1
           }
-          case "$DEPLOYMENT_MODE" in security-cutover|otp-cutover) ;; *)
-            echo '::error::Only an explicit cutover mode may pass the owner block' >&2
+          case "$DEPLOYMENT_MODE" in security-cutover|otp-cutover|devtool-reassert) ;; *)
+            echo '::error::Only an explicit protected staging mode may pass the owner block' >&2
             exit 1
           esac
           state_secret_name=''
@@ -234,50 +236,53 @@ jobs:
           published=10000
           health=/health/ready
           if [ "$REPOSITORY" = jeeb-gateway ]; then
-            : "${JEEB_STATE_SERVICE_TOKEN:?JEEB_STATE_SERVICE_TOKEN is required}"
-            : "${NOTIFICATION_SERVICE_TOKEN:?NOTIFICATION_SERVICE_TOKEN is required}"
-            : "${SETTLEMENT_SERVICE_TOKEN:?SETTLEMENT_SERVICE_TOKEN is required}"
-            : "${BUNDLER_CMS_BEARER_TOKEN:?BUNDLER_CMS_BEARER_TOKEN is required}"
-            : "${JEEB_GATEWAY_JOB_TOKEN:?JEEB_GATEWAY_JOB_TOKEN is required}"
-            : "${JWT_SIGNING_KEY:?JEEB_JWT_SIGNING_KEY is required}"
-            : "${JEEB_RTC_GUARDIAN_SECRET_KEY:?JEEB_RTC_GUARDIAN_SECRET_KEY is required}"
-            : "${JEEB_STAGING_WSS_PROBE_MINT_KEY:?JEEB_STAGING_WSS_PROBE_MINT_KEY is required}"
-            : "${JEEB_RTC_MEMBERSHIP_TICKET_KEY:?JEEB_RTC_MEMBERSHIP_TICKET_KEY is required}"
-            : "${JEEB_FIREBASE_JSON:?JEEB_FIREBASE_JSON is required}"
-            [ "${#JWT_SIGNING_KEY}" -ge 32 ]
-            [ -z "$UMJWT_SIGNING_KEY" ] || [ "${#UMJWT_SIGNING_KEY}" -ge 32 ]
-            [ "${#JEEB_RTC_GUARDIAN_SECRET_KEY}" -ge 64 ]
-            [ "${#JEEB_RTC_MEMBERSHIP_TICKET_KEY}" -ge 32 ]
-            [ "$(printf '%s' "$JEEB_STAGING_WSS_PROBE_MINT_KEY" | LC_ALL=C wc -c)" -ge 32 ]
-            [ "$JEEB_RTC_MEMBERSHIP_TICKET_KEY" != "$JEEB_RTC_GUARDIAN_SECRET_KEY" ]
-            [ "$JEEB_RTC_MEMBERSHIP_TICKET_KEY" != "$JWT_SIGNING_KEY" ]
-            [ "$JEEB_STAGING_WSS_PROBE_MINT_KEY" != "$JWT_SIGNING_KEY" ]
-            [ "$JEEB_STAGING_WSS_PROBE_MINT_KEY" != "$JEEB_RTC_GUARDIAN_SECRET_KEY" ]
-            [ "$JEEB_STAGING_WSS_PROBE_MINT_KEY" != "$JEEB_RTC_MEMBERSHIP_TICKET_KEY" ]
-            [ -z "$UMJWT_SIGNING_KEY" ] || \
-              [ "$JEEB_STAGING_WSS_PROBE_MINT_KEY" != "$UMJWT_SIGNING_KEY" ]
-            if [ "$DEPLOYMENT_MODE" = otp-cutover ]; then
-              : "${JEEB_OTP_SERVICE_AUTH_KEY:?JEEB_OTP_SERVICE_AUTH_KEY is required}"
-              [ "${#JEEB_OTP_SERVICE_AUTH_KEY}" -ge 32 ]
-              [ "$JEEB_OTP_SERVICE_AUTH_KEY" != "$JWT_SIGNING_KEY" ]
+            if [ "$DEPLOYMENT_MODE" != devtool-reassert ]; then
+              : "${JEEB_STAGING_WSS_PROBE_MINT_KEY:?JEEB_STAGING_WSS_PROBE_MINT_KEY is required}"
+              [ "$(printf '%s' "$JEEB_STAGING_WSS_PROBE_MINT_KEY" | LC_ALL=C wc -c)" -ge 32 ]
+              : "${JEEB_STATE_SERVICE_TOKEN:?JEEB_STATE_SERVICE_TOKEN is required}"
+              : "${NOTIFICATION_SERVICE_TOKEN:?NOTIFICATION_SERVICE_TOKEN is required}"
+              : "${SETTLEMENT_SERVICE_TOKEN:?SETTLEMENT_SERVICE_TOKEN is required}"
+              : "${BUNDLER_CMS_BEARER_TOKEN:?BUNDLER_CMS_BEARER_TOKEN is required}"
+              : "${JEEB_GATEWAY_JOB_TOKEN:?JEEB_GATEWAY_JOB_TOKEN is required}"
+              : "${JWT_SIGNING_KEY:?JEEB_JWT_SIGNING_KEY is required}"
+              : "${JEEB_RTC_GUARDIAN_SECRET_KEY:?JEEB_RTC_GUARDIAN_SECRET_KEY is required}"
+              : "${JEEB_RTC_MEMBERSHIP_TICKET_KEY:?JEEB_RTC_MEMBERSHIP_TICKET_KEY is required}"
+              : "${JEEB_FIREBASE_JSON:?JEEB_FIREBASE_JSON is required}"
+              [ "${#JWT_SIGNING_KEY}" -ge 32 ]
               [ -z "$UMJWT_SIGNING_KEY" ] || \
-                [ "$JEEB_OTP_SERVICE_AUTH_KEY" != "$UMJWT_SIGNING_KEY" ]
+                [ "${#UMJWT_SIGNING_KEY}" -ge 32 ]
+              [ "${#JEEB_RTC_GUARDIAN_SECRET_KEY}" -ge 64 ]
+              [ "${#JEEB_RTC_MEMBERSHIP_TICKET_KEY}" -ge 32 ]
+              [ "$JEEB_RTC_MEMBERSHIP_TICKET_KEY" != "$JEEB_RTC_GUARDIAN_SECRET_KEY" ]
+              [ "$JEEB_RTC_MEMBERSHIP_TICKET_KEY" != "$JWT_SIGNING_KEY" ]
+              [ "$JEEB_STAGING_WSS_PROBE_MINT_KEY" != "$JWT_SIGNING_KEY" ]
+              [ "$JEEB_STAGING_WSS_PROBE_MINT_KEY" != "$JEEB_RTC_GUARDIAN_SECRET_KEY" ]
+              [ "$JEEB_STAGING_WSS_PROBE_MINT_KEY" != "$JEEB_RTC_MEMBERSHIP_TICKET_KEY" ]
+              [ -z "$UMJWT_SIGNING_KEY" ] || \
+                [ "$JEEB_STAGING_WSS_PROBE_MINT_KEY" != "$UMJWT_SIGNING_KEY" ]
+              if [ "$DEPLOYMENT_MODE" = otp-cutover ]; then
+                : "${JEEB_OTP_SERVICE_AUTH_KEY:?JEEB_OTP_SERVICE_AUTH_KEY is required}"
+                [ "${#JEEB_OTP_SERVICE_AUTH_KEY}" -ge 32 ]
+                [ "$JEEB_OTP_SERVICE_AUTH_KEY" != "$JWT_SIGNING_KEY" ]
+                [ -z "$UMJWT_SIGNING_KEY" ] || \
+                  [ "$JEEB_OTP_SERVICE_AUTH_KEY" != "$UMJWT_SIGNING_KEY" ]
+              fi
+              bash scripts/assert-distinct-staging-signing-keys.sh
+              state_secret_name="jeeb_staging_gateway_state_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+              notification_secret_name="jeeb_staging_gateway_notification_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+              settlement_secret_name="jeeb_staging_gateway_settlement_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+              bundler_secret_name="jeeb_staging_gateway_bundler_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+              job_secret_name="jeeb_staging_gateway_job_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+              jwt_secret_name="jeeb_staging_gateway_jwt_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+              guardian_secret_name="jeeb_staging_gateway_guardian_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+              probe_secret_name="jeeb_staging_gateway_wss_probe_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+              membership_secret_name="jeeb_staging_gateway_membership_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+              firebase_secret_name="jeeb_staging_gateway_firebase_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+              [ "$DEPLOYMENT_MODE" != otp-cutover ] || \
+                service_auth_secret_name="jeeb_staging_gateway_service_auth_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+              [ -z "$UMJWT_SIGNING_KEY" ] || \
+                umjwt_secret_name="jeeb_staging_gateway_umjwt_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
             fi
-            bash scripts/assert-distinct-staging-signing-keys.sh
-            state_secret_name="jeeb_staging_gateway_state_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
-            notification_secret_name="jeeb_staging_gateway_notification_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
-            settlement_secret_name="jeeb_staging_gateway_settlement_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
-            bundler_secret_name="jeeb_staging_gateway_bundler_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
-            job_secret_name="jeeb_staging_gateway_job_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
-            jwt_secret_name="jeeb_staging_gateway_jwt_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
-            guardian_secret_name="jeeb_staging_gateway_guardian_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
-            probe_secret_name="jeeb_staging_gateway_wss_probe_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
-            membership_secret_name="jeeb_staging_gateway_membership_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
-            firebase_secret_name="jeeb_staging_gateway_firebase_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
-            [ "$DEPLOYMENT_MODE" != otp-cutover ] || \
-              service_auth_secret_name="jeeb_staging_gateway_service_auth_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
-            [ -z "$UMJWT_SIGNING_KEY" ] || \
-              umjwt_secret_name="jeeb_staging_gateway_umjwt_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
             secret_stage=$(mktemp -d)
             chmod 700 "$secret_stage"
             firebase_file="$secret_stage/firebase-admin.json"
@@ -390,21 +395,8 @@ jobs:
                 && cmp -s "$final_id" "$candidate_id"
             }
             verify_candidate_readiness() {
-              ssh jeeb-staging bash -s -- "$published" "$health" <<'READINESS'
-                set -euo pipefail
-                published=$1
-                health=$2
-                candidate_ready=false
-                for attempt in $(seq 1 40); do
-                  if curl -fsS --max-time 5 \
-                    "http://127.0.0.1:${published}${health}" >/dev/null; then
-                    candidate_ready=true
-                    break
-                  fi
-                  sleep 4
-                done
-                [ "$candidate_ready" = true ]
-          READINESS
+              ssh jeeb-staging bash -s -- "$published" "$health" \
+                < scripts/staging-gateway-readiness-backoff.sh
             }
             verify_bootstrap_flags() {
               ssh jeeb-staging bash -s -- "$service" "$DEPLOYMENT_MODE" <<'FLAGS'
@@ -413,23 +405,32 @@ jobs:
                 deployment_mode=$2
                 environment=$(docker service inspect "$service" \
                   --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}')
-                expected_contract=(
-                  FeatureFlags__UseUpstream__Chat=false
-                  FeatureFlags__UseUpstream__Realtime=false
-                  Features__RealtimeWebSocketProxy__Enabled=false
-                  FeatureFlags__UseUpstream__Voice=false
-                  FeatureFlags__UseUpstream__Otp=true
-                  Services__ServiceOTP__BaseUrl=http://jeeb-staging-one-time-password:8080
-                  ServiceOTPApi__BaseUrl=http://jeeb-staging-one-time-password:8080
-                  Auth__Otp__ApplicationId=0d51afe1-499f-4a29-a55a-36d2dd223b05
-                  Auth__Otp__Phone__AllowedRegion=LB
-                  Auth__Otp__Phone__EnforceRegion=false
-                  Services__Realtime__BaseUrl=http://jeeb-staging-realtime-comunication-service:4000
-                  SuperLogin__OpenMode=true
-                  DemoUsers__Enabled=true
-                  Operations__RealtimeProbe__MintKeyFile=/run/secrets/staging_wss_probe_mint_key
-                  ASPNETCORE_ENVIRONMENT=Staging
-                )
+                if [ "$deployment_mode" = devtool-reassert ]; then
+                  expected_contract=(
+                    SuperLogin__OpenMode=true
+                    DemoUsers__Enabled=true
+                    Features__DevEndpoints__Enabled=true
+                    Features__Swagger__Enabled=true
+                  )
+                else
+                  expected_contract=(
+                    FeatureFlags__UseUpstream__Chat=false
+                    FeatureFlags__UseUpstream__Realtime=false
+                    Features__RealtimeWebSocketProxy__Enabled=false
+                    FeatureFlags__UseUpstream__Voice=false
+                    FeatureFlags__UseUpstream__Otp=true
+                    Services__ServiceOTP__BaseUrl=http://jeeb-staging-one-time-password:8080
+                    ServiceOTPApi__BaseUrl=http://jeeb-staging-one-time-password:8080
+                    Auth__Otp__ApplicationId=0d51afe1-499f-4a29-a55a-36d2dd223b05
+                    Auth__Otp__Phone__AllowedRegion=LB
+                    Auth__Otp__Phone__EnforceRegion=false
+                    Services__Realtime__BaseUrl=http://jeeb-staging-realtime-comunication-service:4000
+                    SuperLogin__OpenMode=true
+                    DemoUsers__Enabled=true
+                    Operations__RealtimeProbe__MintKeyFile=/run/secrets/staging_wss_probe_mint_key
+                    ASPNETCORE_ENVIRONMENT=Staging
+                  )
+                fi
                 if [ "$deployment_mode" = otp-cutover ]; then
                   expected_contract+=(
                     ServiceAuth__Enabled=true
@@ -607,6 +608,7 @@ jobs:
             }
             staging_gateway_verify_incumbent() {
               local observed_spec=$1 observed_version=$2 observed_id=$3
+              local open_mode demo_users dev_endpoints swagger token_mint
               : "$observed_version"
               cmp -s "$observed_spec" "$incumbent_spec"
               cmp -s "$observed_id" "$incumbent_id"
@@ -614,55 +616,22 @@ jobs:
               ssh jeeb-staging bash -s -- "$service" "$incumbent_image" \
                 < scripts/verify-swarm-service-image.sh
               verify_candidate_readiness
-              bash scripts/probe-staging-public-gateway-contract.sh
+              IFS=$'\t' read -r open_mode demo_users dev_endpoints swagger token_mint < <(
+                jq -er -f scripts/staging-gateway-incumbent-devtool-posture.jq \
+                  "$incumbent_spec"
+              )
+              bash scripts/probe-staging-public-gateway-contract.sh posture \
+                "$open_mode" "$demo_users" "$dev_endpoints" "$swagger" "$token_mint"
               capture_remote_spec \
                 "$recovery_terminal_spec" "$recovery_terminal_version" "$recovery_terminal_id"
               cmp -s "$recovery_terminal_spec" "$incumbent_spec"
               cmp -s "$recovery_terminal_id" "$incumbent_id"
             }
             append_sanitized_transaction_summary() {
-              local incumbent_hash='' candidate_hash='' forward=not-submitted
-              [ ! -s "$incumbent_spec" ] || \
-                incumbent_hash=$(sha256sum "$incumbent_spec" | awk '{print $1}')
-              [ ! -s "$candidate_spec" ] || \
-                candidate_hash=$(sha256sum "$candidate_spec" | awk '{print $1}')
-              [ ! -s "$forward_result" ] || forward=$(<"$forward_result")
-              [ -z "$incumbent_hash" ] || [[ "$incumbent_hash" =~ ^[0-9a-f]{64}$ ]]
-              [ -z "$candidate_hash" ] || [[ "$candidate_hash" =~ ^[0-9a-f]{64}$ ]]
-              case "$forward" in
-                not-submitted|http-200-exact-candidate|http-409-exact-candidate|\
-                lost-after-acceptance-exact-candidate|\
-                lost-before-acceptance-bounded-retry-exact-candidate|\
-                unknown-third-preserved|candidate-capture-failed-after-submit|\
-                unexpected-http-status-after-submit|\
-                http-200-exact-incumbent-invalid|http-409-exact-incumbent-no-retry|\
-                lock-lost-before-bounded-retry|\
-                unexpected-http-status-after-bounded-retry|\
-                candidate-capture-failed-after-bounded-retry|\
-                bounded-retry-exact-incumbent-no-candidate|\
-                bounded-retry-unreconciled|\
-                submission-interrupted-recovered-incumbent|\
-                submission-interrupted-recovery-failed|\
-                security-cutover-submitted-pending|\
-                security-cutover-http-200-exact-candidate|\
-                security-cutover-cas-rejected-fix-forward|\
-                security-cutover-ambiguous-fix-forward|\
-                security-cutover-exact-state-unavailable|\
-                security-cutover-unknown-state-fix-forward|\
-                security-cutover-interrupted-fix-forward) ;;
-                *) forward=invalid-result-refused ;;
-              esac
-              case "$recovery_result" in
-                not-armed|armed-pending|not-required|exact-incumbent-recovered|recovery-failed) ;;
-                *) recovery_result=invalid-result-refused ;;
-              esac
-              {
-                printf '%s\n' '### Staging gateway Spec transaction'
-                [ -z "$incumbent_hash" ] || printf -- '- incumbent_spec_sha256: %s\n' "$incumbent_hash"
-                [ -z "$candidate_hash" ] || printf -- '- candidate_spec_sha256: %s\n' "$candidate_hash"
-                printf -- '- forward_reconciliation: %s\n' "$forward"
-                printf -- '- recovery_result: %s\n' "$recovery_result"
-              } >> "$GITHUB_STEP_SUMMARY"
+              bash scripts/staging-gateway-transaction-summary.sh \
+                "$incumbent_spec" "$incumbent_manifest" \
+                "$candidate_spec" "$candidate_manifest" \
+                "$forward_result" "$recovery_result" "$GITHUB_STEP_SUMMARY"
             }
             finish_deploy() {
               local status=$?
@@ -746,32 +715,38 @@ jobs:
               # shellcheck disable=SC2029
               ssh jeeb-staging "docker secret create '$1' - >/dev/null" < "$2"
             }
-            if printf '%s' "$JEEB_FIREBASE_JSON" \
-              | jq -e '.type == "service_account" and .project_id == "jeeb-5a293"' >/dev/null; then
-              printf '%s' "$JEEB_FIREBASE_JSON" > "$firebase_file"
-            elif printf '%s' "$JEEB_FIREBASE_JSON" | base64 --decode \
-              | jq -e '.type == "service_account" and .project_id == "jeeb-5a293"' > "$firebase_file"; then
-              :
-            else
-              echo '::error::JEEB_FIREBASE_JSON is not a jeeb-5a293 service-account document' >&2
-              exit 1
+            if [ "$DEPLOYMENT_MODE" != devtool-reassert ]; then
+              if printf '%s' "$JEEB_FIREBASE_JSON" \
+                | jq -e '.type == "service_account" and .project_id == "jeeb-5a293"' >/dev/null; then
+                printf '%s' "$JEEB_FIREBASE_JSON" > "$firebase_file"
+              elif printf '%s' "$JEEB_FIREBASE_JSON" | base64 --decode \
+                | jq -e '.type == "service_account" and .project_id == "jeeb-5a293"' > "$firebase_file"; then
+                :
+              else
+                echo '::error::JEEB_FIREBASE_JSON is not a jeeb-5a293 service-account document' >&2
+                exit 1
+              fi
+              chmod 600 "$firebase_file"
             fi
-            chmod 600 "$firebase_file"
-            (umask 077; printf '%s' "$JEEB_STAGING_WSS_PROBE_MINT_KEY" > "$probe_key_file")
+            if [ "$DEPLOYMENT_MODE" != devtool-reassert ]; then
+              (umask 077; printf '%s' "$JEEB_STAGING_WSS_PROBE_MINT_KEY" > "$probe_key_file")
+            fi
             staging_gateway_lock_acquire
-            stream_secret "$state_secret_name" "$JEEB_STATE_SERVICE_TOKEN"
-            stream_secret "$notification_secret_name" "$NOTIFICATION_SERVICE_TOKEN"
-            stream_secret "$settlement_secret_name" "$SETTLEMENT_SERVICE_TOKEN"
-            stream_secret "$bundler_secret_name" "$BUNDLER_CMS_BEARER_TOKEN"
-            stream_secret "$job_secret_name" "$JEEB_GATEWAY_JOB_TOKEN"
-            stream_secret "$jwt_secret_name" "$JWT_SIGNING_KEY"
-            [ -z "$umjwt_secret_name" ] || stream_secret "$umjwt_secret_name" "$UMJWT_SIGNING_KEY"
-            stream_secret "$guardian_secret_name" "$JEEB_RTC_GUARDIAN_SECRET_KEY"
-            stream_secret "$probe_secret_name" "$JEEB_STAGING_WSS_PROBE_MINT_KEY"
-            stream_secret "$membership_secret_name" "$JEEB_RTC_MEMBERSHIP_TICKET_KEY"
-            stream_secret_file "$firebase_secret_name" "$firebase_file"
-            [ -z "$service_auth_secret_name" ] || \
-              stream_secret "$service_auth_secret_name" "$JEEB_OTP_SERVICE_AUTH_KEY"
+            if [ "$DEPLOYMENT_MODE" != devtool-reassert ]; then
+              stream_secret "$state_secret_name" "$JEEB_STATE_SERVICE_TOKEN"
+              stream_secret "$notification_secret_name" "$NOTIFICATION_SERVICE_TOKEN"
+              stream_secret "$settlement_secret_name" "$SETTLEMENT_SERVICE_TOKEN"
+              stream_secret "$bundler_secret_name" "$BUNDLER_CMS_BEARER_TOKEN"
+              stream_secret "$job_secret_name" "$JEEB_GATEWAY_JOB_TOKEN"
+              stream_secret "$jwt_secret_name" "$JWT_SIGNING_KEY"
+              [ -z "$umjwt_secret_name" ] || stream_secret "$umjwt_secret_name" "$UMJWT_SIGNING_KEY"
+              stream_secret "$guardian_secret_name" "$JEEB_RTC_GUARDIAN_SECRET_KEY"
+              stream_secret "$probe_secret_name" "$JEEB_STAGING_WSS_PROBE_MINT_KEY"
+              stream_secret "$membership_secret_name" "$JEEB_RTC_MEMBERSHIP_TICKET_KEY"
+              stream_secret_file "$firebase_secret_name" "$firebase_file"
+              [ -z "$service_auth_secret_name" ] || \
+                stream_secret "$service_auth_secret_name" "$JEEB_OTP_SERVICE_AUTH_KEY"
+            fi
             unset JEEB_STATE_SERVICE_TOKEN NOTIFICATION_SERVICE_TOKEN SETTLEMENT_SERVICE_TOKEN \
               BUNDLER_CMS_BEARER_TOKEN \
               JEEB_GATEWAY_JOB_TOKEN JWT_SIGNING_KEY UMJWT_SIGNING_KEY \
@@ -820,7 +795,7 @@ jobs:
             done
             cat <<'REMOTE'
           set -euo pipefail
-          case "$DEPLOYMENT_MODE" in normal|security-cutover|otp-cutover) ;; *) exit 64 ;; esac
+          case "$DEPLOYMENT_MODE" in normal|security-cutover|otp-cutover|devtool-reassert) ;; *) exit 64 ;; esac
           export DOCKER_CONFIG="$HOME/$REMOTE_DOCKER_CONFIG"
           lock_owner_file="$HOME/.jeeb-deploy/locks/jeeb-staging-gateway.owner"
           [[ "$STAGING_GATEWAY_LOCK_OWNER" =~ ^[0-9a-f]{64}$ ]]
@@ -872,11 +847,13 @@ jobs:
           case "$REPOSITORY" in
             jeeb-gateway)
               service=jeeb-staging-jeeb-gateway; published=10000; target=8080; health=/health/ready
-              : "${jwt_secret_name:?file-backed gateway JWT secret is required}"
-              : "${guardian_secret_name:?file-backed realtime Guardian secret is required}"
-              : "${probe_secret_name:?file-backed staging WSS probe secret is required}"
-              : "${membership_secret_name:?file-backed membership-ticket secret is required}"
-              : "${firebase_secret_name:?file-backed Firebase service account is required}"
+              if [ "$DEPLOYMENT_MODE" != devtool-reassert ]; then
+                : "${jwt_secret_name:?file-backed gateway JWT secret is required}"
+                : "${guardian_secret_name:?file-backed realtime Guardian secret is required}"
+                : "${probe_secret_name:?file-backed staging WSS probe secret is required}"
+                : "${membership_secret_name:?file-backed membership-ticket secret is required}"
+                : "${firebase_secret_name:?file-backed Firebase service account is required}"
+              fi
               add_env ASPNETCORE_ENVIRONMENT Staging
               add_env ASPNETCORE_URLS http://+:8080
               add_env Jwt__SigningKeyFile /run/secrets/jeeb_gateway_jwt
@@ -893,6 +870,10 @@ jobs:
               add_env AdminOidc__Enabled false
               add_env SuperLogin__OpenMode true
               add_env DemoUsers__Enabled true
+              if [ "$DEPLOYMENT_MODE" = devtool-reassert ]; then
+                add_env Features__DevEndpoints__Enabled true
+                add_env Features__Swagger__Enabled true
+              fi
               add_env Security__TokenMint__Enabled true
               # Canonical publication is ingress mode. docker_gwbridge is only a
               # prepared proxy candidate: independent live request-source evidence
@@ -940,35 +921,36 @@ jobs:
                 local target_name=$1
                 secret_remove_targets+=("$target_name")
               }
-              add_rotated_secret "$state_secret_name" jeeb_state_service_token
-              add_rotated_secret "$notification_secret_name" notification_service_token
-              add_rotated_secret "$settlement_secret_name" settlement_service_token
-              add_rotated_secret "$bundler_secret_name" bundler_cms_bearer_token
-              add_rotated_secret "$job_secret_name" jeeb_gateway_job_token
-              add_rotated_secret "$jwt_secret_name" jeeb_gateway_jwt
-              if [ -n "$umjwt_secret_name" ]; then
-                add_rotated_secret "$umjwt_secret_name" jeeb_gateway_umjwt
-              else
-                remove_secret_target jeeb_gateway_umjwt
+              if [ "$DEPLOYMENT_MODE" != devtool-reassert ]; then
+                add_rotated_secret "$state_secret_name" jeeb_state_service_token
+                add_rotated_secret "$notification_secret_name" notification_service_token
+                add_rotated_secret "$settlement_secret_name" settlement_service_token
+                add_rotated_secret "$bundler_secret_name" bundler_cms_bearer_token
+                add_rotated_secret "$job_secret_name" jeeb_gateway_job_token
+                add_rotated_secret "$jwt_secret_name" jeeb_gateway_jwt
+                if [ -n "$umjwt_secret_name" ]; then
+                  add_rotated_secret "$umjwt_secret_name" jeeb_gateway_umjwt
+                else
+                  remove_secret_target jeeb_gateway_umjwt
+                fi
+                add_rotated_secret "$guardian_secret_name" realtime_guardian_secret
+                add_rotated_secret "$probe_secret_name" staging_wss_probe_mint_key
+                add_rotated_secret "$membership_secret_name" realtime_membership_ticket_key
+                add_rotated_secret "$firebase_secret_name" firebase_admin_json
+                if [ "$DEPLOYMENT_MODE" = otp-cutover ]; then
+                  add_rotated_secret "$service_auth_secret_name" jeeb_gateway_service_auth
+                fi
+                remove_secret_target delivery_service_token
+                remove_secret_target private_artifact_store_bearer_token
+                remove_secret_target data_export_token_signing_key
+                for stale_env in DELIVERY_SERVICE_TOKEN_FILE PRIVATE_ARTIFACT_STORE_BASE_URL \
+                  PRIVATE_ARTIFACT_STORE_BEARER_TOKEN_FILE DATA_EXPORT_TOKEN_SIGNING_KEY_FILE \
+                  Services__Settlement__ApiToken Jwt__SigningKey UmJwt__SigningKey \
+                  Services__Realtime__GuardianSecret Operations__RealtimeProbe__MintKey \
+                  ServiceAuth__SigningKey "${retired_gateway_env[@]}"; do
+                  env_remove_keys+=("$stale_env")
+                done
               fi
-              add_rotated_secret "$guardian_secret_name" realtime_guardian_secret
-              add_rotated_secret "$probe_secret_name" staging_wss_probe_mint_key
-              add_rotated_secret "$membership_secret_name" realtime_membership_ticket_key
-              add_rotated_secret "$firebase_secret_name" firebase_admin_json
-              if [ "$DEPLOYMENT_MODE" = otp-cutover ]; then
-                add_rotated_secret "$service_auth_secret_name" jeeb_gateway_service_auth
-              fi
-              remove_secret_target delivery_service_token
-              remove_secret_target private_artifact_store_bearer_token
-              remove_secret_target data_export_token_signing_key
-              for stale_env in DELIVERY_SERVICE_TOKEN_FILE PRIVATE_ARTIFACT_STORE_BASE_URL \
-                PRIVATE_ARTIFACT_STORE_BEARER_TOKEN_FILE DATA_EXPORT_TOKEN_SIGNING_KEY_FILE \
-                Services__Settlement__ApiToken Jwt__SigningKey UmJwt__SigningKey \
-                ServiceAuth__SigningKey \
-                Services__Realtime__GuardianSecret Operations__RealtimeProbe__MintKey \
-                "${retired_gateway_env[@]}"; do
-                env_remove_keys+=("$stale_env")
-              done
               add_env FeatureFlags__DurableRequests__Enabled true
               add_env FeatureFlags__UseUpstream__UserManagement true
               add_env FeatureFlags__UseUpstream__RemoteUserPreferences true
@@ -1081,65 +1063,102 @@ jobs:
             jq -sc 'map(select(type == "object"))' > "$secret_additions_json"
           printf '%s\n' "${secret_remove_targets[@]}" | \
             jq -Rsc 'split("\n") | map(select(length > 0)) | unique' > "$secret_remove_json"
-          # jq variables intentionally remain literal inside the filter.
-          # shellcheck disable=SC2016
-          jq -e \
-            --arg image "$IMAGE" \
-            --arg network_id "$network_id" \
-            --arg deployment_mode "$DEPLOYMENT_MODE" \
-            --slurpfile desired_env "$desired_env_json" \
-            --slurpfile env_remove "$env_remove_json" \
-            --slurpfile secret_additions "$secret_additions_json" \
-            --slurpfile secret_remove "$secret_remove_json" '
+          if [ "$DEPLOYMENT_MODE" = devtool-reassert ]; then
+            # This mode is a surgical incumbent patch. Its exact-delta contract below
+            # proves that no unrelated environment row, secret, network, resource,
+            # endpoint, or service setting changes.
+            jq -e --arg image "$IMAGE" '
               def env_key: (split("=")[0] | ascii_downcase);
-              ($env_remove[0] | map(ascii_downcase)) as $removed_env
-              | ($desired_env[0] | map(env_key)) as $replaced_env
-              | ($secret_remove[0] + ($secret_additions[0] | map(.File.Name)) | unique) as $removed_secret_targets
-              | .TaskTemplate.ContainerSpec.Image = $image
+              def is_devtool_flag:
+                env_key as $key
+                | [
+                    "superlogin__openmode",
+                    "demousers__enabled",
+                    "features__devendpoints__enabled",
+                    "features__swagger__enabled"
+                  ]
+                | index($key) != null;
+              .TaskTemplate.ContainerSpec.Image = $image
               | .TaskTemplate.ContainerSpec.Env = (
                   ((.TaskTemplate.ContainerSpec.Env // [])
-                    | map(select(
-                        env_key as $key
-                        | (($removed_env + $replaced_env) | index($key)) == null
-                      )))
-                  + $desired_env[0]
+                    | map(select(is_devtool_flag | not)))
+                  + [
+                      "SuperLogin__OpenMode=true",
+                      "DemoUsers__Enabled=true",
+                      "Features__DevEndpoints__Enabled=true",
+                      "Features__Swagger__Enabled=true"
+                    ]
                 )
-              | .TaskTemplate.ContainerSpec.Secrets = (
-                  ((.TaskTemplate.ContainerSpec.Secrets // [])
-                    | map(select(
-                        .File.Name as $target
-                        | ($removed_secret_targets | index($target)) == null
-                      )))
-                  + $secret_additions[0]
-                )
-              | .TaskTemplate.Networks = [{Target:$network_id}]
-              | .TaskTemplate.Resources.Limits = (
-                  (.TaskTemplate.Resources.Limits // {})
-                  + {NanoCPUs:750000000,MemoryBytes:805306368}
-                )
-              | .TaskTemplate.Resources.Reservations = (
-                  (.TaskTemplate.Resources.Reservations // {})
-                  + {NanoCPUs:100000000,MemoryBytes:67108864}
-                )
-              | .TaskTemplate.LogDriver = {
-                  Name:"json-file",Options:{"max-size":"10m","max-file":"3"}
-                }
-              | .Mode.Replicated.Replicas = 1
-              | .UpdateConfig = ((.UpdateConfig // {}) + (
-                  if $deployment_mode == "security-cutover" then
-                    {Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"stop-first"}
-                  else
-                    {Parallelism:1,Monitor:20000000000,FailureAction:"rollback",Order:"start-first"}
-                  end
-                ))
-              | .RollbackConfig = ((.RollbackConfig // {}) + (
-                  if $deployment_mode == "security-cutover" then
-                    {Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"stop-first"}
-                  else
-                    {Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"start-first"}
-                  end
-                ))
+              | .UpdateConfig = ((.UpdateConfig // {}) + {
+                  Parallelism:1,Monitor:20000000000,
+                  FailureAction:"rollback",Order:"start-first"
+                })
+              | .RollbackConfig = ((.RollbackConfig // {}) + {
+                  Parallelism:1,Monitor:20000000000,
+                  FailureAction:"pause",Order:"start-first"
+                })
             ' "$current_spec" > "$candidate"
+          else
+            # jq variables intentionally remain literal inside the filter.
+            # shellcheck disable=SC2016
+            jq -e \
+              --arg image "$IMAGE" \
+              --arg network_id "$network_id" \
+              --arg deployment_mode "$DEPLOYMENT_MODE" \
+              --slurpfile desired_env "$desired_env_json" \
+              --slurpfile env_remove "$env_remove_json" \
+              --slurpfile secret_additions "$secret_additions_json" \
+              --slurpfile secret_remove "$secret_remove_json" '
+                def env_key: (split("=")[0] | ascii_downcase);
+                ($env_remove[0] | map(ascii_downcase)) as $removed_env
+                | ($desired_env[0] | map(env_key)) as $replaced_env
+                | ($secret_remove[0] + ($secret_additions[0] | map(.File.Name)) | unique) as $removed_secret_targets
+                | .TaskTemplate.ContainerSpec.Image = $image
+                | .TaskTemplate.ContainerSpec.Env = (
+                    ((.TaskTemplate.ContainerSpec.Env // [])
+                      | map(select(
+                          env_key as $key
+                          | (($removed_env + $replaced_env) | index($key)) == null
+                        )))
+                    + $desired_env[0]
+                  )
+                | .TaskTemplate.ContainerSpec.Secrets = (
+                    ((.TaskTemplate.ContainerSpec.Secrets // [])
+                      | map(select(
+                          .File.Name as $target
+                          | ($removed_secret_targets | index($target)) == null
+                        )))
+                    + $secret_additions[0]
+                  )
+                | .TaskTemplate.Networks = [{Target:$network_id}]
+                | .TaskTemplate.Resources.Limits = (
+                    (.TaskTemplate.Resources.Limits // {})
+                    + {NanoCPUs:750000000,MemoryBytes:805306368}
+                  )
+                | .TaskTemplate.Resources.Reservations = (
+                    (.TaskTemplate.Resources.Reservations // {})
+                    + {NanoCPUs:100000000,MemoryBytes:67108864}
+                  )
+                | .TaskTemplate.LogDriver = {
+                    Name:"json-file",Options:{"max-size":"10m","max-file":"3"}
+                  }
+                | .Mode.Replicated.Replicas = 1
+                | .UpdateConfig = ((.UpdateConfig // {}) + (
+                    if $deployment_mode == "security-cutover" then
+                      {Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"stop-first"}
+                    else
+                      {Parallelism:1,Monitor:20000000000,FailureAction:"rollback",Order:"start-first"}
+                    end
+                  ))
+                | .RollbackConfig = ((.RollbackConfig // {}) + (
+                    if $deployment_mode == "security-cutover" then
+                      {Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"stop-first"}
+                    else
+                      {Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"start-first"}
+                    end
+                  ))
+              ' "$current_spec" > "$candidate"
+          fi
           jq -e 'type == "object"' "$candidate" >/dev/null
           cat "$candidate"
           trap - EXIT
@@ -1172,8 +1191,14 @@ jobs:
             --arg network_id "$observed_network_id" \
             --argjson published "$published" \
             --arg deployment_mode "$DEPLOYMENT_MODE" \
+            --slurpfile incumbent "$incumbent_spec" \
             -f scripts/staging-gateway-candidate-contract.jq \
             "$candidate_spec" >/dev/null
+          if [ "$DEPLOYMENT_MODE" = devtool-reassert ]; then
+            jq -e --arg image "$IMAGE" --slurpfile incumbent "$incumbent_spec" \
+              -f scripts/staging-gateway-devtool-reassert-candidate.jq \
+              "$candidate_spec" >/dev/null
+          fi
           if [ "$DEPLOYMENT_MODE" = security-cutover ]; then
             incumbent_service_id=$(<"$incumbent_id")
             [[ "$incumbent_service_id" =~ ^[a-z0-9]+$ ]]
@@ -1210,15 +1235,20 @@ jobs:
           ssh jeeb-staging bash -s -- jeeb-staging-jeeb-gateway "$IMAGE" \
             < scripts/verify-swarm-service-image.sh
           verify_candidate_readiness
-          verify_staging_overlay_and_dns
           verify_bootstrap_flags
-          if [ "$DEPLOYMENT_MODE" != security-cutover ]; then
+          if [ "$DEPLOYMENT_MODE" = devtool-reassert ]; then
+            bash scripts/probe-staging-public-gateway-contract.sh devtool
+            bash scripts/test-super-login.sh https://app.jeeb.fds-1.com
+          else
+            verify_staging_overlay_and_dns
+            if [ "$DEPLOYMENT_MODE" != security-cutover ]; then
             # The recoverable path includes the public OTP request/validation
             # contract; it must never execute during the stop-first security cutover.
-            bash scripts/probe-staging-public-gateway-contract.sh
+              bash scripts/probe-staging-public-gateway-contract.sh invariant
+            fi
+            probe_staging_proxy_source_contract
+            probe_staging_authenticated_realtime
           fi
-          probe_staging_proxy_source_contract
-          probe_staging_authenticated_realtime
           verify_exact_candidate_after_checks
 
           if [ "$DEPLOYMENT_MODE" = security-cutover ]; then

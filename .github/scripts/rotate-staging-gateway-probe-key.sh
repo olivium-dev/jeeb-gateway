@@ -130,8 +130,10 @@ assert_gateway_b() {
     wss://app.jeeb.fds-1.com/socket/websocket
   assert_exact_env "$environment" Operations__RealtimeProbe__MintKeyFile \
     /run/secrets/staging_wss_probe_mint_key
-  assert_exact_env "$environment" SuperLogin__OpenMode false
-  assert_exact_env "$environment" DemoUsers__Enabled false
+  assert_exact_env "$environment" SuperLogin__OpenMode true
+  assert_exact_env "$environment" DemoUsers__Enabled true
+  assert_exact_env "$environment" Features__DevEndpoints__Enabled true
+  assert_exact_env "$environment" Features__Swagger__Enabled true
   banned_host="192.168.2.""50"
   ! printf '%s\n' "$environment" | grep -Fq "$banned_host" \
     || fail "gateway environment contains the retired host"

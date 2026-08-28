@@ -466,6 +466,7 @@ public sealed class DurableOwnershipDeploymentContractTests
         dispatch.Should().Contain("type: choice");
         dispatch.Should().Contain("- security-cutover");
         dispatch.Should().Contain("- otp-cutover");
+        dispatch.Should().Contain("- devtool-reassert");
         CountOccurrences(dispatch, "inputs:").Should().Be(1);
         CountOccurrences(dispatch, "deployment_mode:").Should().Be(1);
         workflow.Should().Contain(
@@ -516,7 +517,10 @@ public sealed class DurableOwnershipDeploymentContractTests
             "add_env ServiceAuth__SigningKeyFile /run/secrets/jeeb_gateway_service_auth");
         workflow.Should().Contain(
             "add_rotated_secret \"$service_auth_secret_name\" jeeb_gateway_service_auth");
-        workflow.Should().Contain("ServiceAuth__SigningKey \\");
+        workflow.Should().Contain(
+            "Services__Realtime__GuardianSecret Operations__RealtimeProbe__MintKey \\\n" +
+            "                  ServiceAuth__SigningKey \"${retired_gateway_env[@]}\"");
+        workflow.Should().Contain("scripts/staging-gateway-devtool-reassert-candidate.jq");
         workflow.Should().NotContain(
             "add_env Services__Realtime__BaseUrl http://192.168.2.20:10069");
         workflow.Should().Contain("python3 scripts/probe-staging-authenticated-realtime.py");
@@ -571,14 +575,14 @@ public sealed class DurableOwnershipDeploymentContractTests
             "verify_candidate_readiness",
             imageVerifier,
             StringComparison.Ordinal);
+        var flags = workflow.IndexOf("verify_bootstrap_flags", readiness, StringComparison.Ordinal);
         var network = workflow.IndexOf(
             "verify_staging_overlay_and_dns",
-            readiness,
+            flags,
             StringComparison.Ordinal);
-        var flags = workflow.IndexOf("verify_bootstrap_flags", network, StringComparison.Ordinal);
         var publicProbe = workflow.IndexOf(
-            "bash scripts/probe-staging-public-gateway-contract.sh",
-            imageVerifier,
+            "bash scripts/probe-staging-public-gateway-contract.sh invariant",
+            network,
             StringComparison.Ordinal);
         var proxyProbe = workflow.IndexOf(
             "probe_staging_proxy_source_contract",
@@ -616,9 +620,9 @@ public sealed class DurableOwnershipDeploymentContractTests
         forward.Should().BeLessThan(imageVerifier);
         candidate.Should().BeLessThan(imageVerifier);
         imageVerifier.Should().BeLessThan(readiness);
-        readiness.Should().BeLessThan(network);
-        network.Should().BeLessThan(flags);
-        flags.Should().BeLessThan(publicProbe);
+        readiness.Should().BeLessThan(flags);
+        flags.Should().BeLessThan(network);
+        network.Should().BeLessThan(publicProbe);
         publicProbe.Should().BeLessThan(proxyProbe);
         proxyProbe.Should().BeLessThan(descriptor);
         descriptor.Should().BeLessThan(finalCandidate);

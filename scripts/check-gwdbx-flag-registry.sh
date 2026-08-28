@@ -195,7 +195,9 @@ MODE_TOKENS="$(git grep --untracked -howE '[A-Za-z]+Mode' -- "$SRC" | sort -u \
 # D3 deploy-env arm (G-05): workflows inject env-spelled keys the four arms above cannot see.
 # `__`->`:` normalises to registry spelling; `#` lines drop so tombstone blocks stay mentions.
 WORKFLOW_FILES="$(git ls-files -co --exclude-standard '.github/workflows' \
-  | grep -E '\.ya?ml$' | sort -u || true)"
+  | grep -E '\.ya?ml$' \
+  | while IFS= read -r file; do [ -f "$file" ] && printf '%s\n' "$file"; done \
+  | sort -u || true)"
 DEPLOY_ENV_FLAGS=""
 if [ -n "$WORKFLOW_FILES" ]; then
   DEPLOY_ENV_FLAGS="$(grep -hvE '^[[:space:]]*#' $WORKFLOW_FILES \
