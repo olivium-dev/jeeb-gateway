@@ -148,6 +148,8 @@ require(
         '$environment["auth__otp__phone__enforceregion"] == "false"',
         '$environment["featureflags__useupstream__voice"] == "false"',
         '$environment["features__realtimewebsocketproxy__enabled"] == "false"',
+        '$environment["features__devendpoints__enabled"] == "true"',
+        '$environment["features__swagger__enabled"] == "true"',
         '.UpdateConfig.Order == "start-first"',
         '.UpdateConfig.FailureAction == "rollback"',
         '.RollbackConfig.Order == "start-first"',
@@ -194,6 +196,8 @@ def validate_bootstrap_workflow(text):
         # sites in jeeb-staging-deploy.yml / deploy/staging-gateway/*.env.
         "add_env SuperLogin__OpenMode true",
         "add_env DemoUsers__Enabled true",
+        "add_env Features__DevEndpoints__Enabled true",
+        "add_env Features__Swagger__Enabled true",
         "capture_remote_spec() {",
         "docker service inspect '$service' --format '{{json .Spec}}'",
         "docker service inspect '$service' --format '{{.ID}} {{.Version.Index}}'",
@@ -232,8 +236,8 @@ def validate_bootstrap_workflow(text):
         'docker service inspect "$service" --format \'{{json .Spec}}\' > "$current_spec"',
         'recovery_result=armed-pending',
         'append_sanitized_transaction_summary',
-        'incumbent_spec_sha256:',
-        'candidate_spec_sha256:',
+        'scripts/staging-gateway-transaction-summary.sh',
+        'scripts/staging-gateway-readiness-backoff.sh',
         'staging_gateway_lock_init jeeb-staging "$secret_stage"',
         "staging_gateway_lock_acquire",
         "staging_gateway_lock_assert",
@@ -252,6 +256,12 @@ def validate_bootstrap_workflow(text):
         'select(.Options.encrypted == "" or .Options.encrypted == "true")',
         "-f scripts/staging-gateway-candidate-contract.jq",
         "scripts/verify-staging-otp-verify-freeze.sh",
+        "inputs.deployment_mode != 'devtool-reassert'",
+        "scripts/staging-gateway-devtool-reassert-candidate.jq",
+        "scripts/staging-gateway-incumbent-devtool-posture.jq",
+        "probe-staging-public-gateway-contract.sh posture",
+        "probe-staging-public-gateway-contract.sh devtool",
+        "scripts/test-super-login.sh https://app.jeeb.fds-1.com",
     )
     missing = [marker for marker in required if marker not in text]
     if missing:
@@ -267,6 +277,8 @@ def validate_bootstrap_workflow(text):
     present = [marker for marker in forbidden if marker in text]
     if present:
         raise ValueError(f"unsafe staging mutation behavior remains: {present}")
+    if text.count('FailureAction:"rollback",Order:"start-first"') != 2:
+        raise ValueError("recoverable deployment policies are not exact for generic and Dev Tool modes")
 
     dispatch_header = text[: text.index("permissions:")]
     expected_dispatch = '''name: jeeb-staging-deploy
@@ -283,6 +295,7 @@ def validate_bootstrap_workflow(text):
           - normal
           - security-cutover
           - otp-cutover
+          - devtool-reassert
 
 '''
     if dispatch_header != expected_dispatch:
@@ -292,6 +305,28 @@ def validate_bootstrap_workflow(text):
     )
     if input_references != {"deployment_mode"}:
         raise ValueError(f"unexpected staging callable inputs: {sorted(input_references)}")
+
+    secret_name_gate = text.index('if [ "$DEPLOYMENT_MODE" != devtool-reassert ]; then', text.index('service=jeeb-staging-jeeb-gateway'))
+    secret_name_end = text.index('            secret_stage=$(mktemp -d)', secret_name_gate)
+    secret_name_block = text[secret_name_gate:secret_name_end]
+    for secret_name in (
+        'state_secret_name="jeeb_staging_gateway_state_token_',
+        'jwt_secret_name="jeeb_staging_gateway_jwt_',
+        'probe_secret_name="jeeb_staging_gateway_wss_probe_',
+        'firebase_secret_name="jeeb_staging_gateway_firebase_',
+    ):
+        if secret_name not in secret_name_block:
+            raise ValueError(f"run-scoped secret escaped the non-devtool gate: {secret_name}")
+    stream_gate = text.index('if [ "$DEPLOYMENT_MODE" != devtool-reassert ]; then', text.index('staging_gateway_lock_acquire'))
+    stream_end = text.index('            unset JEEB_STATE_SERVICE_TOKEN', stream_gate)
+    stream_block = text[stream_gate:stream_end]
+    if 'stream_secret "$state_secret_name"' not in stream_block or 'stream_secret_file "$firebase_secret_name"' not in stream_block:
+        raise ValueError("run-scoped secret creation escaped the non-devtool gate")
+    exact_devtool_builder = text.index('if [ "$DEPLOYMENT_MODE" = devtool-reassert ]; then', text.index('desired_env_json='))
+    generic_builder = text.index('--slurpfile desired_env "$desired_env_json"', exact_devtool_builder)
+    exact_delta = text.index('-f scripts/staging-gateway-devtool-reassert-candidate.jq', generic_builder)
+    if not exact_devtool_builder < generic_builder < exact_delta:
+        raise ValueError("Dev Tool candidate is not split from and checked after the generic builder")
     for authority in ("Chat", "Realtime", "Voice"):
         false_lock = f"add_env FeatureFlags__UseUpstream__{authority} false"
         true_lock = f"add_env FeatureFlags__UseUpstream__{authority} true"
@@ -348,11 +383,11 @@ def validate_bootstrap_workflow(text):
     )
     verifier = text.index("scripts/verify-swarm-service-image.sh", manifest)
     readiness = text.index("verify_candidate_readiness", verifier)
-    network = text.index("verify_staging_overlay_and_dns", readiness)
-    false_flags = text.index("          verify_bootstrap_flags\n", network)
+    false_flags = text.index("          verify_bootstrap_flags\n", readiness)
     public_probe = text.index(
         "bash scripts/probe-staging-public-gateway-contract.sh", verifier
     )
+    network = text.index("verify_staging_overlay_and_dns", public_probe)
     proxy_probe = text.index("probe_staging_proxy_source_contract", public_probe)
     descriptor_probe = text.index("probe_staging_authenticated_realtime", proxy_probe)
     final_candidate = text.index(
@@ -364,7 +399,7 @@ def validate_bootstrap_workflow(text):
     )
     final_confirm = text.index("verify_exact_candidate_after_checks", post_freeze)
     disarm = text.index("recovery_armed=false", final_confirm)
-    if not pre_update < candidate < candidate_validation < task_capture < pre_cas_freeze < cutover_forward < arm < forward < manifest < verifier < readiness < network < false_flags < public_probe < proxy_probe < descriptor_probe < final_candidate < old_task_proof < post_freeze < final_confirm < disarm:
+    if not pre_update < candidate < candidate_validation < task_capture < pre_cas_freeze < cutover_forward < arm < forward < manifest < verifier < readiness < false_flags < public_probe < network < proxy_probe < descriptor_probe < final_candidate < old_task_proof < post_freeze < final_confirm < disarm:
         raise ValueError("candidate verification order drifted")
 
 
@@ -663,6 +698,10 @@ bash scripts/test-staging-gateway-mutation-lock.sh
 bash scripts/test-staging-gateway-spec-recovery.sh
 bash scripts/test-staging-gateway-security-cutover.sh
 bash scripts/test-staging-gateway-candidate-contract.sh
+bash scripts/test-staging-gateway-incumbent-devtool-posture.sh
+bash scripts/test-staging-gateway-readiness-backoff.sh
+bash scripts/test-staging-gateway-transaction-summary.sh
+bash scripts/test-super-login-redaction-contract.sh
 bash scripts/test-verify-staging-otp-verify-freeze.sh
 bash scripts/check-staging-gateway-phase-contracts.sh
 bash scripts/test-assert-distinct-staging-signing-keys.sh

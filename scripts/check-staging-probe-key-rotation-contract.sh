@@ -33,6 +33,10 @@ required_remote = (
     'FeatureFlags__UseUpstream__Realtime true',
     'Features__RealtimeWebSocketProxy__Enabled true',
     'FeatureFlags__UseUpstream__Voice false',
+    'SuperLogin__OpenMode true',
+    'DemoUsers__Enabled true',
+    'Features__DevEndpoints__Enabled true',
+    'Features__Swagger__Enabled true',
     'http://jeeb-staging-realtime-comunication-service:4000',
     'CANDIDATE_HEALTHY_WITH_INCUMBENT=1',
 )

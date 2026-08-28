@@ -9,6 +9,9 @@ candidate="$test_root/candidate.json"
 mutant="$test_root/mutant.json"
 cutover="$test_root/cutover.json"
 otp_cutover="$test_root/otp-cutover.json"
+incumbent="$test_root/incumbent.json"
+devtool_incumbent="$test_root/devtool-incumbent.json"
+devtool_candidate="$test_root/devtool-candidate.json"
 image=repo@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 network_id=networkabc
 
@@ -30,6 +33,8 @@ cat > "$candidate" <<JSON
         "FeatureFlags__UseUpstream__Voice=false",
         "SuperLogin__OpenMode=true",
         "DemoUsers__Enabled=true",
+        "Features__DevEndpoints__Enabled=true",
+        "Features__Swagger__Enabled=true",
         "ForwardedHeaders__KnownProxies__0=172.18.0.1",
         "Jwt__SigningKeyFile=/run/secrets/jeeb_gateway_jwt",
         "ServiceNotificationClient__ServiceTokenFile=/run/secrets/notification_service_token",
@@ -49,9 +54,10 @@ cat > "$candidate" <<JSON
 JSON
 
 validate() {
-  local document=$1 mode=${2:-normal}
+  local document=$1 mode=${2:-normal} incumbent_document=${3:-$candidate}
   jq -e --arg image "$image" --arg network_id "$network_id" \
     --argjson published 10000 --arg deployment_mode "$mode" \
+    --slurpfile incumbent "$incumbent_document" \
     -f "$contract" "$document" >/dev/null
 }
 
@@ -74,6 +80,7 @@ accept_mutant() {
 }
 
 validate "$candidate"
+validate "$candidate" devtool-reassert
 jq '
   .UpdateConfig = {
     Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"stop-first"
@@ -100,6 +107,36 @@ jq '
     }]
 ' "$candidate" > "$otp_cutover"
 validate "$otp_cutover" otp-cutover
+
+# Security/OTP cutovers must preserve these two feature rows exactly, including
+# accepted .NET boolean casing; they do not reassert the Dev Tool posture.
+jq '(.TaskTemplate.ContainerSpec.Env[12]) = "Features__DevEndpoints__Enabled=FALSE"
+  | (.TaskTemplate.ContainerSpec.Env[13]) = "Features__Swagger__Enabled=TrUe"' \
+  "$candidate" > "$incumbent"
+jq '(.TaskTemplate.ContainerSpec.Env[12]) = "Features__DevEndpoints__Enabled=FALSE"
+  | (.TaskTemplate.ContainerSpec.Env[13]) = "Features__Swagger__Enabled=TrUe"' \
+  "$cutover" > "$mutant"
+validate "$mutant" security-cutover "$incumbent"
+jq '(.TaskTemplate.ContainerSpec.Env[12]) = "Features__DevEndpoints__Enabled=FALSE"
+  | (.TaskTemplate.ContainerSpec.Env[13]) = "Features__Swagger__Enabled=TrUe"' \
+  "$otp_cutover" > "$mutant"
+validate "$mutant" otp-cutover "$incumbent"
+jq '(.TaskTemplate.ContainerSpec.Env[12]) = "Features__DevEndpoints__Enabled=true"' \
+  "$mutant" > "$test_root/non-preserving.json"
+if validate "$test_root/non-preserving.json" otp-cutover "$incumbent"; then
+  echo 'otp-cutover accepted DevEndpoints drift from its incumbent' >&2
+  exit 1
+fi
+jq 'del(.TaskTemplate.ContainerSpec.Env[13,12])' "$candidate" \
+  > "$test_root/absent-incumbent.json"
+jq 'del(.TaskTemplate.ContainerSpec.Env[13,12])' "$cutover" \
+  > "$test_root/absent-security.json"
+validate "$test_root/absent-security.json" security-cutover \
+  "$test_root/absent-incumbent.json"
+jq 'del(.TaskTemplate.ContainerSpec.Env[13,12])' "$otp_cutover" \
+  > "$test_root/absent-otp.json"
+validate "$test_root/absent-otp.json" otp-cutover \
+  "$test_root/absent-incumbent.json"
 for unsafe_filter in \
   'del(.TaskTemplate.ContainerSpec.Env[-1])' \
   '(.TaskTemplate.ContainerSpec.Env[-1]) = "ServiceAuth__SigningKey=inline-secret"' \
@@ -138,7 +175,7 @@ reject_mutant 'Chat activated in A1' \
 reject_mutant 'Realtime activated in A1' \
   '(.TaskTemplate.ContainerSpec.Env[4]) = "FeatureFlags__UseUpstream__Realtime=true"'
 reject_mutant 'WebSocket proxy activated in A1' \
-  '(.TaskTemplate.ContainerSpec.Env[15]) = "Features__RealtimeWebSocketProxy__Enabled=true"'
+  '(.TaskTemplate.ContainerSpec.Env[17]) = "Features__RealtimeWebSocketProxy__Enabled=true"'
 reject_mutant 'wrong b05 application ID' \
   '(.TaskTemplate.ContainerSpec.Env[5]) = "Auth__Otp__ApplicationId=wrong"'
 reject_mutant 'international eligibility disabled' \
@@ -150,15 +187,21 @@ reject_mutant 'case-insensitive duplicate environment key' \
 reject_mutant 'extra task network' \
   '.TaskTemplate.Networks += [{"Target":"othernetwork"}]'
 reject_mutant 'invalid forwarded proxy value' \
-  '(.TaskTemplate.ContainerSpec.Env[12]) = "ForwardedHeaders__KnownProxies__0=not-an-ip"'
+  '(.TaskTemplate.ContainerSpec.Env[14]) = "ForwardedHeaders__KnownProxies__0=not-an-ip"'
 reject_mutant 'out-of-range forwarded proxy octet' \
-  '(.TaskTemplate.ContainerSpec.Env[12]) = "ForwardedHeaders__KnownProxies__0=999.18.0.1"'
+  '(.TaskTemplate.ContainerSpec.Env[14]) = "ForwardedHeaders__KnownProxies__0=999.18.0.1"'
 # Owner ruling 2026-08-27: Super Login IS open on staging. The mutant keeps
 # its MECHANISM — any drift from the pinned Spec must be rejected — and only
 # flips polarity to match the new pinned value. Deleting it would have removed
 # drift detection on this env slot entirely.
 reject_mutant 'Super Login closed' \
   '(.TaskTemplate.ContainerSpec.Env[10]) = "SuperLogin__OpenMode=false"'
+reject_mutant 'demo roster closed' \
+  '(.TaskTemplate.ContainerSpec.Env[11]) = "DemoUsers__Enabled=false"'
+reject_mutant 'Dev Tool endpoints closed' \
+  '(.TaskTemplate.ContainerSpec.Env[12]) = "Features__DevEndpoints__Enabled=false"'
+reject_mutant 'Swagger closed' \
+  '(.TaskTemplate.ContainerSpec.Env[13]) = "Features__Swagger__Enabled=false"'
 reject_mutant 'mixed-case unified payment gateway key' \
   '.TaskTemplate.ContainerSpec.Env += ["uNiFiEdPaYmEnTgAtEwAy__BaSeUrL=http://gateway.invalid"]'
 reject_mutant 'mixed-case unified payment gateway destination' \
@@ -184,4 +227,81 @@ reject_mutant 'mixed-case connection-string password' \
 reject_mutant 'URL-embedded credential' \
   '.TaskTemplate.ContainerSpec.Env += ["Database__ConnectionString=postgres://user:password@db/jeeb"]'
 
-echo 'staging gateway candidate semantic contract tests: PASS (5 positive, 37 negative)'
+jq '
+  .TaskTemplate.ContainerSpec.Image = "repo@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  | (.TaskTemplate.ContainerSpec.Env[3]) = "FeatureFlags__UseUpstream__Chat=true"
+  | (.TaskTemplate.ContainerSpec.Env[4]) = "FeatureFlags__UseUpstream__Realtime=true"
+  | (.TaskTemplate.ContainerSpec.Env[17]) = "Features__RealtimeWebSocketProxy__Enabled=true"
+  | (.TaskTemplate.ContainerSpec.Env[10]) = "SuperLogin__OpenMode=false"
+  | (.TaskTemplate.ContainerSpec.Env[11]) = "DemoUsers__Enabled=false"
+  | (.TaskTemplate.ContainerSpec.Env[12]) = "Features__DevEndpoints__Enabled=false"
+  | del(.TaskTemplate.ContainerSpec.Env[13])
+  | .TaskTemplate.ContainerSpec.Env += [
+      "Security__TokenMint__Enabled=false",
+      "ServiceAuth__Enabled=false",
+      "ServiceAuth__Caller=incumbent-caller"
+    ]
+  | .TaskTemplate.ContainerSpec.Secrets = [{
+      SecretID:"incumbent-secret",SecretName:"incumbent-service-auth",
+      File:{Name:"jeeb_gateway_service_auth",UID:"65532",GID:"65532",Mode:256}
+    }]
+  | .TaskTemplate.Resources = {Limits:{NanoCPUs:123,MemoryBytes:456}}
+  | .TaskTemplate.Placement = {Constraints:["node.role==worker"]}
+  | .Labels = {"jeeb.contract":"preserve-me"}
+  | .UpdateConfig = {Parallelism:3,Monitor:1,FailureAction:"pause",Order:"stop-first",MaxFailureRatio:0.25}
+  | .RollbackConfig = {Parallelism:2,Monitor:2,FailureAction:"continue",Order:"stop-first",MaxFailureRatio:0.5}
+' "$candidate" > "$devtool_incumbent"
+jq --arg image "$image" '
+  def env_key: (split("=")[0] | ascii_downcase);
+  def target: env_key as $key | [
+    "superlogin__openmode","demousers__enabled",
+    "features__devendpoints__enabled","features__swagger__enabled"
+  ] | index($key) != null;
+  .TaskTemplate.ContainerSpec.Image = $image
+  | .TaskTemplate.ContainerSpec.Env = (
+      (.TaskTemplate.ContainerSpec.Env | map(select(target | not))) + [
+        "SuperLogin__OpenMode=true","DemoUsers__Enabled=true",
+        "Features__DevEndpoints__Enabled=true","Features__Swagger__Enabled=true"
+      ])
+  | .UpdateConfig += {Parallelism:1,Monitor:20000000000,FailureAction:"rollback",Order:"start-first"}
+  | .RollbackConfig += {Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"start-first"}
+' "$devtool_incumbent" > "$devtool_candidate"
+validate "$devtool_candidate" devtool-reassert "$devtool_incumbent"
+jq -e --arg image "$image" --slurpfile incumbent "$devtool_incumbent" \
+  -f "$repository_root/scripts/staging-gateway-devtool-reassert-candidate.jq" \
+  "$devtool_candidate" >/dev/null
+
+for unsafe_filter in \
+  '.TaskTemplate.ContainerSpec.Env += ["Unrelated__Drift=true"]' \
+  '(.TaskTemplate.ContainerSpec.Env[] | select(startswith("FeatureFlags__UseUpstream__Chat="))) = "FeatureFlags__UseUpstream__Chat=false"' \
+  '(.TaskTemplate.ContainerSpec.Env[] | select(startswith("FeatureFlags__UseUpstream__Realtime="))) = "FeatureFlags__UseUpstream__Realtime=false"' \
+  '(.TaskTemplate.ContainerSpec.Env[] | select(startswith("Features__RealtimeWebSocketProxy__Enabled="))) = "Features__RealtimeWebSocketProxy__Enabled=false"' \
+  '(.TaskTemplate.ContainerSpec.Env[] | select(startswith("Security__TokenMint__Enabled="))) = "Security__TokenMint__Enabled=true"' \
+  '(.TaskTemplate.ContainerSpec.Env[] | select(startswith("ServiceAuth__Enabled="))) = "ServiceAuth__Enabled=true"' \
+  '.TaskTemplate.ContainerSpec.Secrets[0].SecretName = "rotated-service-auth"' \
+  '.TaskTemplate.Networks += [{Target:"othernetwork"}]' \
+  '.TaskTemplate.Resources.Limits.MemoryBytes = 789' \
+  '.TaskTemplate.Placement.Constraints = []' \
+  '.Labels["jeeb.contract"] = "drifted"' \
+  '.EndpointSpec.Mode = "dnsrr"' \
+  '.UpdateConfig.MaxFailureRatio = 0.75' \
+  '.RollbackConfig.MaxFailureRatio = 0.75'; do
+  jq "$unsafe_filter" "$devtool_candidate" > "$mutant"
+  if jq -e --arg image "$image" --slurpfile incumbent "$devtool_incumbent" \
+    -f "$repository_root/scripts/staging-gateway-devtool-reassert-candidate.jq" \
+    "$mutant" >/dev/null; then
+    echo "devtool-reassert accepted unrelated incumbent drift: $unsafe_filter" >&2
+    exit 1
+  fi
+done
+
+jq '.TaskTemplate.ContainerSpec.Env += ["SUPERLOGIN__OpenMode=true"]' \
+  "$devtool_incumbent" > "$mutant"
+if jq -e --arg image "$image" --slurpfile incumbent "$mutant" \
+  -f "$repository_root/scripts/staging-gateway-devtool-reassert-candidate.jq" \
+  "$devtool_candidate" >/dev/null; then
+  echo 'devtool-reassert accepted duplicate target rows in the incumbent' >&2
+  exit 1
+fi
+
+echo 'staging gateway candidate semantic contract tests: PASS (mode flags preserved; exact Dev Tool delta with 15 negative controls)'

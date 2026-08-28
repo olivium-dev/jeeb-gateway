@@ -34,6 +34,8 @@ def read_contract(path):
 expected_a1 = {
     "ASPNETCORE_ENVIRONMENT": "Staging",
     "DemoUsers__Enabled": "true",
+    "Features__DevEndpoints__Enabled": "true",
+    "Features__Swagger__Enabled": "true",
     "FeatureFlags__UseUpstream__Chat": "false",
     "FeatureFlags__UseUpstream__Otp": "true",
     "FeatureFlags__UseUpstream__Realtime": "false",
@@ -84,6 +86,7 @@ expected_dispatch = '''name: jeeb-staging-deploy
           - normal
           - security-cutover
           - otp-cutover
+          - devtool-reassert
 
 '''
 if dispatch_header != expected_dispatch:

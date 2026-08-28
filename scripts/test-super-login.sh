@@ -1,157 +1,277 @@
-#!/bin/bash
-# =============================================================================
-# test-super-login.sh — smoke-test for super-login and super-login+
-#
-# Super-login (basic)  : POST /api/User/user-id-login
-#   - Proxied by the gateway to UM POST /api/User/user-id-login
-#   - UM validates superAdminPassCode against SuperAdmin:PassCode config
-#   - Default UM fallback passcode (when SuperAdmin__PassCode env var is unset):
-#     123768  (computed as 123000 + 768 in UM Program.cs PostConfigure)
-#   - Returns SocialLoginResponse {userId, authToken, refreshToken, recentlyCreated}
-#   - The authToken is UM-signed and carries the 'admin' role claim
-#
-# Super-login+ (enhanced) : POST /auth/tokens
-#   - Mints a GATEWAY-signed JWT for any userId, no UM round-trip
-#   - Gate: Security:TokenMint:Enabled (SecurityOptions.cs)
-#       false (local dev) => gate OPEN, no header required
-#       true  (prod/staging) => requires X-Service-Auth-Key: <configured-key>
-#   - Request body: {"userId": "<id>", "roles": ["admin"]}  (roles is optional)
-#   - Returns TokenPairResponse {accessToken, refreshToken, tokenType, ...}
-#
-# Usage:
-#   ./scripts/test-super-login.sh [GW_BASE_URL] [PASSCODE] [USER_ID] [MINT_KEY]
-#
-#   PASSCODE may also be supplied via the SUPER_LOGIN_PASSCODE env var.
-#   If neither arg 2 nor SUPER_LOGIN_PASSCODE is set the script exits with an error.
-#
-# Examples:
-#   # Local dev (TokenMint.Enabled=false, gate open -- passcode via env var):
-#   SUPER_LOGIN_PASSCODE=<passcode> ./scripts/test-super-login.sh http://localhost:10090 '' <userId>
-#   # or pass the passcode directly as arg 2:
-#   ./scripts/test-super-login.sh http://localhost:10090 <passcode> <userId>
-#
-#   # Live/staging (TokenMint.Enabled=true, key required):
-#   SUPER_LOGIN_PASSCODE=<passcode> ./scripts/test-super-login.sh http://192.168.2.7:10090 '' <userId> <mint-key>
-#
-# Prerequisites: curl, python3
-# =============================================================================
-
+#!/usr/bin/env bash
 set -euo pipefail
+umask 077
 
-GW="${1:-http://localhost:10090}"
-PASSCODE="${2:-${SUPER_LOGIN_PASSCODE:-}}"
-if [[ -z "$PASSCODE" ]]; then
-  echo "Error: Passcode required. Set SUPER_LOGIN_PASSCODE env var or pass as arg 2." >&2
-  exit 1
+# Redacted staging smoke for the full Dev Tool and Super Login Plus contract.
+# It never prints or leaves behind response bodies, JWTs, refresh tokens, or passcodes.
+# Optional inputs:
+#   $1: gateway origin (default: staging public origin)
+#   SUPER_LOGIN_PASSCODE: optional basic user-id-login passcode. When omitted,
+#     the first configured demo-roster row is used when one is available.
+
+test_root=''
+passcode_file=''
+cleanup() {
+  local status=$?
+  [ -z "$passcode_file" ] || rm -f -- "$passcode_file"
+  [ -z "$test_root" ] || rm -rf -- "$test_root"
+  return "$status"
+}
+trap cleanup EXIT
+
+# SUPER_LOGIN_PASSCODE may arrive exported by the workflow. Persist it with
+# mode 0600 using shell builtins, then remove it from the environment before
+# even the first utility process can inherit it.
+if [ "${SUPER_LOGIN_PASSCODE+x}" = x ]; then
+  passcode_directory=${TMPDIR:-/tmp}
+  for passcode_attempt in 1 2 3 4 5 6 7 8; do
+    passcode_file="${passcode_directory%/}/jeeb-super-login-passcode.$$.$RANDOM.$passcode_attempt"
+    set -o noclobber
+    if : > "$passcode_file" 2>/dev/null; then
+      printf '%s' "$SUPER_LOGIN_PASSCODE" >| "$passcode_file"
+      break
+    fi
+    set +o noclobber
+    passcode_file=''
+  done
+  set +o noclobber
+  [ -n "$passcode_file" ] || {
+    unset SUPER_LOGIN_PASSCODE
+    echo 'Unable to allocate the private passcode file' >&2
+    exit 1
+  }
+  unset SUPER_LOGIN_PASSCODE
 fi
-USER_ID="${3:-}"
-MINT_KEY="${4:-}"
 
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
+readonly GATEWAY_ORIGIN=${1:-https://app.jeeb.fds-1.com}
 
-pass() { echo -e "${GREEN}[PASS]${NC} $*"; }
-fail() { echo -e "${RED}[FAIL]${NC} $*"; }
-info() { echo -e "${YELLOW}[INFO]${NC} $*"; }
+for command in curl jq python3; do
+  command -v "$command" >/dev/null || {
+    echo "Missing required command: $command" >&2
+    exit 1
+  }
+done
 
-if [[ -z "$USER_ID" ]]; then
-  info "No USER_ID provided. Attempting to seed a dev user via POST /dev/seed/user ..."
-  info "(Requires Features__DevEndpoints__Enabled=true on the gateway)"
-  SEED_RESP=$(curl -s --max-time 10 -X POST "$GW/dev/seed/user" \
-    -H "Content-Type: application/json" \
-    -d '{"username":"superlogin-smoke","role":"user"}' 2>/dev/null)
-  USER_ID=$(echo "$SEED_RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('userId',''))" 2>/dev/null || true)
-  if [[ -z "$USER_ID" ]]; then
-    fail "Could not seed a user and no USER_ID was provided."
-    echo "  Seed response: $SEED_RESP"
-    echo "  Re-run with: $0 $GW $PASSCODE <userId>"
+test_root=$(mktemp -d)
+chmod 700 "$test_root"
+full_roster="$test_root/full-roster.json"
+demo_roster="$test_root/demo-roster.json"
+dev_users="$test_root/dev-users.json"
+seed_body="$test_root/seed-body.json"
+seed_response="$test_root/seed-response.json"
+seeded_users="$test_root/seeded-users.json"
+seeded_user="$test_root/seeded-user.json"
+request_body="$test_root/request.json"
+response_body="$test_root/response.json"
+access_token_file="$test_root/access-token"
+refresh_body="$test_root/refresh.json"
+refresh_response="$test_root/refresh-response.json"
+refresh_token_file="$test_root/refresh-token"
+rotated_refresh_token_file="$test_root/rotated-refresh-token"
+revoke_body="$test_root/revoke.json"
+swagger_body="$test_root/swagger.json"
+basic_login_body="$test_root/basic-login.json"
+basic_login_response="$test_root/basic-login-response.json"
+basic_identity="$test_root/basic-identity.json"
+basic_access_token_file="$test_root/basic-access-token"
+auth_config="$test_root/curl-auth.config"
+[ -z "$passcode_file" ] || chmod 600 "$passcode_file"
+
+request() {
+  local destination=$1
+  shift
+  curl --silent --show-error --connect-timeout 10 --max-time 30 \
+    --output "$destination" --write-out '%{http_code}' "$@"
+}
+
+expect_status() {
+  local expected=$1 description=$2 destination=$3
+  shift 3
+  local status
+  status=$(request "$destination" "$@")
+  if [ "$status" != "$expected" ]; then
+    echo "FAIL: ${description} expected HTTP ${expected}, received ${status}" >&2
     exit 1
   fi
-  pass "Seeded dev user userId=$USER_ID"
+}
+
+validate_gateway_token() {
+  local expected_user_id=$1 required_role=${2:-} token_file=$3
+  python3 - "$expected_user_id" "$required_role" "$token_file" <<'PY'
+import base64
+import json
+import sys
+import time
+
+expected_user_id = sys.argv[1]
+required_role = sys.argv[2]
+with open(sys.argv[3], encoding="utf-8") as stream:
+    token = stream.read().strip()
+parts = token.split(".")
+if len(parts) != 3:
+    raise SystemExit("JWT is not a compact three-part token")
+payload = parts[1] + "=" * (-len(parts[1]) % 4)
+claims = json.loads(base64.urlsafe_b64decode(payload.encode()))
+audience = claims.get("aud", [])
+if isinstance(audience, str):
+    audience = [audience]
+roles = claims.get("roles", [])
+if isinstance(roles, str):
+    roles = [roles]
+now = int(time.time())
+if claims.get("iss") != "jeeb-gateway":
+    raise SystemExit("JWT issuer is not jeeb-gateway")
+if "jeeb-clients" not in audience:
+    raise SystemExit("JWT audience is not jeeb-clients")
+if claims.get("sub") != expected_user_id:
+    raise SystemExit("JWT subject does not match the selected user")
+if required_role and required_role not in roles:
+    raise SystemExit("JWT is missing the required role")
+remaining = int(claims.get("exp", 0)) - now
+if not 12 * 60 <= remaining <= 16 * 60:
+    raise SystemExit("JWT lifetime is outside the staging 15-minute contract")
+PY
+}
+
+expect_status 200 'full Super Login roster' "$full_roster" \
+  "$GATEWAY_ORIGIN/api/User/super-login/users"
+jq -e '
+  (.users | type == "array" and length > 0)
+  and ([.. | objects | has("passcode")] | any | not)
+' "$full_roster" >/dev/null || {
+  echo 'FAIL: full Super Login roster is empty, malformed, or leaks a passcode field' >&2
+  exit 1
+}
+
+expect_status 200 'configured demo roster' "$demo_roster" \
+  "$GATEWAY_ORIGIN/api/User/demo-users"
+jq -e '.users | type == "array"' "$demo_roster" >/dev/null || {
+  echo 'FAIL: configured demo roster is malformed' >&2
+  exit 1
+}
+
+expect_status 200 'Dev Tool user directory' "$dev_users" \
+  "$GATEWAY_ORIGIN/dev/data/users"
+jq -e '.users | type == "array"' "$dev_users" >/dev/null || {
+  echo 'FAIL: Dev Tool user directory is malformed' >&2
+  exit 1
+}
+
+run_tag="devtool-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}"
+seed_phone="+1555${GITHUB_RUN_ID:-0}${GITHUB_RUN_ATTEMPT:-0}"
+jq -n --arg run_id "$run_tag" --arg phone "$seed_phone" '{
+  role:"admin",
+  phone:$phone,
+  displayName:("Dev Tool smoke " + $run_id),
+  runId:$run_id,
+  tags:["staging-devtool-smoke"]
+}' > "$seed_body"
+chmod 600 "$seed_body"
+expect_status 200 'Dev Tool user seed' "$seed_response" \
+  --request POST --header 'Content-Type: application/json' \
+  --data-binary "@$seed_body" "$GATEWAY_ORIGIN/dev/seed/user"
+user_id=$(jq -er '.userId | select(type == "string" and length > 0)' \
+  "$seed_response")
+
+expect_status 200 'seeded Dev Tool user directory lookup' "$seeded_users" \
+  "$GATEWAY_ORIGIN/dev/data/users?runId=$run_tag"
+jq -e --arg user_id "$user_id" \
+  'any(.users[]?; .userId == $user_id)' "$seeded_users" >/dev/null || {
+  echo 'FAIL: the seeded user is absent from the filtered Dev Tool directory' >&2
+  exit 1
+}
+expect_status 200 'seeded Dev Tool single-user lookup' "$seeded_user" \
+  "$GATEWAY_ORIGIN/dev/data/user/$user_id"
+jq -e --arg user_id "$user_id" '.userId == $user_id' "$seeded_user" >/dev/null || {
+  echo 'FAIL: the single-user Dev Tool lookup returned a different identity' >&2
+  exit 1
+}
+expect_status 200 'full roster after Dev Tool seed' "$full_roster" \
+  "$GATEWAY_ORIGIN/api/User/super-login/users"
+jq -e --arg user_id "$user_id" \
+  'any(.users[]?; .userId == $user_id)' "$full_roster" >/dev/null || {
+  echo 'FAIL: the seeded user is absent from the full Super Login roster' >&2
+  exit 1
+}
+
+jq -n --arg user_id "$user_id" \
+  '{userId:$user_id,roles:["admin"]}' > "$request_body"
+chmod 600 "$request_body"
+expect_status 200 'credential-less Super Login Plus mint' "$response_body" \
+  --request POST --header 'Content-Type: application/json' \
+  --data-binary "@$request_body" "$GATEWAY_ORIGIN/auth/tokens"
+jq -er '.accessToken | select(type == "string" and length > 0)' \
+  "$response_body" > "$access_token_file"
+jq -er '.refreshToken | select(type == "string" and length > 0)' \
+  "$response_body" > "$refresh_token_file"
+validate_gateway_token "$user_id" admin "$access_token_file"
+
+printf 'header = "Authorization: Bearer %s"\n' "$(<"$access_token_file")" > "$auth_config"
+chmod 600 "$auth_config"
+expect_status 404 'anonymous Swagger document concealment' "$swagger_body" \
+  "$GATEWAY_ORIGIN/swagger/v1/swagger.json"
+expect_status 200 'admin-gated Swagger document' "$swagger_body" \
+  --config "$auth_config" "$GATEWAY_ORIGIN/swagger/v1/swagger.json"
+jq -e '
+  .paths["/auth/tokens"].post
+  and .paths["/dev/seed/user"].post
+  and .paths["/dev/data/users"].get
+  and .paths["/api/User/user-id-login"].post
+' "$swagger_body" >/dev/null || {
+  echo 'FAIL: Swagger omits one or more Dev Tool or Super Login routes' >&2
+  exit 1
+}
+
+jq -n --rawfile refresh_token "$refresh_token_file" \
+  '{refreshToken:($refresh_token | rtrimstr("\n"))}' > "$refresh_body"
+chmod 600 "$refresh_body"
+expect_status 200 'refresh rotation' "$refresh_response" \
+  --request POST --header 'Content-Type: application/json' \
+  --data-binary "@$refresh_body" "$GATEWAY_ORIGIN/auth/tokens/refresh"
+jq -er '.refreshToken | select(type == "string" and length > 0)' \
+  "$refresh_response" > "$rotated_refresh_token_file"
+if cmp -s "$rotated_refresh_token_file" "$refresh_token_file"; then
+  echo 'FAIL: refresh token did not rotate' >&2
+  exit 1
 fi
+jq -n --rawfile refresh_token "$rotated_refresh_token_file" \
+  '{refreshToken:($refresh_token | rtrimstr("\n"))}' > "$revoke_body"
+chmod 600 "$revoke_body"
+expect_status 204 'current refresh-token revocation' "$response_body" \
+  --request POST --header 'Content-Type: application/json' \
+  --data-binary "@$revoke_body" "$GATEWAY_ORIGIN/auth/tokens/revoke"
 
-echo ""
-echo "========================================================"
-echo " Gateway : $GW"
-echo " UserId  : $USER_ID"
-echo " Passcode: $PASSCODE"
-echo "========================================================"
-
-# ─── Super-login (basic) ─────────────────────────────────────────────────────
-echo ""
-echo "=== [1] Super-login (basic) — POST /api/User/user-id-login ==="
-SL_RESP=$(curl -s --max-time 10 -X POST "$GW/api/User/user-id-login" \
-  -H "Content-Type: application/json" \
-  -d "{\"userId\":\"$USER_ID\",\"superAdminPassCode\":\"$PASSCODE\"}" 2>/dev/null)
-
-echo "Raw response: $SL_RESP" | head -c 300
-echo ""
-
-SL_TOKEN=$(echo "$SL_RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('authToken',''))" 2>/dev/null || true)
-if [[ -z "$SL_TOKEN" || "$SL_TOKEN" == "None" ]]; then
-  fail "super-login did not return authToken"
-  echo "  Full response: $SL_RESP"
+if [ -s "$passcode_file" ]; then
+  jq -n --arg user_id "$user_id" --rawfile passcode "$passcode_file" \
+    '{userId:$user_id,passcode:$passcode}' > "$basic_identity"
+elif jq -e '
+    first(.users[]? | select(
+      (.userId | type == "string" and length > 0)
+      and (.passcode | type == "string" and length > 0)
+    ) | {userId,passcode}) // empty
+  ' "$demo_roster" > "$basic_identity"; then
+  :
 else
-  pass "super-login returned authToken"
-  echo "  Token (first 60 chars): ${SL_TOKEN:0:60}..."
-
-  echo ""
-  echo "  JWT payload:"
-  PAYLOAD=$(echo "$SL_TOKEN" | cut -d. -f2 | tr '_-' '/+')
-  # Pad to multiple of 4
-  PAD=$(( 4 - ${#PAYLOAD} % 4 ))
-  [[ $PAD -lt 4 ]] && PAYLOAD="${PAYLOAD}$(printf '=%.0s' $(seq 1 $PAD))"
-  echo "$PAYLOAD" | base64 -d 2>/dev/null | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin), indent=4))" 2>/dev/null || echo "  (could not decode payload)"
+  : > "$basic_identity"
 fi
 
-# ─── Super-login+ (enhanced) ─────────────────────────────────────────────────
-echo ""
-echo "=== [2] Super-login+ (enhanced) — POST /auth/tokens ==="
-if [[ -n "$MINT_KEY" ]]; then
-  info "Using X-Service-Auth-Key header (TokenMint.Enabled=true mode)"
-  SLP_RESP=$(curl -s --max-time 10 -X POST "$GW/auth/tokens" \
-    -H "Content-Type: application/json" \
-    -H "X-Service-Auth-Key: $MINT_KEY" \
-    -d "{\"userId\":\"$USER_ID\",\"roles\":[\"admin\"]}" 2>/dev/null)
+if jq -e '
+  (.userId | type == "string" and length > 0)
+  and (.passcode | type == "string" and length > 0)
+' "$basic_identity" >/dev/null 2>&1; then
+  basic_user_id=$(jq -er '.userId' "$basic_identity")
+  jq '{userId,superAdminPassCode:.passcode}' \
+    "$basic_identity" > "$basic_login_body"
+  chmod 600 "$basic_login_body"
+  expect_status 200 'basic user-id-login' "$basic_login_response" \
+    --request POST --header 'Content-Type: application/json' \
+    --data-binary "@$basic_login_body" "$GATEWAY_ORIGIN/api/User/user-id-login"
+  jq -er '.authToken | select(type == "string" and length > 0)' \
+    "$basic_login_response" > "$basic_access_token_file"
+  validate_gateway_token "$basic_user_id" '' "$basic_access_token_file"
+  echo 'PASS: basic user-id-login returned a gateway-audience session.'
 else
-  info "No MINT_KEY — sending without X-Service-Auth-Key (requires TokenMint.Enabled=false)"
-  SLP_RESP=$(curl -s --max-time 10 -X POST "$GW/auth/tokens" \
-    -H "Content-Type: application/json" \
-    -d "{\"userId\":\"$USER_ID\",\"roles\":[\"admin\"]}" 2>/dev/null)
+  echo 'INFO: basic user-id-login skipped because no configured demo passcode was available.'
 fi
 
-echo "Raw response: $SLP_RESP" | head -c 300
-echo ""
-
-SLP_TOKEN=$(echo "$SLP_RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('accessToken',''))" 2>/dev/null || true)
-if [[ -z "$SLP_TOKEN" || "$SLP_TOKEN" == "None" ]]; then
-  fail "super-login+ did not return accessToken"
-  echo "  Full response: $SLP_RESP"
-  HTTP_STATUS=$(echo "$SLP_RESP" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('status',''))" 2>/dev/null || true)
-  if [[ "$HTTP_STATUS" == "401" ]]; then
-    info "Got 401 — the live gateway likely has TokenMint.Enabled=true."
-    info "Provide the mint key as argument 4: $0 $GW $PASSCODE $USER_ID <mint-key>"
-  fi
-else
-  pass "super-login+ returned gateway accessToken"
-  echo "  Token (first 60 chars): ${SLP_TOKEN:0:60}..."
-
-  echo ""
-  echo "  JWT payload:"
-  PAYLOAD2=$(echo "$SLP_TOKEN" | cut -d. -f2 | tr '_-' '/+')
-  PAD2=$(( 4 - ${#PAYLOAD2} % 4 ))
-  [[ $PAD2 -lt 4 ]] && PAYLOAD2="${PAYLOAD2}$(printf '=%.0s' $(seq 1 $PAD2))"
-  echo "$PAYLOAD2" | base64 -d 2>/dev/null | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin), indent=4))" 2>/dev/null || echo "  (could not decode payload)"
-
-  # ─── Verify elevated access ───────────────────────────────────────────────
-  echo ""
-  echo "=== [3] Verify elevated access — GET /v1/users/me ==="
-  ME_RESP=$(curl -s --max-time 10 "$GW/v1/users/me" \
-    -H "Authorization: Bearer $SLP_TOKEN" 2>/dev/null)
-  echo "  /v1/users/me response:"
-  echo "$ME_RESP" | python3 -c "import json,sys; print(json.dumps(json.load(sys.stdin), indent=4))" 2>/dev/null || echo "$ME_RESP"
-fi
-
-echo ""
-echo "========================================================"
-echo " Done."
-echo "========================================================"
+echo 'PASS: full staging Dev Tool, Super Login Plus, token lifecycle, and Swagger contracts are exact.'
