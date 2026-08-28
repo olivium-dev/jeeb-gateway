@@ -7,7 +7,7 @@ umask 077
 # Optional inputs:
 #   $1: gateway origin (default: staging public origin)
 #   SUPER_LOGIN_PASSCODE: optional basic user-id-login passcode. When omitted,
-#     the first configured demo-roster row is used when one is available.
+#     the first configured demo-roster passcode is used with a live roster user.
 
 test_root=''
 passcode_file=''
@@ -142,6 +142,9 @@ jq -e '
   echo 'FAIL: full Super Login roster is empty, malformed, or leaks a passcode field' >&2
   exit 1
 }
+basic_live_user_id=$(jq -er \
+  'first(.users[]? | .userId | select(type == "string" and length > 0))' \
+  "$full_roster")
 
 expect_status 200 'configured demo roster' "$demo_roster" \
   "$GATEWAY_ORIGIN/api/User/demo-users"
@@ -242,13 +245,12 @@ expect_status 204 'current refresh-token revocation' "$response_body" \
   --data-binary "@$revoke_body" "$GATEWAY_ORIGIN/auth/tokens/revoke"
 
 if [ -s "$passcode_file" ]; then
-  jq -n --arg user_id "$user_id" --rawfile passcode "$passcode_file" \
+  jq -n --arg user_id "$basic_live_user_id" --rawfile passcode "$passcode_file" \
     '{userId:$user_id,passcode:$passcode}' > "$basic_identity"
-elif jq -e '
+elif jq -e --arg user_id "$basic_live_user_id" '
     first(.users[]? | select(
-      (.userId | type == "string" and length > 0)
-      and (.passcode | type == "string" and length > 0)
-    ) | {userId,passcode}) // empty
+      .passcode | type == "string" and length > 0
+    ) | {userId:$user_id,passcode}) // empty
   ' "$demo_roster" > "$basic_identity"; then
   :
 else
@@ -274,4 +276,4 @@ else
   echo 'INFO: basic user-id-login skipped because no configured demo passcode was available.'
 fi
 
-echo 'PASS: full staging Dev Tool, Super Login Plus, token lifecycle, and Swagger contracts are exact.'
+echo 'PASS: required staging Dev Tool, Super Login Plus, token lifecycle, and Swagger contracts are exact; optional basic login result reported above.'
