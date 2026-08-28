@@ -66,4 +66,11 @@ PUBLIC_PROBE_FAILURE=devtool PUBLIC_PROBE_FORBIDDEN="$test_root/forbidden" \
 [ ! -e "$test_root/forbidden" ]
 grep -Fq 'Staging public OTP and devtool contracts are exact.' "$devtool_log"
 
-echo 'staging public probe diagnostics: PASS (curl/type visible, bodies redacted, Dev Tool security scope excluded)'
+devtool_posture_log="$test_root/devtool-posture.log"
+PUBLIC_PROBE_FAILURE=devtool PUBLIC_PROBE_FORBIDDEN="$test_root/forbidden" \
+  PATH="$fake_bin:$PATH" bash "$subject" devtool-posture true true true true true \
+  >"$devtool_posture_log" 2>&1
+[ ! -e "$test_root/forbidden" ]
+grep -Fq 'Staging public OTP and devtool contracts are exact.' "$devtool_posture_log"
+
+echo 'staging public probe diagnostics: PASS (curl/type visible, bodies redacted, Dev Tool candidate/recovery security scope excluded)'

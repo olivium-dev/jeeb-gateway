@@ -11,7 +11,11 @@ mkdir "$fake_bin"
 cat > "$test_root/probe.sh" <<'PROBE'
 #!/usr/bin/env bash
 set -euo pipefail
-[ "$#" -eq 1 ] && [ "$1" = devtool ]
+case "$1" in
+  devtool) [ "$#" -eq 1 ] ;;
+  posture|devtool-posture) [ "$#" -eq 6 ] ;;
+  *) exit 64 ;;
+esac
 count=0
 [ ! -s "$PUBLIC_EDGE_CALLS" ] || count=$(<"$PUBLIC_EDGE_CALLS")
 count=$((count + 1))
@@ -50,4 +54,17 @@ fi
 grep -Fq 'attempts=8 result=terminal-failure (redacted)' "$terminal_log"
 if grep -Fq 'RESPONSE_BODY_CANARY_MUST_NOT_BE_LOGGED' "$terminal_log"; then exit 1; fi
 
-echo 'staging public-edge backoff: PASS (transient recovery, terminal failure, 1/2/4/8 cap, no final sleep, no bodies)'
+: > "$PUBLIC_EDGE_CALLS"
+: > "$PUBLIC_EDGE_SLEEPS"
+posture_log="$test_root/posture.log"
+if bash "$subject" "$test_root/probe.sh" devtool-posture true true true true true \
+    >"$posture_log" 2>&1; then
+  echo 'recovery posture backoff accepted eight failed probes under an if-condition' >&2
+  exit 1
+fi
+[ "$(<"$PUBLIC_EDGE_CALLS")" -eq 8 ]
+grep -Fq 'phase=recovery-devtool-posture attempts=8 result=terminal-failure (redacted)' \
+  "$posture_log"
+if grep -Fq 'RESPONSE_BODY_CANARY_MUST_NOT_BE_LOGGED' "$posture_log"; then exit 1; fi
+
+echo 'staging public-edge backoff: PASS (Dev Tool recovery, terminal failure, recovery-posture failure, 1/2/4/8 cap, no bodies)'

@@ -391,10 +391,11 @@ jobs:
               chmod 600 "$destination"
             }
             verify_exact_candidate_after_checks() {
-              capture_remote_spec "$final_spec" "$final_version" "$final_id" \
-                && staging_gateway_specs_equal "$final_spec" "$candidate_spec" \
-                && cmp -s "$final_version" "$candidate_version" \
-                && cmp -s "$final_id" "$candidate_id"
+              capture_remote_spec "$final_spec" "$final_version" "$final_id" || return 1
+              bash scripts/staging-gateway-terminal-candidate-check.sh \
+                "$DEPLOYMENT_MODE" \
+                "$final_spec" "$final_version" "$final_id" \
+                "$candidate_spec" "$candidate_version" "$candidate_id"
             }
             verify_candidate_readiness() {
               ssh jeeb-staging bash -s -- "$published" "$health" \
@@ -610,24 +611,30 @@ jobs:
             }
             staging_gateway_verify_incumbent() {
               local observed_spec=$1 observed_version=$2 observed_id=$3
-              local open_mode demo_users dev_endpoints swagger token_mint
+              local open_mode demo_users dev_endpoints swagger token_mint posture_mode=posture
               : "$observed_version"
-              staging_gateway_specs_equal "$observed_spec" "$incumbent_spec"
-              cmp -s "$observed_id" "$incumbent_id"
-              [ "$(jq -er '.TaskTemplate.ContainerSpec.Image' "$observed_spec")" = "$incumbent_image" ]
+              staging_gateway_specs_equal "$observed_spec" "$incumbent_spec" || return 1
+              cmp -s "$observed_id" "$incumbent_id" || return 1
+              [ "$(jq -er '.TaskTemplate.ContainerSpec.Image' "$observed_spec")" = "$incumbent_image" ] || return 1
               ssh jeeb-staging bash -s -- "$service" "$incumbent_image" \
-                < scripts/verify-swarm-service-image.sh
-              verify_candidate_readiness
+                < scripts/verify-swarm-service-image.sh || return 1
+              verify_candidate_readiness || return 1
               IFS=$'\t' read -r open_mode demo_users dev_endpoints swagger token_mint < <(
                 jq -er -f scripts/staging-gateway-incumbent-devtool-posture.jq \
                   "$incumbent_spec"
-              )
-              bash scripts/probe-staging-public-gateway-contract.sh posture \
-                "$open_mode" "$demo_users" "$dev_endpoints" "$swagger" "$token_mint"
+              ) || return 1
+              if [ "$DEPLOYMENT_MODE" = devtool-reassert ]; then
+                posture_mode=devtool-posture
+              fi
+              bash scripts/staging-gateway-public-edge-backoff.sh \
+                scripts/probe-staging-public-gateway-contract.sh "$posture_mode" \
+                "$open_mode" "$demo_users" "$dev_endpoints" "$swagger" "$token_mint" \
+                || return 1
               capture_remote_spec \
-                "$recovery_terminal_spec" "$recovery_terminal_version" "$recovery_terminal_id"
-              staging_gateway_specs_equal "$recovery_terminal_spec" "$incumbent_spec"
-              cmp -s "$recovery_terminal_id" "$incumbent_id"
+                "$recovery_terminal_spec" "$recovery_terminal_version" "$recovery_terminal_id" \
+                || return 1
+              staging_gateway_specs_equal "$recovery_terminal_spec" "$incumbent_spec" || return 1
+              cmp -s "$recovery_terminal_id" "$incumbent_id" || return 1
             }
             append_sanitized_transaction_summary() {
               bash scripts/staging-gateway-transaction-summary.sh \

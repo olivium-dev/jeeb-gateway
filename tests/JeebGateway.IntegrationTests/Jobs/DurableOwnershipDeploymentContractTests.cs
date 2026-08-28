@@ -493,9 +493,10 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().Contain("matches == 1 && exact_value == 1");
         workflow.Should().Contain("verify_exact_candidate_after_checks() {");
         workflow.Should().Contain(
-            "staging_gateway_specs_equal \"$final_spec\" \"$candidate_spec\"");
-        workflow.Should().Contain("cmp -s \"$final_version\" \"$candidate_version\"");
-        workflow.Should().Contain("cmp -s \"$final_id\" \"$candidate_id\"");
+            "bash scripts/staging-gateway-terminal-candidate-check.sh");
+        workflow.Should().Contain("posture_mode=posture");
+        workflow.Should().Contain("posture_mode=devtool-posture");
+        workflow.Should().Contain("scripts/probe-staging-public-gateway-contract.sh");
         workflow.Should().Contain("group: jeeb-staging-gateway-mutation");
         workflow.Should().Contain("source scripts/staging-gateway-mutation-lock.sh");
         workflow.Should().Contain("source scripts/staging-gateway-security-cutover.sh");

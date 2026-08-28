@@ -22,7 +22,7 @@ case "$PROBE_MODE" in
     expected_swagger=true
     expected_token_mint=true
     ;;
-  posture)
+  posture|devtool-posture)
     expected_open_mode=${2:-}
     expected_demo_users=${3:-}
     expected_dev_endpoints=${4:-}
@@ -93,7 +93,7 @@ probe_origin() {
   rm -f -- "$response_file"
 }
 
-if [ "$PROBE_MODE" != devtool ]; then
+if [ "$PROBE_MODE" != devtool ] && [ "$PROBE_MODE" != devtool-posture ]; then
   # These admin-cookie security invariants belong to the default and recovered
   # posture gates. They are not part of the staging Dev Tool API contract.
   probe_origin app.jeeb.fds-1.com /admin/v1/auth/refresh https "$CSRF_TYPE"
@@ -146,7 +146,7 @@ if [ "$PROBE_MODE" != invariant ]; then
     --header 'Content-Type: application/json' --data '{}' \
     "${APP_ORIGIN}/auth/tokens"
 
-  if [ "$PROBE_MODE" = devtool ]; then
+  if [ "$PROBE_MODE" = devtool ] || [ "$PROBE_MODE" = devtool-posture ]; then
     # The candidate smoke later proves enabled/admin access. Here, the public
     # contract proves that the enabled surface remains concealed anonymously.
     expect_status 404 'Anonymous Swagger UI concealment' \
@@ -162,7 +162,7 @@ if [ "$PROBE_MODE" != invariant ]; then
   fi
 fi
 
-if [ "$PROBE_MODE" = devtool ]; then
+if [ "$PROBE_MODE" = devtool ] || [ "$PROBE_MODE" = devtool-posture ]; then
   echo 'Staging public OTP and devtool contracts are exact.'
 else
   echo "Staging public origin, CSRF, OTP, and ${PROBE_MODE} contracts are exact."
