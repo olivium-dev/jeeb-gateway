@@ -9,6 +9,7 @@ name: jeeb-production-deploy
         type: string
 
 permissions:
+  checks: read
   contents: read
   packages: write
 
@@ -62,6 +63,34 @@ jobs:
         run: |
           set -euo pipefail
           [ "$GITHUB_SHA" = "$(git rev-parse HEAD)" ]
+
+      - name: Require successful exact-SHA CI
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          checks=$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?per_page=100")
+          for required in \
+            audit \
+            build \
+            build-and-test \
+            'Gitleaks Secret Scan' \
+            provider-boundary-gates \
+            stateless-gate \
+            docker; do
+            state=$(jq -r --arg name "$required" '
+              [.check_runs[] | select(.name == $name)]
+              | sort_by(.started_at)
+              | last
+              | "\(.status):\(.conclusion)"
+            ' <<<"$checks")
+            [ "$state" = completed:success ] || {
+              echo "::error::Exact-SHA check '$required' is not successful ($state)." >&2
+              exit 69
+            }
+          done
 
       - name: Install cloudflared and configure strict SSH
         env:
@@ -125,7 +154,8 @@ jobs:
             [ "$(docker service inspect "$service" --format "{{.Spec.Mode.Replicated.Replicas}}")" = 1 ]
             ports=$(docker service inspect "$service" \
               --format "{{range .Endpoint.Spec.Ports}}{{.PublishedPort}}:{{.TargetPort}}:{{.PublishMode}}{{end}}")
-            [ "$ports" = 10000:8080:ingress ]'
+            [ "$ports" = 10000:8080:ingress ]
+            curl -fsS --max-time 5 http://127.0.0.1:10000/health/ready >/dev/null'
 
       - name: Log in to GHCR
         uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
@@ -176,7 +206,24 @@ jobs:
           service=jeeb-production-jeeb-gateway
           base_url=http://127.0.0.1:10000
           candidate_started=false
-          incumbent_image=
+          health_cmd=$(cat <<'HEALTH'
+          set -eu
+          status() {
+            wget -S -O /dev/null "$@" 2>&1 \
+              | awk '/HTTP\// { code=$2 } END { print code }'
+          }
+          [ "$(status http://localhost:8080/health/ready)" = 200 ]
+          [ "$(status http://localhost:8080/api/User/demo-users)" = 404 ]
+          [ "$(status http://localhost:8080/api/User/super-login/users)" = 404 ]
+          [ "$(status http://localhost:8080/swagger/v1/swagger.json)" = 404 ]
+          [ "$(status http://localhost:8080/__test/clock)" = 404 ]
+          mint_status=$(status \
+            --header='Content-Type: application/json' \
+            --post-data='{"userId":"production-health-probe"}' \
+            http://localhost:8080/auth/tokens)
+          [ "$mint_status" = 401 ] || [ "$mint_status" = 403 ]
+          HEALTH
+          )
 
           cleanup_remote_credentials() {
             credential_dir="$HOME/$remote_docker_config"
@@ -219,7 +266,9 @@ jobs:
               SuperLogin__OpenMode=false \
               DemoUsers__Enabled=false \
               Features__DevEndpoints__Enabled=false \
-              Features__Swagger__Enabled=false; do
+              Features__Swagger__Enabled=false \
+              Security__TokenMint__Enabled=true \
+              TestControlPlane__Enabled=false; do
               [ "$(printf '%s\n' "$service_env" | grep -Fxc "$required")" -eq 1 ]
             done
             wait_for_readiness
@@ -227,6 +276,7 @@ jobs:
             expect_404 /api/User/super-login/users
             expect_404 /swagger/v1/swagger.json
             expect_404 /swagger/index.html
+            expect_404 /__test/clock
             dev_code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
               -X POST -H 'Content-Type: application/json' --data '{}' \
               "$base_url/dev/seed/user")
@@ -234,33 +284,34 @@ jobs:
               echo "Expected 404 from /dev/seed/user, received $dev_code." >&2
               return 1
             }
+            mint_code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 5 \
+              -X POST -H 'Content-Type: application/json' \
+              --data '{"userId":"production-posture-probe"}' \
+              "$base_url/auth/tokens")
+            case "$mint_code" in
+              401|403) ;;
+              *)
+                echo "Expected 401/403 from credential-less token mint, received $mint_code." >&2
+                return 1
+                ;;
+            esac
           }
 
-          rollback_on_failure() {
+          fail_forward_only() {
             rc=$?
             trap - EXIT
             if [ "$rc" -ne 0 ] && [ "$candidate_started" = true ]; then
-              observed_image=$(docker service inspect "$service" \
-                --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')
-              if [ "$observed_image" != "$incumbent_image" ]; then
-                echo 'Production verification failed; rolling back the gateway.' >&2
-                DOCKER_CONFIG="$HOME/$remote_docker_config" \
-                  docker service inspect "$service" >/dev/null || exit 95
-              fi
-              observed_image=$(docker service inspect "$service" \
-                --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')
-              [ "$observed_image" = "$incumbent_image" ] || exit 96
-              verify_production_posture || exit 97
+              echo 'Candidate failed production verification; Swarm update remains paused for inspection.' >&2
+              docker service inspect "$service" >/dev/null || exit 95
             fi
             cleanup_remote_credentials || true
             exit "$rc"
           }
-          trap rollback_on_failure EXIT
-          incumbent_image=$(docker service inspect "$service" \
-            --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')
+          trap fail_forward_only EXIT
 
-          # Harden the incumbent first. A later image rollback therefore returns to
-          # an already-production-safe service spec instead of restoring dev flags.
+          # Harden the incumbent first. The same composite health contract is then
+          # applied to the candidate so start-first keeps the healthy incumbent serving
+          # whenever readiness or a production security posture check fails.
           DOCKER_CONFIG="$HOME/$remote_docker_config" docker service update \
             --env-add ASPNETCORE_ENVIRONMENT=Production \
             --env-add DOTNET_ENVIRONMENT=Production \
@@ -268,6 +319,13 @@ jobs:
             --env-add DemoUsers__Enabled=false \
             --env-add Features__DevEndpoints__Enabled=false \
             --env-add Features__Swagger__Enabled=false \
+            --env-add Security__TokenMint__Enabled=true \
+            --env-add TestControlPlane__Enabled=false \
+            --health-cmd "$health_cmd" \
+            --health-interval 10s \
+            --health-timeout 5s \
+            --health-start-period 20s \
+            --health-retries 3 \
             --update-parallelism 1 \
             --update-order start-first \
             --update-monitor 30s \
@@ -287,6 +345,13 @@ jobs:
             --env-add DemoUsers__Enabled=false \
             --env-add Features__DevEndpoints__Enabled=false \
             --env-add Features__Swagger__Enabled=false \
+            --env-add Security__TokenMint__Enabled=true \
+            --env-add TestControlPlane__Enabled=false \
+            --health-cmd "$health_cmd" \
+            --health-interval 10s \
+            --health-timeout 5s \
+            --health-start-period 20s \
+            --health-retries 3 \
             --update-parallelism 1 \
             --update-order start-first \
             --update-monitor 30s \
@@ -302,3 +367,21 @@ jobs:
           cleanup_remote_credentials
           trap - EXIT
           REMOTE
+
+      - name: Clean up isolated production Docker credentials
+        if: ${{ always() && steps.remote_ghcr_login.outcome != 'skipped' }}
+        run: |
+          set -euo pipefail
+          # The run-scoped credential path is intentionally expanded by the runner.
+          # shellcheck disable=SC2029
+          ssh jeeb-production "set -eu
+            credential_dir=\"\$HOME/$REMOTE_DOCKER_CONFIG\"
+            case \"\$credential_dir\" in \"\$HOME/.jeeb-deploy/ghcr-${{ github.run_id }}-${{ github.run_attempt }}\") ;; *) exit 97 ;; esac
+            [ ! -L \"\$credential_dir\" ] || exit 98
+            [ ! -e \"\$credential_dir\" ] || [ -d \"\$credential_dir\" ] || exit 98
+            if [ -d \"\$credential_dir\" ]; then
+              DOCKER_CONFIG=\"\$credential_dir\" docker logout ghcr.io >/dev/null 2>&1 || true
+              rm -f -- \"\$credential_dir/config.json\"
+              rmdir -- \"\$credential_dir\"
+            fi
+            [ ! -e \"\$credential_dir\" ]"

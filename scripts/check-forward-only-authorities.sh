@@ -346,6 +346,23 @@ CREDENTIAL_CLEANUP_LINES = (
     "  fi",
     '  [ ! -e \\"\\$credential_dir\\" ]"',
 )
+PRODUCTION_CREDENTIAL_CLEANUP_NAME = "Clean up isolated production Docker credentials"
+PRODUCTION_CREDENTIAL_CLEANUP_LINES = (
+    "set -euo pipefail",
+    "# The run-scoped credential path is intentionally expanded by the runner.",
+    "# shellcheck disable=SC2029",
+    'ssh jeeb-production "set -eu',
+    '  credential_dir=\\"\\$HOME/$REMOTE_DOCKER_CONFIG\\"',
+    '  case \\"\\$credential_dir\\" in \\"\\$HOME/.jeeb-deploy/ghcr-${{ github.run_id }}-${{ github.run_attempt }}\\") ;; *) exit 97 ;; esac',
+    '  [ ! -L \\"\\$credential_dir\\" ] || exit 98',
+    '  [ ! -e \\"\\$credential_dir\\" ] || [ -d \\"\\$credential_dir\\" ] || exit 98',
+    '  if [ -d \\"\\$credential_dir\\" ]; then',
+    '    DOCKER_CONFIG=\\"\\$credential_dir\\" docker logout ghcr.io >/dev/null 2>&1 || true',
+    '    rm -f -- \\"\\$credential_dir/config.json\\"',
+    '    rmdir -- \\"\\$credential_dir\\"',
+    "  fi",
+    '  [ ! -e \\"\\$credential_dir\\" ]"',
+)
 MUTATION_STEP_MARKERS = (
     "docker/login-action@",
     "docker/build-push-action@",
@@ -432,12 +449,19 @@ def reject_bypass(name, node):
     if "continue-on-error" in node:
         raise ValueError(f"{name} declares continue-on-error")
     condition = str(node.get("if", ""))
-    allowed_failure_cleanup = (
-        name.startswith("jeeb-staging-deploy.yml:deploy:step-")
-        and node.get("name") == "Clean up isolated remote Docker credentials"
-        and condition == CREDENTIAL_CLEANUP_CONDITION
-        and tuple(str(node.get("run", "")).splitlines())
-        == CREDENTIAL_CLEANUP_LINES
+    allowed_failure_cleanup = condition == CREDENTIAL_CLEANUP_CONDITION and (
+        (
+            name.startswith("jeeb-staging-deploy.yml:deploy:step-")
+            and node.get("name") == "Clean up isolated remote Docker credentials"
+            and tuple(str(node.get("run", "")).splitlines())
+            == CREDENTIAL_CLEANUP_LINES
+        )
+        or (
+            name.startswith(f"{PRODUCTION_WORKFLOW_NAME}:deploy:step-")
+            and node.get("name") == PRODUCTION_CREDENTIAL_CLEANUP_NAME
+            and tuple(str(node.get("run", "")).splitlines())
+            == PRODUCTION_CREDENTIAL_CLEANUP_LINES
+        )
     )
     if STATUS_BYPASS.search(condition) and not allowed_failure_cleanup:
         raise ValueError(f"{name} declares a terminal-status bypass: {condition}")
@@ -458,6 +482,9 @@ def validate_production_authority(document, job_name, job, steps):
         raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} dispatch contract drifted")
     if job.get("environment") != "production":
         raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} environment drifted")
+    expected_permissions = {"checks": "read", "contents": "read", "packages": "write"}
+    if document.get("permissions") != expected_permissions:
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} permissions drifted")
 
     gate = steps[0]
     if not isinstance(gate, dict) or set(gate) != {"name", "env", "run"}:
@@ -506,17 +533,89 @@ def validate_production_authority(document, job_name, job, steps):
     if first_mutation is None or first_mutation <= 0:
         raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} mutation precedes the gate")
 
+    ci_indices = [
+        index
+        for index, step in enumerate(steps)
+        if step.get("name") == "Require successful exact-SHA CI"
+    ]
+    if ci_indices != [3] or first_mutation <= ci_indices[0]:
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} exact-SHA CI gate drifted")
+
+    cleanup_indices = [
+        index
+        for index, step in enumerate(steps)
+        if step.get("name") == PRODUCTION_CREDENTIAL_CLEANUP_NAME
+    ]
+    if cleanup_indices != [len(steps) - 1]:
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} cleanup position drifted")
+    cleanup = steps[cleanup_indices[0]]
+    if set(cleanup) != {"name", "if", "run"}:
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} cleanup shape drifted")
+    if cleanup.get("if") != CREDENTIAL_CLEANUP_CONDITION:
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} cleanup condition drifted")
+    if tuple(str(cleanup.get("run", "")).splitlines()) != PRODUCTION_CREDENTIAL_CLEANUP_LINES:
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} cleanup body drifted")
+
     surface = json.dumps(document, sort_keys=True)
-    if "docker service update" not in surface:
-        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} lacks update authority")
-    for forbidden_command in (
-        "docker service create",
-        "docker service scale",
-        "docker stack ",
-    ):
-        if forbidden_command in surface:
+    required_contract = (
+        "audit",
+        "build-and-test",
+        "Gitleaks Secret Scan",
+        "provider-boundary-gates",
+        "stateless-gate",
+        "docker; do",
+        "olivium-dev/jeeb-gateway",
+        "jeeb-production",
+        "192.168.2.120",
+        "jeeb-production-jeeb-gateway",
+        "10000:8080:ingress",
+        "@${IMAGE_DIGEST}",
+        "docker service update",
+        "--update-order start-first",
+        "--update-failure-action pause",
+        "--update-max-failure-ratio 0",
+        "--health-cmd",
+        "SuperLogin__OpenMode=false",
+        "DemoUsers__Enabled=false",
+        "Features__DevEndpoints__Enabled=false",
+        "Features__Swagger__Enabled=false",
+        "Security__TokenMint__Enabled=true",
+        "TestControlPlane__Enabled=false",
+        "/api/User/super-login/users",
+        "/swagger/index.html",
+        "/__test/clock",
+        "/auth/tokens",
+        "401|403",
+        "http://127.0.0.1:10000/health/ready",
+        "Swarm update remains paused for inspection",
+    )
+    for token in required_contract:
+        if token not in surface:
             raise ValueError(
-                f"{PRODUCTION_WORKFLOW_NAME}:{job_name} is not update-only: {forbidden_command}"
+                f"{PRODUCTION_WORKFLOW_NAME}:{job_name} contract token missing: {token}"
+            )
+
+    shell = "\n".join(
+        str(step.get("run", "")) for step in steps if isinstance(step, dict)
+    ).replace("\\\n", " ")
+    normalized_shell = re.sub(r"[\t ]+", " ", shell)
+    for match in re.finditer(r"\bservice\s+([a-z][a-z0-9-]*)\b", normalized_shell):
+        verb = match.group(1)
+        if verb not in {"inspect", "ps", "update"}:
+            raise ValueError(
+                f"{PRODUCTION_WORKFLOW_NAME}:{job_name} forbidden service verb: {verb}"
+            )
+    forbidden_patterns = (
+        r"\bservice\s+[\"']?\$\{?",
+        r"[\"']?\$\{?[A-Za-z_][A-Za-z0-9_]*\}?[\"']?\s+service\s+",
+        r"\bstack\s+",
+        r"/services/create\b",
+        r"\bPOST\b[^\n]*/services(?:\b|/)",
+    )
+    for pattern in forbidden_patterns:
+        if re.search(pattern, normalized_shell, re.I):
+            raise ValueError(
+                f"{PRODUCTION_WORKFLOW_NAME}:{job_name} dynamic/API mutation authority detected"
             )
 
 
@@ -759,6 +858,34 @@ for name, path in workflow_authority_paths.items():
     spoofed_step["run"] = "docker service update --force jeeb-gateway"
     assert_workflow_rejected("cleanup-name mutation spoof", name, cleanup_name_spoof)
 
+    if name == PRODUCTION_WORKFLOW_NAME:
+        for description, payload in (
+            ("variable docker service create", 'ENGINE=docker; "$ENGINE" service create unsafe'),
+            ("multiline docker service create", "docker service \\\n create unsafe"),
+            ("dynamic service verb", 'ACTION=create; docker service "$ACTION" unsafe'),
+            (
+                "Docker Engine service create API",
+                "curl --unix-socket /var/run/docker.sock -X POST http://localhost/services/create",
+            ),
+        ):
+            mutation = copy.deepcopy(document)
+            step = find_later_mutation_step(mutation)
+            step["run"] = f"{step.get('run', '')}\n{payload}\n"
+            assert_workflow_rejected(description, name, mutation)
+
+        for description, token in (
+            ("token mint gate removed", "Security__TokenMint__Enabled=true"),
+            ("test control-plane gate removed", "TestControlPlane__Enabled=false"),
+            ("composite health gate removed", "--health-cmd"),
+            ("exact-SHA build check removed", "build-and-test"),
+        ):
+            mutation = copy.deepcopy(document)
+            deploy_job = mutation["jobs"]["deploy"]
+            for step in deploy_job["steps"]:
+                if isinstance(step, dict) and isinstance(step.get("run"), str):
+                    step["run"] = step["run"].replace(token, "")
+            assert_workflow_rejected(description, name, mutation)
+
     commented_owner = copy.deepcopy(document)
     commented_owner["jobs"][next(iter(commented_owner["jobs"]))]["steps"][0]["run"] = (
         f"# {OWNER_STEP_NAME}\n# echo '{OWNER_ERROR}' >&2\n# exit 1\ntrue\n"
@@ -916,8 +1043,9 @@ for description, mutated in (
     raise SystemExit(f"FAIL: unsafe secret lifecycle mutation survived: {description}")
 
 print(
-    "Structurally validated 3 single-job workflow authorities, dynamically executed "
-    "their owner steps under empty PATH, and rejected 33 adversarial workflow mutations."
+    f"Structurally validated {len(workflow_authority_paths)} single-job workflow "
+    "authorities, dynamically executed their owner steps under empty PATH, and "
+    "rejected the adversarial workflow mutation suite."
 )
 print("Dynamically validated the blocked lifecycle authority and 2 adversarial mutations.")
 
