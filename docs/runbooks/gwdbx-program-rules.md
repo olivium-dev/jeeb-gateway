@@ -263,6 +263,10 @@ six registered settings under `Features:RealtimeWebSocketProxy`: `Enabled`, the 
 resource bounds, and the connect/activity timeouts. `Enabled` is a restart-bound A1-off/B-on switch and is
 committed false in Production; it is not a gwdbx ownership cutover and therefore has `setting -` status.
 
+**2026-08-29 scoped relay credential reconciliation.** The gateway's file-backed scoped relay credential
+adds `PushNotificationServiceApi:GatewayApiKey` and `PushNotificationServiceApi:GatewayApiKeyFile` as
+`setting -` entries. They are service-authentication settings, not gateway-DB extraction cutovers.
+
 `FRAMEWORK_MODE_TYPES` is now only `BoundedChannelFullMode`, `FullMode` (both `System.Threading.Channels`),
 `FileMode` (`System.IO`), `SameSiteMode` (ASP.NET cookie enum) and `PushDeliveryMode` (a local enum in
 `Notifications/PushSilencePolicy.cs`, never bound to configuration). **Re-verify against the binding sites before

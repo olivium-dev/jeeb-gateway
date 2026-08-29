@@ -407,6 +407,8 @@ GatewayRateLimit:RedisConnectionString               setting - # DSN
 NotificationCatalogSeeder:Enabled                    setting - # env-only seeder switch, in no appsettings file
 PushNotificationServiceApi:InternalApiKey            setting - # SECRET: push-service internal key
 PushNotificationServiceApi:InternalApiKeyFile        setting - # SECRET: file reference for the push-service internal key
+PushNotificationServiceApi:GatewayApiKey             setting - # SECRET: scoped gateway relay credential
+PushNotificationServiceApi:GatewayApiKeyFile         setting - # SECRET: file reference for the scoped gateway relay credential
 ServiceAuth:SigningKeyFile                           setting - # SECRET: BFF service-auth signing key PATH (file ref, not the key)
 ServiceNotificationClient:ApiToken                   setting - # SECRET: notification-service token, read via a const key
 Services:JeebState:BaseUrl                           setting - # legacy alias of JeebStateService:BaseUrl

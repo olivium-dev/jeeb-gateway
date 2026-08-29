@@ -309,14 +309,19 @@ def validate_bootstrap_workflow(text):
           - security-cutover
           - otp-cutover
           - devtool-reassert
+      provider_expand_verified:
+        description: 'Confirm protected-main push-notification is live and verified in expand mode'
+        required: true
+        type: boolean
+        default: false
 
 '''
     if dispatch_header != expected_dispatch:
         raise ValueError("staging deployment-mode dispatch contract drifted")
     input_references = set(
-        re.findall(r"\$\{\{\s*inputs\.([A-Za-z][A-Za-z0-9_]*)", text)
+        re.findall(r"\binputs\.([A-Za-z][A-Za-z0-9_]*)", text)
     )
-    if input_references != {"deployment_mode"}:
+    if input_references != {"deployment_mode", "provider_expand_verified"}:
         raise ValueError(f"unexpected staging callable inputs: {sorted(input_references)}")
 
     secret_name_gate = text.index('if [ "$DEPLOYMENT_MODE" != devtool-reassert ]; then', text.index('service=jeeb-staging-jeeb-gateway'))
