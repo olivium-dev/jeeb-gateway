@@ -78,8 +78,8 @@ paused state.
 
 ## 5. Reverse compatibility rollback order
 
-Rollback is an explicit compatible forward update to a selected prior digest,
-not `docker service rollback`:
+Rollback selects and applies a compatible prior immutable digest through a new
+start-first service update; never use Swarm's automatic reversion subcommand:
 
 1. **push-notification relay first** — select a digest that accepts both the
    current authenticated contract and the older caller behavior.
