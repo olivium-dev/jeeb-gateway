@@ -99,12 +99,8 @@ jobs:
           cleanup() {
             status=$?
             trap - EXIT HUP INT TERM
-            if [ "$status" -ne 0 ] && [ "$rotation_armed" = true ] \
-              && [ -n "$old_probe_secret" ]; then
-              ssh jeeb-staging bash -s -- rollback "$EXPECTED_IMAGE" \
-                "$new_probe_secret" "$REMOTE_DOCKER_CONFIG" "$old_probe_secret" \
-                < .github/scripts/rotate-staging-gateway-probe-key.sh >/dev/null 2>&1 \
-                || true
+            if [ "$status" -ne 0 ] && [ "$rotation_armed" = true ]; then
+              echo 'Rotation candidate is preserved for a reviewed forward correction.' >&2
             fi
             if [ "$lock_held" = true ]; then
               staging_gateway_lock_release >/dev/null 2>&1 || status=1

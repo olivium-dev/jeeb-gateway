@@ -61,6 +61,12 @@ public class WebApplicationFactory<TEntryPoint>
     {
         builder.UseEnvironment("Testing");
         builder.UseSetting("DELIVERY_SERVICE_TOKEN", new string('t', 48));
+        builder.UseSetting(
+            "ServiceNotificationClient:ServiceToken",
+            "integration-test-notification-owner-token");
+        builder.UseSetting(
+            "PushNotificationServiceApi:GatewayApiKey",
+            "integration-test-push-relay-key");
         // A full gateway host is created by thousands of integration cases. Its
         // production console providers otherwise stream every background-worker
         // retry into VSTest, overwhelming the CI runner before the suite finishes.
@@ -73,7 +79,28 @@ public class WebApplicationFactory<TEntryPoint>
             {
                 UseExplicitTestOwners(services);
             }
+
+            // The real readiness check performs an authenticated provider call.
+            // Keep unrelated gateway integration tests local while exercising the
+            // production handler and fixed ready/scope response shape.
+            services.AddHttpClient("ServicePushNotificationClient")
+                .ConfigurePrimaryHttpMessageHandler(
+                    static () => new TestPushRelayReadinessHandler());
         });
+    }
+
+    private sealed class TestPushRelayReadinessHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken) =>
+            Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK)
+            {
+                Content = new StringContent(
+                    """{"status":"ready","scope":"gateway.registration"}""",
+                    System.Text.Encoding.UTF8,
+                    "application/json"),
+            });
     }
 
     protected override IHost CreateHost(IHostBuilder builder)

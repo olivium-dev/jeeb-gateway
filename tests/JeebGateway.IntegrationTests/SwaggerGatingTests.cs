@@ -173,6 +173,7 @@ public class SwaggerGatingTests
                 // Development/Testing branch) is exercised — this is the live
                 // host's environment.
                 builder.UseEnvironment("Production");
+                builder.UseSetting("FeatureFlags:NotificationDurableWrite:Enabled", "true");
                 builder.UseSetting(Fakes.ProductionMountedSecrets.StateServiceTokenFileKey,
                     Fakes.ProductionMountedSecrets.StateServiceTokenFile);
                 builder.UseSetting("Features:Swagger:Enabled", enabled ? "true" : "false");

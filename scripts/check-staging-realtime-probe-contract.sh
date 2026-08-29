@@ -151,7 +151,7 @@ require(
         '$environment["features__devendpoints__enabled"] == "true"',
         '$environment["features__swagger__enabled"] == "true"',
         '.UpdateConfig.Order == "start-first"',
-        '.UpdateConfig.FailureAction == "rollback"',
+        '.UpdateConfig.FailureAction == "pause"',
         '.RollbackConfig.Order == "start-first"',
         '.RollbackConfig.FailureAction == "pause"',
         'def canonical_identifier:',
@@ -219,9 +219,7 @@ def validate_bootstrap_workflow(text):
         "Ports: ($spec[0].EndpointSpec.Ports // [])",
         "Networks: ($spec[0].TaskTemplate.Networks // [])",
         "Replicas: $spec[0].Mode.Replicated.Replicas",
-        'FailureAction:"rollback",Order:"start-first"',
         'FailureAction:"pause",Order:"start-first"',
-        'FailureAction:"pause",Order:"stop-first"',
         '"${published}:${target}:ingress"',
         "source scripts/staging-gateway-mutation-lock.sh",
         "source scripts/staging-gateway-spec-recovery.sh",
@@ -290,8 +288,8 @@ def validate_bootstrap_workflow(text):
         raise ValueError(f"unsafe staging mutation behavior remains: {present}")
     if 'append_sanitized_transaction_summary || status=99' in text:
         raise ValueError("summary failure overwrites the original deploy status")
-    if text.count('FailureAction:"rollback",Order:"start-first"') != 2:
-        raise ValueError("recoverable deployment policies are not exact for generic and Dev Tool modes")
+    if text.count('FailureAction:"pause",Order:"start-first"') != 4:
+        raise ValueError("every staging update and correction policy must be start-first and pause-on-failure")
 
     dispatch_header = text[: text.index("permissions:")]
     expected_dispatch = '''name: jeeb-staging-deploy
@@ -309,14 +307,19 @@ def validate_bootstrap_workflow(text):
           - security-cutover
           - otp-cutover
           - devtool-reassert
+      provider_expand_verified:
+        description: 'Confirm protected-main push-notification is live and verified in expand mode'
+        required: true
+        type: boolean
+        default: false
 
 '''
     if dispatch_header != expected_dispatch:
         raise ValueError("staging deployment-mode dispatch contract drifted")
     input_references = set(
-        re.findall(r"\$\{\{\s*inputs\.([A-Za-z][A-Za-z0-9_]*)", text)
+        re.findall(r"\binputs\.([A-Za-z][A-Za-z0-9_]*)", text)
     )
-    if input_references != {"deployment_mode"}:
+    if input_references != {"deployment_mode", "provider_expand_verified"}:
         raise ValueError(f"unexpected staging callable inputs: {sorted(input_references)}")
 
     secret_name_gate = text.index('if [ "$DEPLOYMENT_MODE" != devtool-reassert ]; then', text.index('service=jeeb-staging-jeeb-gateway'))
@@ -463,10 +466,10 @@ negative_controls = (
         workflow.replace('grep -Fxc "192.168.2.20"', 'grep -Fxc "192.168.2.21"', 1),
     ),
     (
-        "automatic rollback disabled",
+        "automatic rollback reintroduced",
         workflow.replace(
-            'FailureAction:"rollback",Order:"start-first"',
             'FailureAction:"pause",Order:"start-first"',
+            'FailureAction:"rollback",Order:"start-first"',
             1,
         ),
     ),

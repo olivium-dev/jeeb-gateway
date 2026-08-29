@@ -5,10 +5,8 @@
 # policy (olivium-deployment/README.md):
 #   * controlled deploy: update an existing digest-pinned service only; never delete,
 #     create, or automatically restore an earlier service revision
-#   * update order = stop-first: the published port uses mode=host on a
-#     single-node swarm, so start-first deadlocks ("host-mode port already in use
-#     on 1 node") because the old task still holds the host port. stop-first frees
-#     the port first (brief blip), which is correct for host-mode single node.
+#   * a reviewed host-to-ingress service-spec migration removes the single-node
+#     port collision before a start-first, pause-on-failure replacement begins
 #   * key-only SSH from a secret (fail-closed; no password in YAML, unlike legacy)
 #   * registry creds via GitHub secrets, never inlined (no demo-password literals)
 #   * failed updates pause visibly for inspection; the owner block below prevents all
@@ -70,7 +68,7 @@ on:
       service_name:    { description: 'Swarm service name',              required: true, default: 'jeeb-gateway' }
       internal_port:   { description: 'Container port',                  required: true, default: '8080' }
       external_port:   { description: 'Published host port (Jeeb swarm)',required: true, default: '10000' }
-      health_path:     { description: 'HTTP health path',                required: true, default: '/api/health' }
+      health_path:     { description: 'HTTP readiness path (fixed)',     required: true, default: '/health/ready' }
       server_hostname: { description: 'Cloudflare tunnel hostname',      required: true, default: 'jeeb-ssh.fds-1.com' }
       server_user:     { description: 'SSH user',                        required: true, default: 'ec2-user' }
       jwt_issuer:                  { description: 'JWT issuer',                       required: true, default: 'https://jeeb.fds-1.com' }
@@ -121,7 +119,7 @@ on:
       # input per flag. `feature_flags` is a comma-separated list of `Key=Value` pairs whose
       # Key is the LAST segment of a `FeatureFlags:<...>:Enabled` (or `FeatureFlags:UseUpstream:<...>`)
       # config path; the deploy job maps each to its full `FeatureFlags__*` env var and injects
-      # it via --env-add on the same update-only host-mode rollout.
+      # it via --env-add on the same update-only ingress rollout.
       #
       # This input REPLACES the former dedicated `use_upstream_kyc` / `use_upstream_cdn`
       # boolean inputs (net -2 +1 = 24 inputs, one slot spare). It is ADDITIVE and
@@ -168,7 +166,7 @@ on:
       #   'true'                => env-add  Features__DevEndpoints__Enabled=true  (/dev/* ON).
       #   'false'               => env-rm   Features__DevEndpoints__Enabled       (scrub => 404).
       # Set 'true'/'false' ONLY when you intend to change the flag (e.g. arm/disarm the E2E
-      # seeding harness). Applied additively on the same stop-first `docker service update`
+      # seeding harness). Applied additively on the same start-first service update
       # that injects Security__TokenMint__*.
       dev_endpoints:
         description: 'DEV-only /dev/* flag (Features__DevEndpoints__Enabled). preserve (default) = leave as-is; true = enable; false = scrub (404).'
@@ -192,7 +190,7 @@ on:
       #                           A fresh prod that never set the flag stays OFF (404).
       #   'true'                => env-add  Features__Swagger__Enabled=true  (/swagger* ON, admin-gated).
       #   'false'               => env-rm   Features__Swagger__Enabled       (scrub => 404).
-      # Applied additively on the same stop-first `docker service update` as dev_endpoints.
+      # Applied additively on the same start-first service update as dev_endpoints.
       swagger_ui:
         description: 'Swagger /swagger* flag (Features__Swagger__Enabled). preserve (default) = leave as-is; true = enable (admin-gated, non-admin 404); false = scrub (404).'
         required: false
@@ -223,6 +221,15 @@ jobs:
         run: |
           echo '::error::Forward-only promotion pending owner-approved failure handling; no image, SSH, provider, secret, or Swarm mutation was attempted.' >&2
           exit 1
+
+      - name: Hold caller activation until relay expand is verified
+        env:
+          PROVIDER_EXPAND_VERIFIED: ${{ vars.JEEB_PUSH_PROVIDER_EXPAND_VERIFIED }}
+        run: |
+          if [ "$PROVIDER_EXPAND_VERIFIED" != true ]; then
+            echo '::error::Deployment HOLD: deploy and verify the protected-main push-notification image in expand mode first.' >&2
+            exit 1
+          fi
 
       - uses: actions/checkout@v4
 
@@ -384,12 +391,13 @@ jobs:
       - name: Remote GHCR login (token via stdin pipe)
         run: printf '%s' "${{ secrets.GITHUB_TOKEN }}" | ssh jeeb "docker login ${{ env.REGISTRY }} -u ${{ github.actor }} --password-stdin"
 
-      - name: Verified host-mode deploy
+      - name: Verified start-first ingress deploy
         env:
           IMAGE_PATH: ${{ steps.immutable.outputs.image }}
           STATE_SERVICE_TOKEN: ${{ secrets.JEEB_STATE_SERVICE_TOKEN }}
           DELIVERY_OWNER_TOKEN: ${{ secrets.DELIVERY_SERVICE_TOKEN }}
           NOTIFICATION_OWNER_TOKEN: ${{ secrets.NOTIFICATION_SERVICE_TOKEN }}
+          PUSH_RELAY_TOKEN: ${{ secrets.JEEB_PUSH_GATEWAY_API_KEY }}
           BUNDLER_CMS_TOKEN: ${{ secrets.BUNDLER_CMS_BEARER_TOKEN }}
           PRIVATE_ARTIFACT_TOKEN: ${{ secrets.PRIVATE_ARTIFACT_STORE_BEARER_TOKEN }}
           DATA_EXPORT_SIGNING_KEY: ${{ secrets.DATA_EXPORT_TOKEN_SIGNING_KEY }}
@@ -399,6 +407,8 @@ jobs:
           : "${STATE_SERVICE_TOKEN:?JEEB_STATE_SERVICE_TOKEN secret is required}"
           : "${DELIVERY_OWNER_TOKEN:?DELIVERY_SERVICE_TOKEN secret is required}"
           : "${NOTIFICATION_OWNER_TOKEN:?NOTIFICATION_SERVICE_TOKEN secret is required}"
+          : "${PUSH_RELAY_TOKEN:?JEEB_PUSH_GATEWAY_API_KEY secret is required}"
+          [ "${#PUSH_RELAY_TOKEN}" -ge 32 ]
           : "${BUNDLER_CMS_TOKEN:?BUNDLER_CMS_BEARER_TOKEN secret is required}"
           : "${PRIVATE_ARTIFACT_TOKEN:?PRIVATE_ARTIFACT_STORE_BEARER_TOKEN secret is required}"
           : "${DATA_EXPORT_SIGNING_KEY:?DATA_EXPORT_TOKEN_SIGNING_KEY secret is required}"
@@ -407,6 +417,7 @@ jobs:
           STATE_SECRET="jeeb_gateway_state_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
           DELIVERY_SECRET="jeeb_gateway_delivery_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
           NOTIFICATION_SECRET="jeeb_gateway_notification_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          PUSH_SECRET="jeeb_gateway_push_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
           BUNDLER_SECRET="jeeb_gateway_bundler_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
           ARTIFACT_SECRET="jeeb_gateway_artifact_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
           EXPORT_SECRET="jeeb_gateway_export_key_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
@@ -419,11 +430,12 @@ jobs:
           stream_secret "$STATE_SECRET" "$STATE_SERVICE_TOKEN"
           stream_secret "$DELIVERY_SECRET" "$DELIVERY_OWNER_TOKEN"
           stream_secret "$NOTIFICATION_SECRET" "$NOTIFICATION_OWNER_TOKEN"
+          stream_secret "$PUSH_SECRET" "$PUSH_RELAY_TOKEN"
           stream_secret "$BUNDLER_SECRET" "$BUNDLER_CMS_TOKEN"
           stream_secret "$ARTIFACT_SECRET" "$PRIVATE_ARTIFACT_TOKEN"
           stream_secret "$EXPORT_SECRET" "$DATA_EXPORT_SIGNING_KEY"
           stream_secret "$JOB_SECRET" "$GATEWAY_JOB_TOKEN"
-          unset STATE_SERVICE_TOKEN DELIVERY_OWNER_TOKEN NOTIFICATION_OWNER_TOKEN \
+          unset STATE_SERVICE_TOKEN DELIVERY_OWNER_TOKEN NOTIFICATION_OWNER_TOKEN PUSH_RELAY_TOKEN \
             BUNDLER_CMS_TOKEN PRIVATE_ARTIFACT_TOKEN \
             DATA_EXPORT_SIGNING_KEY GATEWAY_JOB_TOKEN
           # DEV-only /dev/* flag, controlled EXCLUSIVELY by the dev_endpoints input (3-state).
@@ -437,7 +449,7 @@ jobs:
           # false => env-rm   Features__DevEndpoints__Enabled       (scrub => endpoints OFF / 404)
           # Idempotent: env-add overwrites if present; `docker service update --env-rm` is a
           # no-op when the var is already absent, so an explicit false run never errors.
-          # Applied on the same update command as Security__TokenMint__* => one stop-first,
+          # Applied on the same update command as Security__TokenMint__* => one start-first,
           # pause-on-failure rollout, never a separate out-of-band update.
           case "${{ inputs.dev_endpoints }}" in
             true)
@@ -457,7 +469,7 @@ jobs:
           # mirroring dev_endpoints. preserve => no mutation (current state persists across the
           # --image update). true => env-add (admin-gated /swagger* ON). false => env-rm (404).
           # Idempotent: env-add overwrites if present; --env-rm is a no-op when already absent.
-          # Applied on the same stop-first update command as DEV_FLAG_ARG / TokenMint.
+          # Applied on the same start-first update command as DEV_FLAG_ARG / TokenMint.
           case "${{ inputs.swagger_ui }}" in
             true)
               SWAGGER_FLAG_ARG="--env-add Features__Swagger__Enabled=true"
@@ -521,11 +533,16 @@ jobs:
           STATE_SECRET='$STATE_SECRET'
           DELIVERY_SECRET='$DELIVERY_SECRET'
           NOTIFICATION_SECRET='$NOTIFICATION_SECRET'
+          PUSH_SECRET='$PUSH_SECRET'
           BUNDLER_SECRET='$BUNDLER_SECRET'
           ARTIFACT_SECRET='$ARTIFACT_SECRET'
           EXPORT_SECRET='$EXPORT_SECRET'
           JOB_SECRET='$JOB_SECRET'
           REQUESTED_IMAGE='$IMAGE_PATH'
+          [ "$HEALTH" = /health/ready ] || {
+            echo 'Gateway deployment requires the scoped readiness path.' >&2
+            exit 1
+          }
           # These keys came from the retired gateway-local matching and STT paths.
           # Remove them on every update so an older service spec cannot preserve a
           # banned destination or a provider credential after the source is fixed.
@@ -552,10 +569,17 @@ jobs:
           }
           current_ports=\$(docker service inspect "\$SVC" \
             --format '{{range .Endpoint.Spec.Ports}}{{.PublishedPort}}:{{.TargetPort}}:{{.PublishMode}}{{end}}')
-          [ "\$current_ports" = "\${EXT}:\${INT}:host" ] || {
-            echo 'Direct gateway service must retain the approved host-mode port' >&2
-            exit 1
-          }
+          port_args=()
+          case "\$current_ports" in
+            "\${EXT}:\${INT}:host")
+              port_args=(--publish-rm "\$INT" --publish-add "published=\$EXT,target=\$INT,mode=ingress")
+              ;;
+            "\${EXT}:\${INT}:ingress") ;;
+            *)
+              echo 'Direct gateway service has an unsupported published-port contract' >&2
+              exit 1
+              ;;
+          esac
           state_secret_args=()
           add_rotated_secret() {
             target="\$1"; source="\$2"
@@ -568,6 +592,7 @@ jobs:
           add_rotated_secret jeeb_state_service_token "\$STATE_SECRET"
           add_rotated_secret delivery_service_token "\$DELIVERY_SECRET"
           add_rotated_secret notification_service_token "\$NOTIFICATION_SECRET"
+          add_rotated_secret push_gateway_api_key "\$PUSH_SECRET"
           add_rotated_secret bundler_cms_bearer_token "\$BUNDLER_SECRET"
           add_rotated_secret private_artifact_store_bearer_token "\$ARTIFACT_SECRET"
           add_rotated_secret data_export_token_signing_key "\$EXPORT_SECRET"
@@ -575,14 +600,17 @@ jobs:
           [[ "\$REQUESTED_IMAGE" =~ @sha256:[0-9a-f]{64}$ ]]
           docker pull "\$REQUESTED_IMAGE"
           rollout=(
-            --update-order stop-first
+            --update-order start-first
             --update-parallelism 1
             --update-monitor 20s
             --update-failure-action pause
           )
           docker service update --detach=false --replicas 1 --image "\$REQUESTED_IMAGE" --with-registry-auth \
               "\${rollout[@]}" \
+              "\${port_args[@]}" \
               "\${retired_env_args[@]}" \
+              --env-rm PushNotificationServiceApi__InternalApiKey \
+              --env-rm PushNotificationServiceApi__InternalApiKeyFile \
               --env-add Security__TokenMint__Enabled='true' \
               --env-add Security__TokenMint__Key='${{ secrets.JEEB_TOKEN_MINT_KEY }}' \
               --env-add Auth__Otp__ApplicationId='${{ inputs.otp_application_id }}' \
@@ -603,6 +631,7 @@ jobs:
               --env-add JeebStateService__ServiceTokenFile='/run/secrets/jeeb_state_service_token' \
               --env-add DELIVERY_SERVICE_TOKEN_FILE='/run/secrets/delivery_service_token' \
               --env-add ServiceNotificationClient__ServiceTokenFile='/run/secrets/notification_service_token' \
+              --env-add PushNotificationServiceApi__GatewayApiKeyFile='/run/secrets/push_gateway_api_key' \
               --env-add BUNDLER_CMS_BASE_URL='${{ inputs.bundler_cms_base_url }}' \
               --env-add BUNDLER_CMS_BEARER_TOKEN_FILE='/run/secrets/bundler_cms_bearer_token' \
               --env-add PRIVATE_ARTIFACT_STORE_BASE_URL='${{ inputs.cdn_base_url }}' \
@@ -610,6 +639,8 @@ jobs:
               --env-add DATA_EXPORT_TOKEN_SIGNING_KEY_FILE='/run/secrets/data_export_token_signing_key' \
               --env-add InternalJobAuth__TokenFile='/run/secrets/jeeb_gateway_job_token' \
               --env-add FeatureFlags__DurableRequests__Enabled='false' \
+              --env-add FeatureFlags__NotificationDurableWrite__Enabled='true' \
+              --env-add FeatureFlags__NotificationOutboxMode='upstream-authority' \
               --env-add FeatureFlags__Heartbeat__Enabled='false' \
               --env-add FeatureFlags__Heartbeat__ServiceAuthKey='${{ secrets.HEARTBEAT_SERVICE_AUTH_KEY }}' \
               --env-add FeatureFlags__UseUpstream__Offer='true' \
@@ -629,8 +660,8 @@ jobs:
           }
           current_ports=\$(docker service inspect "\$SVC" \
             --format '{{range .Endpoint.Spec.Ports}}{{.PublishedPort}}:{{.TargetPort}}:{{.PublishMode}}{{end}}')
-          [ "\$current_ports" = "\${EXT}:\${INT}:host" ] || {
-            echo 'Direct gateway host-mode port contract drifted during rollout' >&2
+          [ "\$current_ports" = "\${EXT}:\${INT}:ingress" ] || {
+            echo 'Direct gateway ingress port contract drifted during rollout' >&2
             exit 1
           }
           healthy=false

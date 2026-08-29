@@ -71,6 +71,7 @@ public class W18_SettlementLedgerDurableTests
         var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
         {
             b.UseEnvironment("Production");
+            b.UseSetting("FeatureFlags:NotificationDurableWrite:Enabled", "true");
             b.UseSetting("Jwt:SigningKey", ProdJwtKey);
             b.UseSetting("BffServices:RequiredInProduction", "false");
             // StoreDurability:FailClosedDisabled is deliberately NOT set: the gate must

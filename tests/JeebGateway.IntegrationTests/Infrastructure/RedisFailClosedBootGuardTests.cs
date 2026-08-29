@@ -163,6 +163,9 @@ public class RedisFailClosedBootGuardTests
         return new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
         {
             b.UseEnvironment("Production");
+            b.UseSetting(
+                JeebGateway.Notifications.NotificationRecordWriter.EnabledConfigurationKey,
+                "true");
             b.UseSetting(Fakes.ProductionMountedSecrets.StateServiceTokenFileKey,
                 Fakes.ProductionMountedSecrets.StateServiceTokenFile);
             b.UseSetting("Jwt:SigningKey", ProdJwtKey);

@@ -129,12 +129,12 @@ if [ "$1 $2" = 'service inspect' ]; then
     version=10
     update_state=''
     order=start-first
-    failure=rollback
+    failure=pause
   else
     image=$candidate_image
     version=11
     update_state=completed
-    order=stop-first
+    order=start-first
     failure=pause
     [ "$scenario" != paused ] || update_state=paused
     [ "$scenario" != updating ] || update_state=updating

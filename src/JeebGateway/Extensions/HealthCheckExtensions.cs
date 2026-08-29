@@ -78,8 +78,8 @@ public static class HealthCheckExtensions
         AddDownstreamProbe(checks, config, "wallet-service",          "WalletServiceApi:BaseUrl",         healthPath: "health");
         // matching-service readiness probe REMOVED (JEBV4-220 / E25) — the
         // standalone matching-service read path is retired; nothing dials it.
-        AddDownstreamProbe(checks, config, "notification-service",    "ServiceNotificationClient:BaseUrl", healthPath: "health");
-        AddDownstreamProbe(checks, config, "push-notification",       "PushNotificationServiceApi:BaseUrl", healthPath: "health");
+        AddDownstreamProbe(checks, config, "notification-service",    "ServiceNotificationClient:BaseUrl", healthPath: "health/ready");
+        AddDownstreamProbe(checks, config, "push-notification",       "PushNotificationServiceApi:BaseUrl", healthPath: "health/ready");
         AddDownstreamProbe(checks, config, "delivery-service",        "Services:Delivery:BaseUrl",        healthPath: "health");
         AddDownstreamProbe(checks, config, "geolocation-service",     "Services:Geolocation:BaseUrl",     healthPath: "health");
         AddDownstreamProbe(checks, config, "offer-service",           "Services:Offer:BaseUrl",           healthPath: "health");

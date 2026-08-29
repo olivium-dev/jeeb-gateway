@@ -48,7 +48,7 @@ cat > "$candidate" <<JSON
     "Ports": [{"PublishedPort":10000,"TargetPort":8080,"PublishMode":"ingress"}]
   },
   "Mode": {"Replicated":{"Replicas":1}},
-  "UpdateConfig": {"Order":"start-first","FailureAction":"rollback"},
+  "UpdateConfig": {"Parallelism":1,"Monitor":20000000000,"Order":"start-first","FailureAction":"pause"},
   "RollbackConfig": {"Order":"start-first","FailureAction":"pause"}
 }
 JSON
@@ -83,16 +83,17 @@ validate "$candidate"
 validate "$candidate" devtool-reassert
 jq '
   .UpdateConfig = {
-    Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"stop-first"
+    Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"start-first"
   }
   | .RollbackConfig = {
-    Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"stop-first"
+    Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"start-first"
   }
 ' "$candidate" > "$cutover"
 validate "$cutover" security-cutover
-if validate "$candidate" security-cutover || validate "$cutover" normal \
-  || validate "$cutover" invalid-mode; then
-  echo 'deployment-mode candidate separation is not fail-closed' >&2
+validate "$candidate" security-cutover
+validate "$cutover" normal
+if validate "$cutover" invalid-mode; then
+  echo 'deployment-mode validation is not fail-closed' >&2
   exit 1
 fi
 jq '
@@ -152,8 +153,8 @@ for unsafe_filter in \
   '.UpdateConfig.Parallelism = 2' \
   '.UpdateConfig.Monitor = 19999999999' \
   '.UpdateConfig.FailureAction = "rollback"' \
-  '.UpdateConfig.Order = "start-first"' \
-  '.RollbackConfig.Order = "start-first"'; do
+  '.UpdateConfig.Order = "stop-first"' \
+  '.RollbackConfig.Order = "stop-first"'; do
   jq "$unsafe_filter" "$cutover" > "$mutant"
   if validate "$mutant" security-cutover; then
     echo "security-cutover contract accepted unsafe mutant: $unsafe_filter" >&2
@@ -263,7 +264,7 @@ jq --arg image "$image" '
         "SuperLogin__OpenMode=true","DemoUsers__Enabled=true",
         "Features__DevEndpoints__Enabled=true","Features__Swagger__Enabled=true"
       ])
-  | .UpdateConfig += {Parallelism:1,Monitor:20000000000,FailureAction:"rollback",Order:"start-first"}
+  | .UpdateConfig += {Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"start-first"}
   | .RollbackConfig += {Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"start-first"}
 ' "$devtool_incumbent" > "$devtool_candidate"
 validate "$devtool_candidate" devtool-reassert "$devtool_incumbent"

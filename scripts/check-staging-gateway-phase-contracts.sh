@@ -87,14 +87,17 @@ expected_dispatch = '''name: jeeb-staging-deploy
           - security-cutover
           - otp-cutover
           - devtool-reassert
+      provider_expand_verified:
+        description: 'Confirm protected-main push-notification is live and verified in expand mode'
+        required: true
+        type: boolean
+        default: false
 
 '''
 if dispatch_header != expected_dispatch:
     raise SystemExit("FAIL: staging deployment-mode dispatch contract drifted")
-input_references = set(
-    re.findall(r"\$\{\{\s*inputs\.([A-Za-z][A-Za-z0-9_]*)", workflow)
-)
-if input_references != {"deployment_mode"}:
+input_references = set(re.findall(r"\binputs\.([A-Za-z][A-Za-z0-9_]*)", workflow))
+if input_references != {"deployment_mode", "provider_expand_verified"}:
     raise SystemExit(
         f"FAIL: staging workflow exposes unexpected callable inputs: {sorted(input_references)}"
     )

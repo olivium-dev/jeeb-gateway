@@ -24,7 +24,7 @@ def patch_devtool($document):
   | .UpdateConfig = ((.UpdateConfig // {}) + {
       Parallelism:1,
       Monitor:20000000000,
-      FailureAction:"rollback",
+      FailureAction:"pause",
       Order:"start-first"
     })
   | .RollbackConfig = ((.RollbackConfig // {}) + {

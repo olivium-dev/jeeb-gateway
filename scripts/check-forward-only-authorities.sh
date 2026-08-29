@@ -86,34 +86,8 @@ def normalized_shell_source(source):
 
 
 def is_required_staging_failure_safety(path, label, line):
-    """Allow only the reviewed ingress-safe Swarm rollback configuration."""
-    stripped = line.strip()
-    if path == Path(".github/scripts/rotate-staging-gateway-probe-key.sh"):
-        allowed_rotation = {
-            "automatic rollback": (
-                stripped.startswith('docker service update --detach="$1" ')
-                and '--image "$expected_image"' in stripped
-                and "--with-registry-auth" in stripped
-                and "--update-order start-first" in stripped
-                and "--update-failure-action " + "rollback" in stripped
-            ),
-            "service rollback": stripped == (
-                "docker service " + 'rollback --detach=false "$service" >/dev/null || true'
-            ),
-        }
-        return allowed_rotation.get(label, False)
-    if path != Path(".github/workflows/jeeb-staging-deploy.yml"):
-        return False
-    allowed = {
-        "automatic rollback": {
-            "--update-failure-action " + "rollback",
-        },
-        "rollback option": {
-            "--" + "rollback-order start-first --" + "rollback-parallelism 1 --" + "rollback-monitor 20s",
-            "--" + "rollback-failure-action pause",
-        },
-    }
-    return stripped in allowed.get(label, set())
+    """No deployment path may exempt automatic or manual rollback controls."""
+    return False
 
 
 adversarial_canaries = {
@@ -277,6 +251,24 @@ SECURITY_CUTOVER_INPUT = {
     "type": "choice",
     "options": ["normal", "security-cutover", "otp-cutover", "devtool-reassert"],
 }
+PROVIDER_EXPAND_VERIFIED_INPUT = {
+    "description": "Confirm protected-main push-notification is live and verified in expand mode",
+    "required": True,
+    "type": "boolean",
+    "default": False,
+}
+STAGING_DISPATCH_INPUTS = {
+    "deployment_mode": SECURITY_CUTOVER_INPUT,
+    "provider_expand_verified": PROVIDER_EXPAND_VERIFIED_INPUT,
+}
+PROVIDER_EXPAND_HOLD_NAME = "Hold caller activation until relay expand is verified"
+PROVIDER_EXPAND_HOLD_IF = (
+    "${{ inputs.deployment_mode != 'normal' && inputs.provider_expand_verified != true }}"
+)
+PROVIDER_EXPAND_HOLD_LINES = (
+    "echo '::error::Deployment HOLD: deploy and verify the protected-main push-notification image in expand mode first.' >&2",
+    "exit 1",
+)
 SECURITY_CUTOVER_GATE_NAME = "Require designated staging owner"
 SECURITY_CUTOVER_GATE_IF = "${{ inputs.deployment_mode != 'normal' }}"
 SECURITY_CUTOVER_GATE_ENV = {
@@ -414,10 +406,15 @@ PRODUCTION_CI_GATE_LINES = (
 )
 PRODUCTION_HEALTH_COMMAND_LINES = (
     "set -eu",
-    "wget --no-verbose --tries=1 --spider http://localhost:8080/health/live || exit 1",
+    "wget --no-verbose --tries=1 --spider http://localhost:8080/health/ready || exit 1",
 )
 PRODUCTION_REMOTE_LOGIN_BODY_SHA256 = "7728bc5eb7225a3c2763109f2920c2d88803278f2772d8d67a0ce623a97e6f26"
-PRODUCTION_UPDATE_BODY_SHA256 = "52ad2fdb5712d3afbbcbde2442419c743bb99ed0a521fe5510fd0f11bf878cd3"
+PRODUCTION_UPDATE_BODY_SHA256 = "e11c28f46c791518e51cb2089d7cfee459573f4c9932424048d5d63d0d6df012"
+PRODUCTION_RELAY_HOLD_NAME = "Hold production activation pending scoped relay preflight"
+PRODUCTION_RELAY_HOLD_LINES = (
+    "echo '::error::Production activation is held until the scoped relay key mount and authenticated provider-expand preflight are implemented.' >&2",
+    "exit 1",
+)
 MUTATION_STEP_MARKERS = (
     "docker/login-action@",
     "docker/build-push-action@",
@@ -610,8 +607,14 @@ def validate_production_authority(document, job_name, job, steps):
                 f"{PRODUCTION_WORKFLOW_NAME}:{job_name} gate predicate is not fail-closed"
             )
 
-    if len(steps) < 2 or set(steps[1]) != {"uses"} or not str(
-        steps[1]["uses"]
+    if len(steps) < 3 or set(steps[1]) != {"name", "run"}:
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} relay activation hold drifted")
+    if steps[1].get("name") != PRODUCTION_RELAY_HOLD_NAME or tuple(
+        str(steps[1].get("run", "")).splitlines()
+    ) != PRODUCTION_RELAY_HOLD_LINES:
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} relay activation hold drifted")
+    if set(steps[2]) != {"uses"} or not str(
+        steps[2]["uses"]
     ).startswith("actions/checkout@"):
         raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} checkout is not after the gate")
     for index, step in enumerate(steps):
@@ -634,7 +637,7 @@ def validate_production_authority(document, job_name, job, steps):
         for index, step in enumerate(steps)
         if step.get("name") == "Require successful exact-SHA CI"
     ]
-    if ci_indices != [3] or first_mutation <= ci_indices[0]:
+    if ci_indices != [4] or first_mutation <= ci_indices[0]:
         raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} exact-SHA CI gate drifted")
     ci_gate = steps[ci_indices[0]]
     if set(ci_gate) != {"name", "env", "run"} or ci_gate.get("env") != {
@@ -785,7 +788,7 @@ def validate_production_authority(document, job_name, job, steps):
         "--update-failure-action pause",
         "--update-max-failure-ratio 0",
         "--health-cmd",
-        "http://localhost:8080/health/live",
+        "http://localhost:8080/health/ready",
         "SuperLogin__OpenMode=false",
         "DemoUsers__Enabled=false",
         "Features__DevEndpoints__Enabled=false",
@@ -869,11 +872,27 @@ def validate_workflow_authority(name, document):
                 raise ValueError(f"{name}:{job_name} security-cutover owner condition drifted")
             dispatch = document.get("on", {}).get("workflow_dispatch")
             inputs = dispatch.get("inputs") if isinstance(dispatch, dict) else None
-            if inputs != {"deployment_mode": SECURITY_CUTOVER_INPUT}:
+            if inputs != STAGING_DISPATCH_INPUTS:
                 raise ValueError(f"{name}:{job_name} deployment-mode input drifted")
-            if len(steps) < 5:
+            if len(steps) < 6:
                 raise ValueError(f"{name}:{job_name} security-cutover gates are incomplete")
-            security_gate = steps[1]
+            provider_expand_hold = steps[1]
+            if not isinstance(provider_expand_hold, dict) or set(provider_expand_hold) != {
+                "name",
+                "if",
+                "run",
+            }:
+                raise ValueError(f"{name}:{job_name} provider expand hold shape drifted")
+            if provider_expand_hold.get("name") != PROVIDER_EXPAND_HOLD_NAME:
+                raise ValueError(f"{name}:{job_name} provider expand hold name drifted")
+            if provider_expand_hold.get("if") != PROVIDER_EXPAND_HOLD_IF:
+                raise ValueError(f"{name}:{job_name} provider expand hold condition drifted")
+            provider_expand_body = provider_expand_hold.get("run")
+            if not isinstance(provider_expand_body, str) or tuple(
+                provider_expand_body.splitlines()
+            ) != PROVIDER_EXPAND_HOLD_LINES:
+                raise ValueError(f"{name}:{job_name} provider expand hold body drifted")
+            security_gate = steps[2]
             if not isinstance(security_gate, dict) or set(security_gate) != {
                 "name",
                 "if",
@@ -917,11 +936,11 @@ def validate_workflow_authority(name, document):
                     raise ValueError(
                         f"{name}:{job_name} security owner gate is not fail-closed and sanitized"
                     )
-            if set(steps[2]) != {"uses"} or not str(steps[2]["uses"]).startswith(
+            if set(steps[3]) != {"uses"} or not str(steps[3]["uses"]).startswith(
                 "actions/checkout@"
             ):
                 raise ValueError(f"{name}:{job_name} protected checkout is not after owner gate")
-            freeze = steps[3]
+            freeze = steps[4]
             if freeze != {
                 "name": "Prove public OTP verification freeze before any deploy action",
                 "if": "${{ inputs.deployment_mode != 'devtool-reassert' }}",
@@ -1103,7 +1122,7 @@ for name, path in workflow_authority_paths.items():
 
         for check_name in PRODUCTION_EXACT_SHA_CHECKS:
             mutation = copy.deepcopy(document)
-            ci_step = mutation["jobs"]["deploy"]["steps"][3]
+            ci_step = mutation["jobs"]["deploy"]["steps"][4]
             ci_step["run"] = ci_step["run"].replace(
                 check_name,
                 "",
@@ -1116,7 +1135,7 @@ for name, path in workflow_authority_paths.items():
             )
 
         unenforced_ci = copy.deepcopy(document)
-        ci_step = unenforced_ci["jobs"]["deploy"]["steps"][3]
+        ci_step = unenforced_ci["jobs"]["deploy"]["steps"][4]
         assertion = (
             '  [ "$state" = completed:success ] || {\n'
             '    echo "::error::Exact-SHA check \'$required\' is not successful ($state)." >&2\n'
@@ -1193,13 +1212,13 @@ for name, path in workflow_authority_paths.items():
         assert_workflow_rejected("credential cleanup mutation append", name, mutating_cleanup)
 
         missing_security_gate = copy.deepcopy(document)
-        del missing_security_gate["jobs"]["deploy"]["steps"][1]
+        del missing_security_gate["jobs"]["deploy"]["steps"][2]
         assert_workflow_rejected(
             "security owner gate removed", name, missing_security_gate
         )
 
         actor_only = copy.deepcopy(document)
-        actor_only["jobs"]["deploy"]["steps"][1]["run"] = (
+        actor_only["jobs"]["deploy"]["steps"][2]["run"] = (
             "set -euo pipefail\n"
             'if [ "$REQUESTING_ACTOR" != oudaykhaled ]; then\n'
             "  echo '::error::Security cutover requires the designated owner.' >&2\n"
@@ -1209,7 +1228,7 @@ for name, path in workflow_authority_paths.items():
         assert_workflow_rejected("triggering actor check removed", name, actor_only)
 
         triggering_only = copy.deepcopy(document)
-        triggering_only["jobs"]["deploy"]["steps"][1]["run"] = (
+        triggering_only["jobs"]["deploy"]["steps"][2]["run"] = (
             "set -euo pipefail\n"
             'if [ "$TRIGGERING_ACTOR" != oudaykhaled ]; then\n'
             "  echo '::error::Security cutover requires the designated owner.' >&2\n"
@@ -1233,25 +1252,25 @@ for name, path in workflow_authority_paths.items():
             ),
         ):
             widened_authority = copy.deepcopy(document)
-            widened_authority["jobs"]["deploy"]["steps"][1]["if"] = condition
+            widened_authority["jobs"]["deploy"]["steps"][2]["if"] = condition
             assert_workflow_rejected(description, name, widened_authority)
 
         late_security_gate = copy.deepcopy(document)
         steps = late_security_gate["jobs"]["deploy"]["steps"]
-        steps[1], steps[2] = steps[2], steps[1]
+        steps[2], steps[3] = steps[3], steps[2]
         assert_workflow_rejected(
             "security owner gate moved after checkout", name, late_security_gate
         )
 
         post_freeze_security_gate = copy.deepcopy(document)
         steps = post_freeze_security_gate["jobs"]["deploy"]["steps"]
-        steps[1], steps[3] = steps[3], steps[1]
+        steps[2], steps[4] = steps[4], steps[2]
         assert_workflow_rejected(
             "security owner gate moved after freeze", name, post_freeze_security_gate
         )
 
         rerun_bypass = copy.deepcopy(document)
-        rerun_bypass["jobs"]["deploy"]["steps"][1]["env"][
+        rerun_bypass["jobs"]["deploy"]["steps"][2]["env"][
             "TRIGGERING_ACTOR"
         ] = "${{ github.actor }}"
         assert_workflow_rejected(
@@ -1259,12 +1278,12 @@ for name, path in workflow_authority_paths.items():
         )
 
         missing_freeze = copy.deepcopy(document)
-        del missing_freeze["jobs"]["deploy"]["steps"][3]
+        del missing_freeze["jobs"]["deploy"]["steps"][4]
         assert_workflow_rejected("public freeze removed", name, missing_freeze)
 
         late_freeze = copy.deepcopy(document)
         steps = late_freeze["jobs"]["deploy"]["steps"]
-        steps[3], steps[6] = steps[6], steps[3]
+        steps[4], steps[7] = steps[7], steps[4]
         assert_workflow_rejected("public freeze moved after SSH", name, late_freeze)
 
 rotation_contract = subprocess.run(

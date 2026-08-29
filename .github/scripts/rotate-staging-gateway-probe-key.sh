@@ -39,8 +39,8 @@ wait_for_update() {
     state=$(docker service inspect "$service" \
       --format '{{if .UpdateStatus}}{{.UpdateStatus.State}}{{end}}')
     case "$state" in
-      ''|completed|rollback_completed) return 0 ;;
-      paused|rollback_paused) fail "gateway update entered a paused state" ;;
+      ''|completed) return 0 ;;
+      paused) fail "gateway update entered a paused state; apply a reviewed forward correction" ;;
     esac
     sleep 2
   done
@@ -107,7 +107,7 @@ assert_gateway_b() {
   update_order=$(docker service inspect "$service" --format '{{.Spec.UpdateConfig.Order}}')
   update_failure=$(docker service inspect "$service" --format '{{.Spec.UpdateConfig.FailureAction}}')
   [ "$update_order" = start-first ] || fail "gateway update order is not start-first"
-  [ "$update_failure" = rollback ] || fail "gateway update failure action is not rollback"
+  [ "$update_failure" = pause ] || fail "gateway update failure action is not pause"
 
   environment=$(docker service inspect "$service" \
     --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}')
@@ -160,7 +160,7 @@ assert_gateway_b() {
 update_service() {
   docker service update --detach="$1" --image "$expected_image" \
     --with-registry-auth --update-order start-first \
-    --update-failure-action rollback --update-monitor 30s \
+    --update-failure-action pause --update-monitor 30s \
     --update-parallelism 1 --update-delay "$2" "${@:3}" "$service" >/dev/null
 }
 
@@ -264,29 +264,5 @@ case "$mode" in
     printf 'FINAL_VERSION=%s\n' "$(service_version)"
     ;;
 
-  rollback)
-    old_probe_secret=${5:-}
-    [[ "$old_probe_secret" =~ ^jeeb_staging_gateway_wss_probe_[A-Za-z0-9_-]+$ ]] \
-      || fail "old probe secret name is outside the managed contract"
-    current_probe_secret=$(probe_source)
-    if [ "$current_probe_secret" = "$new_probe_secret" ]; then
-      docker service rollback --detach=false "$service" >/dev/null || true
-      wait_for_update
-    elif [ "$current_probe_secret" != "$old_probe_secret" ]; then
-      fail "rollback found an unknown authoritative probe secret"
-    fi
-    if [ "$(service_replicas)" != 1 ]; then
-      update_service false 0s --replicas 1
-      wait_for_update
-    fi
-    assert_gateway_b 1
-    [ "$(probe_source)" = "$old_probe_secret" ] \
-      || fail "rollback did not restore the incumbent probe secret"
-    wait_for_healthy_replicas 1
-    if ! secret_is_referenced "$new_probe_secret"; then
-      docker secret rm "$new_probe_secret" >/dev/null
-    fi
-    ;;
-
-  *) fail "mode must be rotate, finalize, or rollback" ;;
+  *) fail "mode must be rotate or finalize" ;;
 esac

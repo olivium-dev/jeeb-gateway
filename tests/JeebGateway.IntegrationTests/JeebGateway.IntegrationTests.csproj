@@ -88,7 +88,6 @@
     <Compile Remove="JeeberEarningsOnCompleteTests.cs" />
     <Compile Remove="JeeberNameProjectionTests.cs" />
     <Compile Remove="LocationTrackingTests.cs" />
-    <Compile Remove="NotificationDurableWriteStartupAlarmTests.cs" />
     <Compile Remove="OfferAcceptColdIndexReconcileTests.cs" />
     <Compile Remove="OtpHandoverEndpointTests.cs" />
     <Compile Remove="Push\PushNotificationServiceTests.cs" />

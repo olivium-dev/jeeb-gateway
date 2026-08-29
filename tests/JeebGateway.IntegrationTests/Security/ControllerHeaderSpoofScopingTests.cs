@@ -38,6 +38,9 @@ public sealed class ControllerHeaderSpoofScopingTests
         => new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
         {
             b.UseEnvironment("Production");
+            b.UseSetting(
+                JeebGateway.Notifications.NotificationRecordWriter.EnabledConfigurationKey,
+                "true");
             b.UseSetting(Fakes.ProductionMountedSecrets.StateServiceTokenFileKey,
                 Fakes.ProductionMountedSecrets.StateServiceTokenFile);
             b.UseSetting("Security:RateLimit:Enabled", "false");

@@ -194,6 +194,7 @@ public class RefreshTokenStoreModeTests
         new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
         {
             b.UseEnvironment("Production");
+            b.UseSetting("FeatureFlags:NotificationDurableWrite:Enabled", "true");
             b.UseDefaultServiceProvider(o => o.ValidateOnBuild = false);
             b.UseSetting("Jwt:SigningKey", ProductionSigningKey);
             b.UseSetting("UmJwt:SigningKey", ProductionSigningKey);

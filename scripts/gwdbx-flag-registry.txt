@@ -63,6 +63,7 @@ DurableRequests:TenantId          baseline - # pre-existing non-UseUpstream key
 Kyc:AutoApprove                   baseline - # pre-existing non-UseUpstream key
 Heartbeat:RoleKey                 baseline - # pre-existing non-UseUpstream key
 Heartbeat:ServiceAuthKey          baseline - # pre-existing non-UseUpstream key
+NotificationDurableWrite:Enabled baseline - # pre-existing durable notification-centre write gate; production-like deploys must enable it
 
 # ---- baseline: retained knobs, never deleted by this program ----------------
 Heartbeat:Enabled                      baseline - # orthogonal, default OFF
@@ -405,6 +406,9 @@ GatewayPostgres:ConnectionString                     setting - # DSN, deleted in
 GatewayRateLimit:RedisConnectionString               setting - # DSN
 NotificationCatalogSeeder:Enabled                    setting - # env-only seeder switch, in no appsettings file
 PushNotificationServiceApi:InternalApiKey            setting - # SECRET: push-service internal key
+PushNotificationServiceApi:InternalApiKeyFile        setting - # SECRET: file reference for the push-service internal key
+PushNotificationServiceApi:GatewayApiKey             setting - # SECRET: scoped gateway relay credential
+PushNotificationServiceApi:GatewayApiKeyFile         setting - # SECRET: file reference for the scoped gateway relay credential
 ServiceAuth:SigningKeyFile                           setting - # SECRET: BFF service-auth signing key PATH (file ref, not the key)
 ServiceNotificationClient:ApiToken                   setting - # SECRET: notification-service token, read via a const key
 Services:JeebState:BaseUrl                           setting - # legacy alias of JeebStateService:BaseUrl

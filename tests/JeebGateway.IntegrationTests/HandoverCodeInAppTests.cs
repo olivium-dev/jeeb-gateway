@@ -141,7 +141,7 @@ public class HandoverCodeInAppTests
         logs.Records.Should().Contain(r => r.Message.Contains("handover.verified"),
             "sanity: the log capture must actually be recording controller logs");
         logs.Records.Should().NotContain(
-            r => ContainsOutsideOpaqueIdentifiers(r.Message, handoverCode!),
+            r => ContainsOutsideOpaqueIdentifiers(r.Message, handoverCode!, requestId),
             "the handover code must never appear in a log line");
     }
 
@@ -155,6 +155,9 @@ public class HandoverCodeInAppTests
 
         ContainsOutsideOpaqueIdentifiers(opaqueIdentifiers, code).Should().BeFalse(
             "random trace and entity identifiers are not the handover secret");
+        ContainsOutsideOpaqueIdentifiers($"handover=delivery_handover_a1b63717-f8ef-4eca-8697-9cf371a3c113", code,
+            "a1b63717-f8ef-4eca-8697-9cf371a3c113").Should().BeFalse(
+            "the delivery_handover_ composite identifier is also opaque, even though its underscore prevents a word-boundary GUID match");
         ContainsOutsideOpaqueIdentifiers($"handoverCode={code}", code).Should().BeTrue(
             "a genuinely logged handover code must still fail the leak guard");
     }
@@ -502,10 +505,17 @@ public class HandoverCodeInAppTests
         }
     }
 
-    private static bool ContainsOutsideOpaqueIdentifiers(string message, string value)
+    private static bool ContainsOutsideOpaqueIdentifiers(
+        string message,
+        string value,
+        params string[] opaqueIdentifiers)
     {
         var withoutTraceIds = W3CTraceParent.Replace(message, string.Empty);
         var withoutOpaqueIds = CanonicalGuid.Replace(withoutTraceIds, string.Empty);
+        foreach (var opaqueIdentifier in opaqueIdentifiers)
+        {
+            withoutOpaqueIds = withoutOpaqueIds.Replace(opaqueIdentifier, string.Empty, StringComparison.Ordinal);
+        }
         return withoutOpaqueIds.Contains(value, StringComparison.Ordinal);
     }
 }

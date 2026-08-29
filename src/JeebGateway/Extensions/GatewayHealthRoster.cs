@@ -38,6 +38,9 @@ public static class GatewayHealthRoster
         // 2026-08-23: proves the notification owner credential resolves (608debf outage
         // stayed green because no surface exercised the fail-closed credential chain).
         JeebGateway.Notifications.NotificationCredentialHealthCheck.Name,
+        // 2026-08-29: the mounted gateway key must be accepted for its fixed
+        // provider scope, not merely resolve from the local secret file.
+        JeebGateway.Notifications.PushRelayCredentialHealthCheck.Name,
         "whisper",
         "jeeb-state-service",
     };
@@ -54,6 +57,7 @@ public static class GatewayHealthRoster
     /// which added a role-service probe; back to 18 on 2026-08-16 when owner decision O8
     /// retired role-service outright — that probe was the aggregate's only Degraded entry,
     /// verified against a real /health/ready read before and after. 19 from 2026-08-23:
-    /// notification-credential joined after the 608debf silent push outage.</summary>
-    public const int ExpectedReadyCount = 19;
+    /// notification-credential joined after the 608debf silent push outage; 20 from
+    /// 2026-08-29 when relay scoped-readiness became a deployment gate.</summary>
+    public const int ExpectedReadyCount = 20;
 }

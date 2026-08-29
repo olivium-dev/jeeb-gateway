@@ -57,6 +57,11 @@ jobs:
             exit 67
           }
 
+      - name: Hold production activation pending scoped relay preflight
+        run: |
+          echo '::error::Production activation is held until the scoped relay key mount and authenticated provider-expand preflight are implemented.' >&2
+          exit 1
+
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Verify checked-out immutable source
@@ -237,7 +242,7 @@ jobs:
           candidate_started=false
           health_cmd=$(cat <<'HEALTH'
           set -eu
-          wget --no-verbose --tries=1 --spider http://localhost:8080/health/live || exit 1
+          wget --no-verbose --tries=1 --spider http://localhost:8080/health/ready || exit 1
           HEALTH
           )
 
