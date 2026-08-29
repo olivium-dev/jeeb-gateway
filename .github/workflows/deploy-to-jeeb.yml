@@ -572,7 +572,7 @@ jobs:
           port_args=()
           case "\$current_ports" in
             "\${EXT}:\${INT}:host")
-              port_args=(--publish-rm "\$EXT" --publish-add "published=\$EXT,target=\$INT,mode=ingress")
+              port_args=(--publish-rm "\$INT" --publish-add "published=\$EXT,target=\$INT,mode=ingress")
               ;;
             "\${EXT}:\${INT}:ingress") ;;
             *)

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using FluentAssertions;
 using Xunit;
 
@@ -448,7 +449,8 @@ public sealed class DurableOwnershipDeploymentContractTests
         {
             workflow.Should().Contain("--update-order start-first");
             workflow.Should().Contain("--update-failure-action pause");
-            workflow.Should().Contain("--publish-rm \"\\$EXT\"");
+            workflow.Should().Contain("--publish-rm \"\\$INT\"");
+            workflow.Should().NotContain("--publish-rm \"\\$EXT\"");
             workflow.Should().Contain("mode=ingress");
             workflow.Should().NotContain(automaticRollback);
             workflow.Should().NotContain(rollbackOption);
@@ -458,6 +460,19 @@ public sealed class DurableOwnershipDeploymentContractTests
             CountOccurrences(workflow, runtimeVerifier).Should().Be(1);
             workflow.Should().Contain("Deployed service spec does not match the requested immutable digest");
         }
+    }
+
+    [Fact]
+    public void Gateway_host_publish_migration_removes_the_target_port_and_leaves_ingress_unchanged()
+    {
+        var workflow = Workflow("deploy-to-jeeb.yml");
+
+        EvaluatePortMigration(workflow, "10000:8080:host").Should().Equal(
+            "--publish-rm",
+            "8080",
+            "--publish-add",
+            "published=10000,target=8080,mode=ingress");
+        EvaluatePortMigration(workflow, "10000:8080:ingress").Should().BeEmpty();
     }
 
     [Fact]
@@ -687,6 +702,63 @@ public sealed class DurableOwnershipDeploymentContractTests
             "protected-main push-notification image in expand mode first");
         workflow.IndexOf("Owner block", StringComparison.Ordinal)
             .Should().BeLessThan(workflow.IndexOf("Hold caller activation", StringComparison.Ordinal));
+    }
+
+    private static IReadOnlyList<string> EvaluatePortMigration(string workflow, string currentPorts)
+    {
+        const string startMarker = "          port_args=()";
+        const string endMarker = "\n          esac";
+        var start = workflow.IndexOf(startMarker, StringComparison.Ordinal);
+        var end = start < 0
+            ? -1
+            : workflow.IndexOf(endMarker, start + startMarker.Length, StringComparison.Ordinal);
+        if (end < 0)
+            throw new InvalidOperationException("Missing host-to-ingress port migration branch.");
+
+        // This is the exact branch transmitted through the outer heredoc; unescape
+        // only its delayed remote-variable expansion before executing it locally.
+        var branch = workflow[start..(end + endMarker.Length)]
+            .Replace("\\$", "$", StringComparison.Ordinal);
+        var script = string.Join('\n',
+            "set -euo pipefail",
+            "EXT=10000",
+            "INT=8080",
+            $"current_ports='{currentPorts}'",
+            branch,
+            "printf '%s\\n' \"${#port_args[@]}\"",
+            "if ((${#port_args[@]})); then",
+            "  for arg in \"${port_args[@]}\"; do",
+            "    printf '%s\\n' \"$arg\"",
+            "  done",
+            "fi");
+        using var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = "bash",
+                Arguments = "-s",
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false
+            }
+        };
+        if (!process.Start())
+            throw new InvalidOperationException("Could not start bash for the port migration contract.");
+
+        process.StandardInput.Write(script);
+        process.StandardInput.Close();
+        var output = process.StandardOutput.ReadToEnd();
+        var error = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        process.ExitCode.Should().Be(0, error);
+
+        var arguments = output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (arguments.Length == 0 || !int.TryParse(arguments[0], out var count)
+                                  || count != arguments.Length - 1)
+            throw new InvalidOperationException("Port migration branch emitted an invalid argument list.");
+
+        return arguments[1..];
     }
 
     private static string ShellFunction(string workflow, string name)
