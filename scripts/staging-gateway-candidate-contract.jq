@@ -59,7 +59,9 @@ def forbidden_payment_gateway_reference:
       or $deployment_mode == "security-cutover"
       or $deployment_mode == "otp-cutover"
       or $deployment_mode == "devtool-reassert") then
-      .UpdateConfig.Order == "start-first"
+      .UpdateConfig.Parallelism == 1
+      and .UpdateConfig.Monitor == 20000000000
+      and .UpdateConfig.Order == "start-first"
       and .UpdateConfig.FailureAction == "pause"
       and .RollbackConfig.Order == "start-first"
       and .RollbackConfig.FailureAction == "pause"

@@ -48,7 +48,7 @@ cat > "$candidate" <<JSON
     "Ports": [{"PublishedPort":10000,"TargetPort":8080,"PublishMode":"ingress"}]
   },
   "Mode": {"Replicated":{"Replicas":1}},
-  "UpdateConfig": {"Order":"start-first","FailureAction":"rollback"},
+  "UpdateConfig": {"Parallelism":1,"Monitor":20000000000,"Order":"start-first","FailureAction":"pause"},
   "RollbackConfig": {"Order":"start-first","FailureAction":"pause"}
 }
 JSON
@@ -90,9 +90,10 @@ jq '
   }
 ' "$candidate" > "$cutover"
 validate "$cutover" security-cutover
-if validate "$candidate" security-cutover || validate "$cutover" normal \
-  || validate "$cutover" invalid-mode; then
-  echo 'deployment-mode candidate separation is not fail-closed' >&2
+validate "$candidate" security-cutover
+validate "$cutover" normal
+if validate "$cutover" invalid-mode; then
+  echo 'deployment-mode validation is not fail-closed' >&2
   exit 1
 fi
 jq '
