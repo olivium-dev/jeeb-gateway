@@ -202,10 +202,12 @@ jobs:
               mkdir -m 700 -- \"\$deploy_root\"
             fi
             [ \"\$(readlink -f -- \"\$deploy_root\")\" = \"\$deploy_root\" ] || exit 98
+            [ \"\$(stat -c '%u:%a' -- \"\$deploy_root\")\" = \"\$(id -u):700\" ] || exit 98
             [ ! -e \"\$credential_dir\" ] && [ ! -L \"\$credential_dir\" ] || exit 98
             mkdir -m 700 -- \"\$credential_dir\"
             [ ! -L \"\$credential_dir\" ] && [ -d \"\$credential_dir\" ]
-            [ \"\$(readlink -f -- \"\$credential_dir\")\" = \"\$credential_dir\" ]"
+            [ \"\$(readlink -f -- \"\$credential_dir\")\" = \"\$credential_dir\" ]
+            [ \"\$(stat -c '%u:%a' -- \"\$credential_dir\")\" = \"\$(id -u):700\" ]"
           # shellcheck disable=SC2029
           printf '%s' "${{ secrets.GITHUB_TOKEN }}" \
             | ssh jeeb-production \
@@ -217,6 +219,8 @@ jobs:
                  [ ! -L \"\$credential_dir\" ] && [ -d \"\$credential_dir\" ] || exit 98
                  [ \"\$(readlink -f -- \"\$deploy_root\")\" = \"\$deploy_root\" ] || exit 98
                  [ \"\$(readlink -f -- \"\$credential_dir\")\" = \"\$credential_dir\" ] || exit 98
+                 [ \"\$(stat -c '%u:%a' -- \"\$deploy_root\")\" = \"\$(id -u):700\" ] || exit 98
+                 [ \"\$(stat -c '%u:%a' -- \"\$credential_dir\")\" = \"\$(id -u):700\" ] || exit 98
                  DOCKER_CONFIG=\"\$credential_dir\" docker login ghcr.io -u '${{ github.actor }}' --password-stdin >/dev/null"
 
       - name: Update production gateway and verify production posture
@@ -249,6 +253,8 @@ jobs:
             [ ! -L "$credential_dir" ] && [ -d "$credential_dir" ] || return 98
             [ "$(readlink -f -- "$deploy_root")" = "$deploy_root" ] || return 98
             [ "$(readlink -f -- "$credential_dir")" = "$credential_dir" ] || return 98
+            [ "$(stat -c '%u:%a' -- "$deploy_root")" = "$(id -u):700" ] || return 98
+            [ "$(stat -c '%u:%a' -- "$credential_dir")" = "$(id -u):700" ] || return 98
             rm -f -- "$credential_dir/config.json"
             rmdir -- "$credential_dir" 2>/dev/null || true
           }
@@ -375,8 +381,10 @@ jobs:
             [ ! -L \"\$credential_dir\" ] || exit 98
             [ ! -e \"\$credential_dir\" ] || [ -d \"\$credential_dir\" ] || exit 98
             [ \"\$(readlink -f -- \"\$deploy_root\")\" = \"\$deploy_root\" ] || exit 98
+            [ \"\$(stat -c '%u:%a' -- \"\$deploy_root\")\" = \"\$(id -u):700\" ] || exit 98
             if [ -d \"\$credential_dir\" ]; then
               [ \"\$(readlink -f -- \"\$credential_dir\")\" = \"\$credential_dir\" ] || exit 98
+              [ \"\$(stat -c '%u:%a' -- \"\$credential_dir\")\" = \"\$(id -u):700\" ] || exit 98
               DOCKER_CONFIG=\"\$credential_dir\" docker logout ghcr.io >/dev/null 2>&1 || true
               rm -f -- \"\$credential_dir/config.json\"
               rmdir -- \"\$credential_dir\"

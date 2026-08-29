@@ -6,6 +6,7 @@ cd "$repo_root"
 
 python3 - <<'PY'
 import copy
+import hashlib
 import json
 import re
 import shlex
@@ -361,8 +362,10 @@ PRODUCTION_CREDENTIAL_CLEANUP_LINES = (
     '  [ ! -L \\"\\$credential_dir\\" ] || exit 98',
     '  [ ! -e \\"\\$credential_dir\\" ] || [ -d \\"\\$credential_dir\\" ] || exit 98',
     '  [ \\"\\$(readlink -f -- \\"\\$deploy_root\\")\\" = \\"\\$deploy_root\\" ] || exit 98',
+    '  [ \\"\\$(stat -c \'%u:%a\' -- \\"\\$deploy_root\\")\\" = \\"\\$(id -u):700\\" ] || exit 98',
     '  if [ -d \\"\\$credential_dir\\" ]; then',
     '    [ \\"\\$(readlink -f -- \\"\\$credential_dir\\")\\" = \\"\\$credential_dir\\" ] || exit 98',
+    '    [ \\"\\$(stat -c \'%u:%a\' -- \\"\\$credential_dir\\")\\" = \\"\\$(id -u):700\\" ] || exit 98',
     '    DOCKER_CONFIG=\\"\\$credential_dir\\" docker logout ghcr.io >/dev/null 2>&1 || true',
     '    rm -f -- \\"\\$credential_dir/config.json\\"',
     '    rmdir -- \\"\\$credential_dir\\"',
@@ -381,10 +384,40 @@ PRODUCTION_EXACT_SHA_CHECKS = (
     "stateless-gate",
     "docker",
 )
+PRODUCTION_CI_GATE_LINES = (
+    "set -euo pipefail",
+    "checks=$(gh api \\",
+    "  -H 'Accept: application/vnd.github+json' \\",
+    '  "/repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?per_page=100")',
+    "for required in \\",
+    "  audit \\",
+    "  build \\",
+    "  build-and-test \\",
+    "  'Gitleaks Secret Scan' \\",
+    "  gwdbx-flag-registry-gate \\",
+    "  nswag-freshness \\",
+    "  nswag-otp-freshness \\",
+    "  provider-boundary-gates \\",
+    "  stateless-gate \\",
+    "  docker; do",
+    '  state=$(jq -r --arg name "$required" \'',
+    "    [.check_runs[] | select(.name == $name)]",
+    "    | sort_by(.started_at)",
+    "    | last",
+    '    | "\\(.status):\\(.conclusion)"',
+    '  \' <<<"$checks")',
+    '  [ "$state" = completed:success ] || {',
+    '    echo "::error::Exact-SHA check \'$required\' is not successful ($state)." >&2',
+    "    exit 69",
+    "  }",
+    "done",
+)
 PRODUCTION_HEALTH_COMMAND_LINES = (
     "set -eu",
     "wget --no-verbose --tries=1 --spider http://localhost:8080/health/live || exit 1",
 )
+PRODUCTION_REMOTE_LOGIN_BODY_SHA256 = "7728bc5eb7225a3c2763109f2920c2d88803278f2772d8d67a0ce623a97e6f26"
+PRODUCTION_UPDATE_BODY_SHA256 = "52ad2fdb5712d3afbbcbde2442419c743bb99ed0a521fe5510fd0f11bf878cd3"
 MUTATION_STEP_MARKERS = (
     "docker/login-action@",
     "docker/build-push-action@",
@@ -609,7 +642,11 @@ def validate_production_authority(document, job_name, job, steps):
     }:
         raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} exact-SHA CI gate shape drifted")
     ci_body = ci_gate.get("run")
-    if not isinstance(ci_body, str) or exact_sha_check_names(ci_body) != PRODUCTION_EXACT_SHA_CHECKS:
+    if (
+        not isinstance(ci_body, str)
+        or tuple(ci_body.splitlines()) != PRODUCTION_CI_GATE_LINES
+        or exact_sha_check_names(ci_body) != PRODUCTION_EXACT_SHA_CHECKS
+    ):
         raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} exact-SHA check set drifted")
 
     update_steps = [
@@ -622,6 +659,8 @@ def validate_production_authority(document, job_name, job, steps):
     update_source = update_steps[0].get("run")
     if not isinstance(update_source, str):
         raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} deploy body is missing")
+    if hashlib.sha256(update_source.encode()).hexdigest() != PRODUCTION_UPDATE_BODY_SHA256:
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} executable deploy body drifted")
     if production_health_command(update_source) != PRODUCTION_HEALTH_COMMAND_LINES:
         raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} process-only health command drifted")
     dockerfile = Path("Dockerfile").read_text()
@@ -663,7 +702,10 @@ def validate_production_authority(document, job_name, job, steps):
     login_steps = [step for step in steps if step.get("name") == "Log remote Docker in to GHCR"]
     if len(login_steps) != 1 or set(login_steps[0]) != {"name", "id", "run"}:
         raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} remote login step shape drifted")
-    login_lines = executable_lines(str(login_steps[0].get("run", "")))
+    login_source = str(login_steps[0].get("run", ""))
+    if hashlib.sha256(login_source.encode()).hexdigest() != PRODUCTION_REMOTE_LOGIN_BODY_SHA256:
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} credential login body drifted")
+    login_lines = executable_lines(login_source)
     docker_login_line = next(
         (index for index, line in enumerate(login_lines) if "docker login ghcr.io" in line),
         -1,
@@ -1072,6 +1114,40 @@ for name, path in workflow_authority_paths.items():
                 name,
                 mutation,
             )
+
+        unenforced_ci = copy.deepcopy(document)
+        ci_step = unenforced_ci["jobs"]["deploy"]["steps"][3]
+        assertion = (
+            '  [ "$state" = completed:success ] || {\n'
+            '    echo "::error::Exact-SHA check \'$required\' is not successful ($state)." >&2\n'
+            "    exit 69\n"
+            "  }"
+        )
+        ci_step["run"] = ci_step["run"].replace(
+            assertion,
+            '  echo "$required"\n  # completed:success assertion removed',
+        )
+        assert_workflow_rejected(
+            "exact-SHA names retained while success enforcement is removed",
+            name,
+            unenforced_ci,
+        )
+
+        neutralized_readiness = copy.deepcopy(document)
+        deploy_step = next(
+            step
+            for step in neutralized_readiness["jobs"]["deploy"]["steps"]
+            if step.get("name") == "Update production gateway and verify production posture"
+        )
+        deploy_step["run"] = deploy_step["run"].replace(
+            'if curl -fsS --max-time 5 "$base_url/health/ready" >/dev/null; then',
+            'if true || curl -fsS --max-time 5 "$base_url/health/ready" >/dev/null; then',
+        )
+        assert_workflow_rejected(
+            "bounded readiness function neutralized while tokens remain",
+            name,
+            neutralized_readiness,
+        )
 
     commented_owner = copy.deepcopy(document)
     commented_owner["jobs"][next(iter(commented_owner["jobs"]))]["steps"][0]["run"] = (
