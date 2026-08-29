@@ -77,6 +77,9 @@ jobs:
             build \
             build-and-test \
             'Gitleaks Secret Scan' \
+            gwdbx-flag-registry-gate \
+            nswag-freshness \
+            nswag-otp-freshness \
             provider-boundary-gates \
             stateless-gate \
             docker; do
@@ -186,13 +189,35 @@ jobs:
         id: remote_ghcr_login
         run: |
           set -euo pipefail
+          # Reject pre-existing or redirected credential paths before writing a token.
           # shellcheck disable=SC2029
-          ssh jeeb-production \
-            "install -d -m 700 \"\$HOME/.jeeb-deploy\" \"\$HOME/$REMOTE_DOCKER_CONFIG\""
+          ssh jeeb-production "set -eu
+            [ \"\$(readlink -f -- \"\$HOME\")\" = \"\$HOME\" ] || exit 98
+            deploy_root=\"\$HOME/.jeeb-deploy\"
+            credential_dir=\"\$HOME/$REMOTE_DOCKER_CONFIG\"
+            [ \"\$credential_dir\" = \"\$deploy_root/ghcr-${{ github.run_id }}-${{ github.run_attempt }}\" ] || exit 97
+            [ ! -L \"\$deploy_root\" ] || exit 98
+            [ ! -e \"\$deploy_root\" ] || [ -d \"\$deploy_root\" ] || exit 98
+            if [ ! -d \"\$deploy_root\" ]; then
+              mkdir -m 700 -- \"\$deploy_root\"
+            fi
+            [ \"\$(readlink -f -- \"\$deploy_root\")\" = \"\$deploy_root\" ] || exit 98
+            [ ! -e \"\$credential_dir\" ] && [ ! -L \"\$credential_dir\" ] || exit 98
+            mkdir -m 700 -- \"\$credential_dir\"
+            [ ! -L \"\$credential_dir\" ] && [ -d \"\$credential_dir\" ]
+            [ \"\$(readlink -f -- \"\$credential_dir\")\" = \"\$credential_dir\" ]"
           # shellcheck disable=SC2029
           printf '%s' "${{ secrets.GITHUB_TOKEN }}" \
             | ssh jeeb-production \
-                "DOCKER_CONFIG=\"\$HOME/$REMOTE_DOCKER_CONFIG\" docker login ghcr.io -u '${{ github.actor }}' --password-stdin >/dev/null"
+                "set -eu
+                 [ \"\$(readlink -f -- \"\$HOME\")\" = \"\$HOME\" ] || exit 98
+                 deploy_root=\"\$HOME/.jeeb-deploy\"
+                 credential_dir=\"\$HOME/$REMOTE_DOCKER_CONFIG\"
+                 [ ! -L \"\$deploy_root\" ] && [ -d \"\$deploy_root\" ] || exit 98
+                 [ ! -L \"\$credential_dir\" ] && [ -d \"\$credential_dir\" ] || exit 98
+                 [ \"\$(readlink -f -- \"\$deploy_root\")\" = \"\$deploy_root\" ] || exit 98
+                 [ \"\$(readlink -f -- \"\$credential_dir\")\" = \"\$credential_dir\" ] || exit 98
+                 DOCKER_CONFIG=\"\$credential_dir\" docker login ghcr.io -u '${{ github.actor }}' --password-stdin >/dev/null"
 
       - name: Update production gateway and verify production posture
         env:
@@ -208,29 +233,22 @@ jobs:
           candidate_started=false
           health_cmd=$(cat <<'HEALTH'
           set -eu
-          status() {
-            wget -S -O /dev/null "$@" 2>&1 \
-              | awk '/HTTP\// { code=$2 } END { print code }'
-          }
-          [ "$(status http://localhost:8080/health/ready)" = 200 ]
-          [ "$(status http://localhost:8080/api/User/demo-users)" = 404 ]
-          [ "$(status http://localhost:8080/api/User/super-login/users)" = 404 ]
-          [ "$(status http://localhost:8080/swagger/v1/swagger.json)" = 404 ]
-          [ "$(status http://localhost:8080/__test/clock)" = 404 ]
-          mint_status=$(status \
-            --header='Content-Type: application/json' \
-            --post-data='{"userId":"production-health-probe"}' \
-            http://localhost:8080/auth/tokens)
-          [ "$mint_status" = 401 ] || [ "$mint_status" = 403 ]
+          wget --no-verbose --tries=1 --spider http://localhost:8080/health/live || exit 1
           HEALTH
           )
 
           cleanup_remote_credentials() {
+            deploy_root="$HOME/.jeeb-deploy"
             credential_dir="$HOME/$remote_docker_config"
             case "$credential_dir" in
               "$HOME"/.jeeb-deploy/ghcr-*) ;;
               *) return 98 ;;
             esac
+            [ "$(readlink -f -- "$HOME")" = "$HOME" ] || return 98
+            [ ! -L "$deploy_root" ] && [ -d "$deploy_root" ] || return 98
+            [ ! -L "$credential_dir" ] && [ -d "$credential_dir" ] || return 98
+            [ "$(readlink -f -- "$deploy_root")" = "$deploy_root" ] || return 98
+            [ "$(readlink -f -- "$credential_dir")" = "$credential_dir" ] || return 98
             rm -f -- "$credential_dir/config.json"
             rmdir -- "$credential_dir" 2>/dev/null || true
           }
@@ -301,39 +319,13 @@ jobs:
             rc=$?
             trap - EXIT
             if [ "$rc" -ne 0 ] && [ "$candidate_started" = true ]; then
-              echo 'Candidate failed production verification; Swarm update remains paused for inspection.' >&2
+              echo 'Candidate failed production verification; the forward-only deployment result is preserved for inspection and repair.' >&2
               docker service inspect "$service" >/dev/null || exit 95
             fi
             cleanup_remote_credentials || true
             exit "$rc"
           }
           trap fail_forward_only EXIT
-
-          # Harden the incumbent first. The same composite health contract is then
-          # applied to the candidate so start-first keeps the healthy incumbent serving
-          # whenever readiness or a production security posture check fails.
-          DOCKER_CONFIG="$HOME/$remote_docker_config" docker service update \
-            --env-add ASPNETCORE_ENVIRONMENT=Production \
-            --env-add DOTNET_ENVIRONMENT=Production \
-            --env-add SuperLogin__OpenMode=false \
-            --env-add DemoUsers__Enabled=false \
-            --env-add Features__DevEndpoints__Enabled=false \
-            --env-add Features__Swagger__Enabled=false \
-            --env-add Security__TokenMint__Enabled=true \
-            --env-add TestControlPlane__Enabled=false \
-            --health-cmd "$health_cmd" \
-            --health-interval 10s \
-            --health-timeout 5s \
-            --health-start-period 20s \
-            --health-retries 3 \
-            --update-parallelism 1 \
-            --update-order start-first \
-            --update-monitor 30s \
-            --update-failure-action pause \
-            --update-max-failure-ratio 0 \
-            --detach=false \
-            "$service"
-          verify_production_posture
 
           candidate_started=true
           DOCKER_CONFIG="$HOME/$remote_docker_config" docker service update \
@@ -375,11 +367,16 @@ jobs:
           # The run-scoped credential path is intentionally expanded by the runner.
           # shellcheck disable=SC2029
           ssh jeeb-production "set -eu
+            [ \"\$(readlink -f -- \"\$HOME\")\" = \"\$HOME\" ] || exit 98
+            deploy_root=\"\$HOME/.jeeb-deploy\"
             credential_dir=\"\$HOME/$REMOTE_DOCKER_CONFIG\"
             case \"\$credential_dir\" in \"\$HOME/.jeeb-deploy/ghcr-${{ github.run_id }}-${{ github.run_attempt }}\") ;; *) exit 97 ;; esac
+            [ ! -L \"\$deploy_root\" ] && [ -d \"\$deploy_root\" ] || exit 98
             [ ! -L \"\$credential_dir\" ] || exit 98
             [ ! -e \"\$credential_dir\" ] || [ -d \"\$credential_dir\" ] || exit 98
+            [ \"\$(readlink -f -- \"\$deploy_root\")\" = \"\$deploy_root\" ] || exit 98
             if [ -d \"\$credential_dir\" ]; then
+              [ \"\$(readlink -f -- \"\$credential_dir\")\" = \"\$credential_dir\" ] || exit 98
               DOCKER_CONFIG=\"\$credential_dir\" docker logout ghcr.io >/dev/null 2>&1 || true
               rm -f -- \"\$credential_dir/config.json\"
               rmdir -- \"\$credential_dir\"

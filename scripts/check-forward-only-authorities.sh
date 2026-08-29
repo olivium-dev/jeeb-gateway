@@ -8,6 +8,7 @@ python3 - <<'PY'
 import copy
 import json
 import re
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -352,16 +353,37 @@ PRODUCTION_CREDENTIAL_CLEANUP_LINES = (
     "# The run-scoped credential path is intentionally expanded by the runner.",
     "# shellcheck disable=SC2029",
     'ssh jeeb-production "set -eu',
+    '  [ \\"\\$(readlink -f -- \\"\\$HOME\\")\\" = \\"\\$HOME\\" ] || exit 98',
+    '  deploy_root=\\"\\$HOME/.jeeb-deploy\\"',
     '  credential_dir=\\"\\$HOME/$REMOTE_DOCKER_CONFIG\\"',
     '  case \\"\\$credential_dir\\" in \\"\\$HOME/.jeeb-deploy/ghcr-${{ github.run_id }}-${{ github.run_attempt }}\\") ;; *) exit 97 ;; esac',
+    '  [ ! -L \\"\\$deploy_root\\" ] && [ -d \\"\\$deploy_root\\" ] || exit 98',
     '  [ ! -L \\"\\$credential_dir\\" ] || exit 98',
     '  [ ! -e \\"\\$credential_dir\\" ] || [ -d \\"\\$credential_dir\\" ] || exit 98',
+    '  [ \\"\\$(readlink -f -- \\"\\$deploy_root\\")\\" = \\"\\$deploy_root\\" ] || exit 98',
     '  if [ -d \\"\\$credential_dir\\" ]; then',
+    '    [ \\"\\$(readlink -f -- \\"\\$credential_dir\\")\\" = \\"\\$credential_dir\\" ] || exit 98',
     '    DOCKER_CONFIG=\\"\\$credential_dir\\" docker logout ghcr.io >/dev/null 2>&1 || true',
     '    rm -f -- \\"\\$credential_dir/config.json\\"',
     '    rmdir -- \\"\\$credential_dir\\"',
     "  fi",
     '  [ ! -e \\"\\$credential_dir\\" ]"',
+)
+PRODUCTION_EXACT_SHA_CHECKS = (
+    "audit",
+    "build",
+    "build-and-test",
+    "Gitleaks Secret Scan",
+    "gwdbx-flag-registry-gate",
+    "nswag-freshness",
+    "nswag-otp-freshness",
+    "provider-boundary-gates",
+    "stateless-gate",
+    "docker",
+)
+PRODUCTION_HEALTH_COMMAND_LINES = (
+    "set -eu",
+    "wget --no-verbose --tries=1 --spider http://localhost:8080/health/live || exit 1",
 )
 MUTATION_STEP_MARKERS = (
     "docker/login-action@",
@@ -471,6 +493,47 @@ def reject_bypass(name, node):
             raise ValueError(f"{name} has a non-canonical success condition: {condition}")
 
 
+def executable_lines(source):
+    return tuple(
+        line.strip()
+        for line in source.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    )
+
+
+def exact_sha_check_names(source):
+    collecting = False
+    chunks = []
+    for line in source.splitlines():
+        stripped = line.strip()
+        if stripped == "for required in \\":
+            collecting = True
+            continue
+        if not collecting:
+            continue
+        terminal = stripped.endswith("; do")
+        chunk = stripped[:-4].rstrip() if terminal else stripped
+        if chunk.endswith("\\"):
+            chunk = chunk[:-1].rstrip()
+        if chunk:
+            chunks.append(chunk)
+        if terminal:
+            break
+    if not collecting or not chunks:
+        raise ValueError("production exact-SHA check loop is missing")
+    return tuple(shlex.split(" ".join(chunks)))
+
+
+def production_health_command(source):
+    match = re.search(
+        r"(?ms)^health_cmd=\$\(cat <<'HEALTH'\n(?P<body>.*?)\nHEALTH\n\)",
+        source,
+    )
+    if match is None:
+        raise ValueError("production health command block is missing")
+    return tuple(line.strip() for line in match.group("body").splitlines())
+
+
 def validate_production_authority(document, job_name, job, steps):
     dispatch = document.get("on")
     expected_dispatch = {
@@ -540,6 +603,100 @@ def validate_production_authority(document, job_name, job, steps):
     ]
     if ci_indices != [3] or first_mutation <= ci_indices[0]:
         raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} exact-SHA CI gate drifted")
+    ci_gate = steps[ci_indices[0]]
+    if set(ci_gate) != {"name", "env", "run"} or ci_gate.get("env") != {
+        "GH_TOKEN": "${{ secrets.GITHUB_TOKEN }}"
+    }:
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} exact-SHA CI gate shape drifted")
+    ci_body = ci_gate.get("run")
+    if not isinstance(ci_body, str) or exact_sha_check_names(ci_body) != PRODUCTION_EXACT_SHA_CHECKS:
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} exact-SHA check set drifted")
+
+    update_steps = [
+        step
+        for step in steps
+        if step.get("name") == "Update production gateway and verify production posture"
+    ]
+    if len(update_steps) != 1 or set(update_steps[0]) != {"name", "env", "run"}:
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} deploy step shape drifted")
+    update_source = update_steps[0].get("run")
+    if not isinstance(update_source, str):
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} deploy body is missing")
+    if production_health_command(update_source) != PRODUCTION_HEALTH_COMMAND_LINES:
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} process-only health command drifted")
+    dockerfile = Path("Dockerfile").read_text()
+    if "CMD " + PRODUCTION_HEALTH_COMMAND_LINES[1] not in normalized_shell_source(dockerfile):
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} health command diverges from image")
+
+    active_update_lines = executable_lines(update_source)
+    required_env = (
+        "ASPNETCORE_ENVIRONMENT=Production",
+        "DOTNET_ENVIRONMENT=Production",
+        "SuperLogin__OpenMode=false",
+        "DemoUsers__Enabled=false",
+        "Features__DevEndpoints__Enabled=false",
+        "Features__Swagger__Enabled=false",
+        "Security__TokenMint__Enabled=true",
+        "TestControlPlane__Enabled=false",
+    )
+    actual_env = tuple(
+        line.removeprefix("--env-add ").removesuffix(" \\")
+        for line in active_update_lines
+        if line.startswith("--env-add ")
+    )
+    if actual_env != required_env:
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} production environment set drifted")
+    for required_line in (
+        "wait_for_readiness",
+        "expect_404 /api/User/demo-users",
+        "expect_404 /api/User/super-login/users",
+        "expect_404 /swagger/v1/swagger.json",
+        "expect_404 /swagger/index.html",
+        "expect_404 /__test/clock",
+        "verify_production_posture",
+    ):
+        if active_update_lines.count(required_line) != 1:
+            raise ValueError(
+                f"{PRODUCTION_WORKFLOW_NAME}:{job_name} executable posture gate drifted: {required_line}"
+            )
+
+    login_steps = [step for step in steps if step.get("name") == "Log remote Docker in to GHCR"]
+    if len(login_steps) != 1 or set(login_steps[0]) != {"name", "id", "run"}:
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} remote login step shape drifted")
+    login_lines = executable_lines(str(login_steps[0].get("run", "")))
+    docker_login_line = next(
+        (index for index, line in enumerate(login_lines) if "docker login ghcr.io" in line),
+        -1,
+    )
+    required_login_sequence = (
+        '[ \\"\\$(readlink -f -- \\"\\$HOME\\")\\" = \\"\\$HOME\\" ] || exit 98',
+        'deploy_root=\\"\\$HOME/.jeeb-deploy\\"',
+        'credential_dir=\\"\\$HOME/$REMOTE_DOCKER_CONFIG\\"',
+        '[ ! -L \\"\\$deploy_root\\" ] && [ -d \\"\\$deploy_root\\" ] || exit 98',
+        '[ ! -L \\"\\$credential_dir\\" ] && [ -d \\"\\$credential_dir\\" ] || exit 98',
+        '[ \\"\\$(readlink -f -- \\"\\$deploy_root\\")\\" = \\"\\$deploy_root\\" ] || exit 98',
+        '[ \\"\\$(readlink -f -- \\"\\$credential_dir\\")\\" = \\"\\$credential_dir\\" ] || exit 98',
+    )
+    sequence_position = login_lines.index('| ssh jeeb-production \\')
+    for guard in required_login_sequence:
+        try:
+            sequence_position = login_lines.index(guard, sequence_position + 1)
+        except ValueError as error:
+            raise ValueError(
+                f"{PRODUCTION_WORKFLOW_NAME}:{job_name} credential pre-login guard drifted: {guard}"
+            ) from error
+    if docker_login_line < 0 or sequence_position > docker_login_line:
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} credential login precedes validation")
+    for setup_line in (
+        '[ ! -e \\"\\$credential_dir\\" ] && [ ! -L \\"\\$credential_dir\\" ] || exit 98',
+        'mkdir -m 700 -- \\"\\$credential_dir\\"',
+    ):
+        if login_lines.count(setup_line) != 1 or login_lines.index(setup_line) > login_lines.index(
+            '| ssh jeeb-production \\'
+        ):
+            raise ValueError(
+                f"{PRODUCTION_WORKFLOW_NAME}:{job_name} secure credential creation drifted: {setup_line}"
+            )
 
     cleanup_indices = [
         index
@@ -556,14 +713,25 @@ def validate_production_authority(document, job_name, job, steps):
     if tuple(str(cleanup.get("run", "")).splitlines()) != PRODUCTION_CREDENTIAL_CLEANUP_LINES:
         raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} cleanup body drifted")
 
-    surface = json.dumps(document, sort_keys=True)
+    surface = "\n".join(
+        line
+        for step in steps
+        for line in (
+            executable_lines(str(step.get("run", "")))
+            + ((str(step.get("uses")),) if step.get("uses") else ())
+        )
+    )
     required_contract = (
         "audit",
+        "build",
         "build-and-test",
         "Gitleaks Secret Scan",
+        "gwdbx-flag-registry-gate",
+        "nswag-freshness",
+        "nswag-otp-freshness",
         "provider-boundary-gates",
         "stateless-gate",
-        "docker; do",
+        "docker",
         "olivium-dev/jeeb-gateway",
         "jeeb-production",
         "192.168.2.120",
@@ -575,6 +743,7 @@ def validate_production_authority(document, job_name, job, steps):
         "--update-failure-action pause",
         "--update-max-failure-ratio 0",
         "--health-cmd",
+        "http://localhost:8080/health/live",
         "SuperLogin__OpenMode=false",
         "DemoUsers__Enabled=false",
         "Features__DevEndpoints__Enabled=false",
@@ -587,7 +756,7 @@ def validate_production_authority(document, job_name, job, steps):
         "/auth/tokens",
         "401|403",
         "http://127.0.0.1:10000/health/ready",
-        "Swarm update remains paused for inspection",
+        "forward-only deployment result is preserved for inspection and repair",
     )
     for token in required_contract:
         if token not in surface:
@@ -876,15 +1045,33 @@ for name, path in workflow_authority_paths.items():
         for description, token in (
             ("token mint gate removed", "Security__TokenMint__Enabled=true"),
             ("test control-plane gate removed", "TestControlPlane__Enabled=false"),
-            ("composite health gate removed", "--health-cmd"),
-            ("exact-SHA build check removed", "build-and-test"),
+            ("process-only health gate removed", "--health-cmd"),
         ):
             mutation = copy.deepcopy(document)
             deploy_job = mutation["jobs"]["deploy"]
             for step in deploy_job["steps"]:
                 if isinstance(step, dict) and isinstance(step.get("run"), str):
-                    step["run"] = step["run"].replace(token, "")
-            assert_workflow_rejected(description, name, mutation)
+                    rewritten = []
+                    for line in step["run"].splitlines():
+                        if token in line and not line.lstrip().startswith("#"):
+                            line = line.replace(token, "")
+                        rewritten.append(line)
+                    step["run"] = "\n".join(rewritten) + f"\n# retained decoy: {token}\n"
+            assert_workflow_rejected(description + " with comment decoy", name, mutation)
+
+        for check_name in PRODUCTION_EXACT_SHA_CHECKS:
+            mutation = copy.deepcopy(document)
+            ci_step = mutation["jobs"]["deploy"]["steps"][3]
+            ci_step["run"] = ci_step["run"].replace(
+                check_name,
+                "",
+                1,
+            ) + f"\n# retained exact-SHA decoy: {check_name}\n"
+            assert_workflow_rejected(
+                f"exact-SHA check removed with comment decoy: {check_name}",
+                name,
+                mutation,
+            )
 
     commented_owner = copy.deepcopy(document)
     commented_owner["jobs"][next(iter(commented_owner["jobs"]))]["steps"][0]["run"] = (
