@@ -65,7 +65,7 @@ public class WebApplicationFactory<TEntryPoint>
             "ServiceNotificationClient:ServiceToken",
             "integration-test-notification-owner-token");
         builder.UseSetting(
-            "PushNotificationServiceApi:InternalApiKey",
+            "PushNotificationServiceApi:GatewayApiKey",
             "integration-test-push-relay-key");
         // A full gateway host is created by thousands of integration cases. Its
         // production console providers otherwise stream every background-worker

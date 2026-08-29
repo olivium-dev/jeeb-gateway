@@ -10,7 +10,7 @@ public sealed class DurableOwnershipDeploymentContractTests
         ("jeeb_state_service_token", "add_rotated_secret jeeb_state_service_token \"\\$STATE_SECRET\""),
         ("delivery_service_token", "add_rotated_secret delivery_service_token \"\\$DELIVERY_SECRET\""),
         ("notification_service_token", "add_rotated_secret notification_service_token \"\\$NOTIFICATION_SECRET\""),
-        ("push_internal_api_key", "add_rotated_secret push_internal_api_key \"\\$PUSH_SECRET\""),
+        ("push_gateway_api_key", "add_rotated_secret push_gateway_api_key \"\\$PUSH_SECRET\""),
         ("bundler_cms_bearer_token", "add_rotated_secret bundler_cms_bearer_token \"\\$BUNDLER_SECRET\""),
         ("private_artifact_store_bearer_token", "add_rotated_secret private_artifact_store_bearer_token \"\\$ARTIFACT_SECRET\""),
         ("data_export_token_signing_key", "add_rotated_secret data_export_token_signing_key \"\\$EXPORT_SECRET\""),
@@ -21,7 +21,7 @@ public sealed class DurableOwnershipDeploymentContractTests
     [
         ("jeeb_state_service_token", "add_rotated_secret \"$state_secret_name\" jeeb_state_service_token"),
         ("notification_service_token", "add_rotated_secret \"$notification_secret_name\" notification_service_token"),
-        ("push_internal_api_key", "add_rotated_secret \"$push_secret_name\" push_internal_api_key"),
+        ("push_gateway_api_key", "add_rotated_secret \"$push_secret_name\" push_gateway_api_key"),
         ("settlement_service_token", "add_rotated_secret \"$settlement_secret_name\" settlement_service_token"),
         ("bundler_cms_bearer_token", "add_rotated_secret \"$bundler_secret_name\" bundler_cms_bearer_token"),
         ("jeeb_gateway_job_token", "add_rotated_secret \"$job_secret_name\" jeeb_gateway_job_token"),
@@ -79,7 +79,7 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().Contain("/run/secrets/jeeb_state_service_token");
         workflow.Should().Contain("BUNDLER_CMS_BEARER_TOKEN_FILE");
         workflow.Should().Contain("InternalJobAuth__TokenFile");
-        workflow.Should().Contain("PushNotificationServiceApi__InternalApiKeyFile");
+        workflow.Should().Contain("PushNotificationServiceApi__GatewayApiKeyFile");
         workflow.Should().NotContain("JeebStateService__ServiceToken=");
         workflow.Should().NotContain("InternalJobAuth__Token=");
 
@@ -148,8 +148,8 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().Contain("FeatureFlags__NotificationDurableWrite__Enabled");
         workflow.Should().Contain("FeatureFlags__NotificationOutboxMode");
         workflow.Should().Contain("upstream-authority");
-        workflow.Should().Contain("PushNotificationServiceApi__InternalApiKeyFile");
-        workflow.Should().Contain("push_internal_api_key");
+        workflow.Should().Contain("PushNotificationServiceApi__GatewayApiKeyFile");
+        workflow.Should().Contain("push_gateway_api_key");
     }
 
     [Fact]
@@ -445,12 +445,14 @@ public sealed class DurableOwnershipDeploymentContractTests
         }
         else
         {
-            workflow.Should().Contain("--update-order stop-first");
+            workflow.Should().Contain("--update-order start-first");
             workflow.Should().Contain("--update-failure-action pause");
+            workflow.Should().Contain("--publish-rm \"\\$EXT\"");
+            workflow.Should().Contain("mode=ingress");
             workflow.Should().NotContain(automaticRollback);
             workflow.Should().NotContain(rollbackOption);
             workflow.Should().NotContain("staging_gateway_external_gate_recover");
-            workflow.Should().NotContain("--update-order start-first");
+            workflow.Should().NotContain("--update-order stop-first");
             const string runtimeVerifier = "base64 -d | bash -s -- \"\\$SVC\" \"\\$REQUESTED_IMAGE\"";
             CountOccurrences(workflow, runtimeVerifier).Should().Be(1);
             workflow.Should().Contain("Deployed service spec does not match the requested immutable digest");
@@ -659,6 +661,30 @@ public sealed class DurableOwnershipDeploymentContractTests
         finalCandidate.Should().BeLessThan(oldTaskProof);
         oldTaskProof.Should().BeLessThan(postFreeze);
         postFreeze.Should().BeLessThan(finalConfirmation);
+    }
+
+    [Fact]
+    public void StagingCallerActivation_IsHeldUntilProtectedMainRelayExpandIsVerified()
+    {
+        var workflow = Workflow("jeeb-staging-deploy.yml");
+
+        workflow.Should().Contain("provider_expand_verified");
+        workflow.Should().Contain(
+            "protected-main push-notification image in expand mode first");
+        workflow.IndexOf("Hold caller activation", StringComparison.Ordinal)
+            .Should().BeLessThan(workflow.IndexOf("Require designated staging owner", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void MsiCallerActivation_RetainsProviderExpandHoldBehindOwnerBlock()
+    {
+        var workflow = Workflow("deploy-to-jeeb.yml");
+
+        workflow.Should().Contain("JEEB_PUSH_PROVIDER_EXPAND_VERIFIED");
+        workflow.Should().Contain(
+            "protected-main push-notification image in expand mode first");
+        workflow.IndexOf("Owner block", StringComparison.Ordinal)
+            .Should().BeLessThan(workflow.IndexOf("Hold caller activation", StringComparison.Ordinal));
     }
 
     private static string ShellFunction(string workflow, string name)

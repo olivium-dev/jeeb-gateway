@@ -6,14 +6,16 @@ namespace JeebGateway.Notifications;
 
 /// <summary>
 /// Authenticates gateway-owned registration and recovery calls to the push
-/// relay. The durable notification owner uses the same environment secret.
+/// relay with a credential distinct from notification delivery.
 /// </summary>
 public sealed class PushRelayCredentialHandler(IConfiguration configuration)
     : DelegatingHandler
 {
     internal const string HeaderName = "X-Api-Key";
-    internal const string TokenFileKey = "PushNotificationServiceApi:InternalApiKeyFile";
-    internal const string TokenKey = "PushNotificationServiceApi:InternalApiKey";
+    internal const string CallerHeaderName = "X-Caller-Id";
+    internal const string CallerId = "jeeb-gateway";
+    internal const string TokenFileKey = "PushNotificationServiceApi:GatewayApiKeyFile";
+    internal const string TokenKey = "PushNotificationServiceApi:GatewayApiKey";
     internal const int MaximumTokenBytes = 4096;
     private static readonly UTF8Encoding StrictUtf8 = new(false, true);
 
@@ -24,6 +26,8 @@ public sealed class PushRelayCredentialHandler(IConfiguration configuration)
         var token = await ReadTokenAsync(configuration, cancellationToken);
         request.Headers.Remove(HeaderName);
         request.Headers.TryAddWithoutValidation(HeaderName, token);
+        request.Headers.Remove(CallerHeaderName);
+        request.Headers.TryAddWithoutValidation(CallerHeaderName, CallerId);
         return await base.SendAsync(request, cancellationToken);
     }
 

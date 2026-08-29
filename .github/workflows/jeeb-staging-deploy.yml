@@ -13,6 +13,11 @@ name: jeeb-staging-deploy
           - security-cutover
           - otp-cutover
           - devtool-reassert
+      provider_expand_verified:
+        description: 'Confirm protected-main push-notification is live and verified in expand mode'
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -37,6 +42,12 @@ jobs:
         if: ${{ inputs.deployment_mode == 'normal' }}
         run: |
           echo '::error::Forward-only promotion pending owner-approved failure handling; no image, SSH, provider, secret, or Swarm mutation was attempted.' >&2
+          exit 1
+
+      - name: Hold caller activation until relay expand is verified
+        if: ${{ inputs.deployment_mode != 'normal' && inputs.provider_expand_verified != true }}
+        run: |
+          echo '::error::Deployment HOLD: deploy and verify the protected-main push-notification image in expand mode first.' >&2
           exit 1
 
       - name: Require designated staging owner
@@ -207,7 +218,7 @@ jobs:
           JEEB_FIREBASE_JSON: ${{ secrets.JEEB_FIREBASE_JSON }}
           JEEB_STATE_SERVICE_TOKEN: ${{ secrets.JEEB_STATE_SERVICE_TOKEN }}
           NOTIFICATION_SERVICE_TOKEN: ${{ secrets.NOTIFICATION_SERVICE_TOKEN }}
-          JEEB_PUSH_INTERNAL_API_KEY: ${{ secrets.JEEB_PUSH_INTERNAL_API_KEY }}
+          JEEB_PUSH_GATEWAY_API_KEY: ${{ secrets.JEEB_PUSH_GATEWAY_API_KEY }}
           SETTLEMENT_SERVICE_TOKEN: ${{ secrets.SETTLEMENT_SERVICE_TOKEN }}
           BUNDLER_CMS_BEARER_TOKEN: ${{ secrets.BUNDLER_CMS_BEARER_TOKEN }}
           JEEB_GATEWAY_JOB_TOKEN: ${{ secrets.JEEB_GATEWAY_JOB_TOKEN }}
@@ -244,8 +255,8 @@ jobs:
               [ "$(printf '%s' "$JEEB_STAGING_WSS_PROBE_MINT_KEY" | LC_ALL=C wc -c)" -ge 32 ]
               : "${JEEB_STATE_SERVICE_TOKEN:?JEEB_STATE_SERVICE_TOKEN is required}"
               : "${NOTIFICATION_SERVICE_TOKEN:?NOTIFICATION_SERVICE_TOKEN is required}"
-              : "${JEEB_PUSH_INTERNAL_API_KEY:?JEEB_PUSH_INTERNAL_API_KEY is required}"
-              [ "${#JEEB_PUSH_INTERNAL_API_KEY}" -ge 32 ]
+              : "${JEEB_PUSH_GATEWAY_API_KEY:?JEEB_PUSH_GATEWAY_API_KEY is required}"
+              [ "${#JEEB_PUSH_GATEWAY_API_KEY}" -ge 32 ]
               : "${SETTLEMENT_SERVICE_TOKEN:?SETTLEMENT_SERVICE_TOKEN is required}"
               : "${BUNDLER_CMS_BEARER_TOKEN:?BUNDLER_CMS_BEARER_TOKEN is required}"
               : "${JEEB_GATEWAY_JOB_TOKEN:?JEEB_GATEWAY_JOB_TOKEN is required}"
@@ -751,7 +762,7 @@ jobs:
             if [ "$DEPLOYMENT_MODE" != devtool-reassert ]; then
               stream_secret "$state_secret_name" "$JEEB_STATE_SERVICE_TOKEN"
               stream_secret "$notification_secret_name" "$NOTIFICATION_SERVICE_TOKEN"
-              stream_secret "$push_secret_name" "$JEEB_PUSH_INTERNAL_API_KEY"
+              stream_secret "$push_secret_name" "$JEEB_PUSH_GATEWAY_API_KEY"
               stream_secret "$settlement_secret_name" "$SETTLEMENT_SERVICE_TOKEN"
               stream_secret "$bundler_secret_name" "$BUNDLER_CMS_BEARER_TOKEN"
               stream_secret "$job_secret_name" "$JEEB_GATEWAY_JOB_TOKEN"
@@ -764,7 +775,7 @@ jobs:
               [ -z "$service_auth_secret_name" ] || \
                 stream_secret "$service_auth_secret_name" "$JEEB_OTP_SERVICE_AUTH_KEY"
             fi
-            unset JEEB_STATE_SERVICE_TOKEN NOTIFICATION_SERVICE_TOKEN JEEB_PUSH_INTERNAL_API_KEY SETTLEMENT_SERVICE_TOKEN \
+            unset JEEB_STATE_SERVICE_TOKEN NOTIFICATION_SERVICE_TOKEN JEEB_PUSH_GATEWAY_API_KEY SETTLEMENT_SERVICE_TOKEN \
               BUNDLER_CMS_BEARER_TOKEN \
               JEEB_GATEWAY_JOB_TOKEN JWT_SIGNING_KEY UMJWT_SIGNING_KEY \
               JEEB_RTC_GUARDIAN_SECRET_KEY JEEB_STAGING_WSS_PROBE_MINT_KEY \
@@ -910,7 +921,7 @@ jobs:
               add_env JeebStateService__Enabled true
               add_env JeebStateService__ServiceTokenFile /run/secrets/jeeb_state_service_token
               add_env ServiceNotificationClient__ServiceTokenFile /run/secrets/notification_service_token
-              add_env PushNotificationServiceApi__InternalApiKeyFile /run/secrets/push_internal_api_key
+              add_env PushNotificationServiceApi__GatewayApiKeyFile /run/secrets/push_gateway_api_key
               add_env Services__Settlement__BaseUrl http://jeeb-staging-settlement-service:8080
               add_env Services__Settlement__ApiTokenFile /run/secrets/settlement_service_token
               add_env BUNDLER_CMS_BASE_URL http://192.168.2.20:10056/
@@ -944,7 +955,8 @@ jobs:
               if [ "$DEPLOYMENT_MODE" != devtool-reassert ]; then
                 add_rotated_secret "$state_secret_name" jeeb_state_service_token
                 add_rotated_secret "$notification_secret_name" notification_service_token
-                add_rotated_secret "$push_secret_name" push_internal_api_key
+                add_rotated_secret "$push_secret_name" push_gateway_api_key
+                env_remove_keys+=(PushNotificationServiceApi__InternalApiKey PushNotificationServiceApi__InternalApiKeyFile)
                 add_rotated_secret "$settlement_secret_name" settlement_service_token
                 add_rotated_secret "$bundler_secret_name" bundler_cms_bearer_token
                 add_rotated_secret "$job_secret_name" jeeb_gateway_job_token

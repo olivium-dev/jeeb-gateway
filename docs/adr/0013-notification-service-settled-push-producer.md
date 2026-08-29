@@ -67,17 +67,31 @@ other domain microservices.
 
 ### Authentication boundary
 
-- The relay requires `X-Api-Key` on every strict delivery operation.
-- notification-service reads that value from an absolute, regular, bounded,
+- The relay derives identity and scope only from the credential matched by
+  `X-Api-Key`; `X-Caller-Id` can confirm that identity but can never select or
+  elevate it. A missing, forged, or swapped identity header fails. The two supported
+  identities use different credentials: `notification-service` receives only
+  `notification.user-delivery`; `jeeb-gateway` receives only
+  `gateway.registration` and `gateway.recovery`.
+- notification-service reads its value from an absolute, regular, bounded,
   UTF-8 secret file mounted mode `0400` for UID/GID `10001:10001`.
-- The gateway may retain a file-backed credential for the surviving
-  device-registration, deletion, health, and idempotency-recovery BFF surface.
+- The gateway retains a distinct file-backed credential for the surviving
+  device-registration, deletion, and approved idempotency-recovery BFF surface.
   Its permanent outbound guard rejects every device, user, broadcast, and topic
   send route before the credential can authorize a direct dispatch.
+- The provider verifies cross-denial: a valid notification credential is still
+  forbidden from gateway operations, and a valid gateway credential is still
+  forbidden from user delivery.
 - The key grants no database, Firebase, notification-admin, or DLQ privilege.
 - Secret material never appears in service specs, command arguments, logs, or
   persisted outbox/DLQ documents. Rotation uses immutable content-addressed
   Swarm secrets and overlapping compatible tasks.
+- Live migration is provider-first expand/contract. `expand` requires three
+  distinct immutable credentials. The retained old key is a synthetic
+  `legacy-shared` principal, accepted only on the exact pre-existing operation
+  allowlist, only without `X-Caller-Id`, and never on new scoped readiness.
+  `strict` rejects legacy-key configuration and traffic entirely. This mode is
+  independent from `PUSH_PIPELINE_REQUIRED`; false is never an expand mode.
 
 ## Consequences
 
@@ -88,8 +102,10 @@ other domain microservices.
 - Gateway restarts or feature-flag drift cannot reintroduce a second producer.
 
 ### Negative / trade-offs
-- notification-service readiness now depends on MongoDB, its worker, relay
-  configuration, and the least-privilege credential.
+- notification-service startup/readiness depends on MongoDB, its worker, and
+  valid relay configuration/credential resolution. Transient downstream relay
+  availability is checked by a non-delivering deploy probe, not by steady-state
+  readiness, so durable acceptance remains available during a relay outage.
 - A relay contract change requires coordinated consumer/provider verification.
 - Reverse rollback order differs from forward deployment order.
 
@@ -97,7 +113,7 @@ other domain microservices.
 
 | Risk | Likelihood | Impact | Mitigation |
 |---|---|---|---|
-| Credential mismatch rejects dispatch | Medium | High | Shared content-addressed secret, readiness gate, provider contract. |
+| Credential mismatch rejects dispatch | Medium | High | Distinct content-addressed secrets, non-delivering deploy probe, provider contract. |
 | Duplicate send during retry | Low | High | One notification ID in header and body; provider same-key replay. |
 | Failed replacement removes incumbent | Low | High | Swarm ingress/VIP, image healthcheck, start-first update, pause on failure. |
 | Historical document is treated as current | Medium | Medium | This ADR cites and orders the superseding decisions explicitly. |
@@ -122,12 +138,19 @@ other domain microservices.
 
 **Cons:** duplicates retry/auth/idempotency logic and bypasses the durable owner.
 
-## Rollout and rollback order
+## Review, activation, and rollback order
 
-- Forward: notification-service → gateway → push-notification → ephemeral.
-- Reverse compatibility rollback: relax/roll the relay first, then gateway and
-  notification-service callers. Ephemeral runtime selection follows only after
-  the service trio is compatible.
+- Merge/review order: notification-service PR #61 → gateway PR #548 →
+  push-notification PR #31, with a deployment hold on both callers. Merge order
+  grants no authority to activate a caller and no PR image may be deployed.
+- Live activation order: protected-main push-notification in `expand` →
+  notification-service → gateway → the same reviewed push-notification digest
+  in `strict` → ephemeral.
+- Before strict, move only a failing caller to a recorded prior digest while the
+  provider remains expand-compatible. After strict, first apply a new
+  start-first provider update back to expand, then select caller digests. Return
+  to the original shared-only provider only after every caller is confirmed on
+  the legacy credential.
 - Exact readiness and rollback gates are in
   [the push delivery rollout runbook](../runbooks/push-delivery-rollout.md).
 

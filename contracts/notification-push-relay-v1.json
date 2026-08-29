@@ -1,0 +1,142 @@
+{
+  "consumers": {
+    "notification-service": {
+      "caller_id": "notification-service",
+      "scopes": [
+        "notification.user-delivery"
+      ]
+    },
+    "jeeb-gateway": {
+      "caller_id": "jeeb-gateway",
+      "scopes": [
+        "gateway.registration",
+        "gateway.recovery"
+      ]
+    }
+  },
+  "provider": "push-notification",
+  "version": "1.2.0",
+  "authorization": {
+    "api_key_header": "X-Api-Key",
+    "caller_identity_header": "X-Caller-Id",
+    "identity_source": "matched_credential_only",
+    "header_mismatch_status": 401,
+    "cross_scope_denial_status": 403,
+    "modes": {
+      "expand": {
+        "required_credentials": [
+          "legacy-shared",
+          "notification-service",
+          "jeeb-gateway"
+        ],
+        "legacy_header_requirement": "absent",
+        "legacy_new_readiness_access": "denied"
+      },
+      "strict": {
+        "required_credentials": [
+          "notification-service",
+          "jeeb-gateway"
+        ],
+        "legacy_configuration": "rejected"
+      }
+    }
+  },
+  "interactions": {
+    "notification_user_delivery": {
+      "description": "durably relay one notification to an encoded user path",
+      "required_scope": "notification.user-delivery",
+      "request": {
+        "method": "POST",
+        "path_template": "/api/v1/sent-payload/user/{encoded_user}",
+        "required_headers": [
+          "X-Api-Key",
+          "X-Caller-Id",
+          "Idempotency-Key"
+        ],
+        "required_body_fields": [
+          "user_id",
+          "payload",
+          "idempotency_key"
+        ]
+      },
+      "example": {
+        "user_id": "contract user",
+        "encoded_user": "contract%20user",
+        "idempotency_key": "contract-notification-001",
+        "payload": {
+          "notification_id": "contract-notification-001",
+          "title": "Contract title",
+          "subtitle": "Contract body",
+          "notification_type": "generic.contract"
+        }
+      },
+      "response": {
+        "success_status": 201,
+        "required_headers": [
+          "Idempotency-Key",
+          "Idempotency-Replayed"
+        ],
+        "first_replayed_value": "false",
+        "replay_replayed_value": "true"
+      }
+    },
+    "notification_readiness_probe": {
+      "description": "authenticate DNS, provider readiness, and caller scope without delivering",
+      "required_scope": "notification.user-delivery",
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/sent-payload/user-delivery/ready",
+        "required_headers": [
+          "X-Api-Key",
+          "X-Caller-Id"
+        ]
+      },
+      "response": {
+        "success_status": 200,
+        "required_body_fields": [
+          "status",
+          "scope"
+        ]
+      }
+    },
+    "gateway_readiness_probe": {
+      "description": "authenticate gateway registration readiness and scope without mutation",
+      "required_scope": "gateway.registration",
+      "request": {
+        "method": "GET",
+        "path": "/api/v1/register/ready",
+        "required_headers": [
+          "X-Api-Key",
+          "X-Caller-Id"
+        ]
+      },
+      "response": {
+        "success_status": 200,
+        "required_body_fields": [
+          "status",
+          "scope"
+        ]
+      }
+    }
+  },
+  "cross_denials": [
+    {
+      "caller_id": "notification-service",
+      "operation": "PUT /api/v1/register",
+      "denied_scope": "gateway.registration",
+      "status": 403
+    },
+    {
+      "caller_id": "notification-service",
+      "operation": "GET /api/v1/sent-payload/idempotency/stale",
+      "denied_scope": "gateway.recovery",
+      "status": 403
+    },
+    {
+      "caller_id": "jeeb-gateway",
+      "operation": "POST /api/v1/sent-payload/user/{encoded_user}",
+      "denied_scope": "notification.user-delivery",
+      "status": 403
+    }
+  ]
+}

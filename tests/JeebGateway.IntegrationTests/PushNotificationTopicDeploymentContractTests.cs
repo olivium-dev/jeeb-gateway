@@ -22,7 +22,7 @@ public sealed class PushNotificationTopicDeploymentContractTests
     private const string ConfiguredApiKey = "integration-only-push-key";
 
     [Fact]
-    public async Task RegisteredTopicClient_UsesConfiguredBaseUrl_AndSendsInternalApiKey()
+    public async Task GeneratedTopicClient_DoesNotBindTheRetiredSharedApiKey()
     {
         var handler = new CapturingHandler();
         using var outbound = new HttpClient(handler);
@@ -50,7 +50,8 @@ public sealed class PushNotificationTopicDeploymentContractTests
         handler.Method.Should().Be(HttpMethod.Post);
         handler.RequestUri.Should().Be(
             new Uri($"{ConfiguredBaseUrl}/api/v1/sent-payload/topic/jeeb_jeebers"));
-        handler.ApiKey.Should().Be(ConfiguredApiKey);
+        handler.ApiKey.Should().BeNull(
+            "gateway relay authentication is provider-scoped and the direct-send path is guarded");
     }
 
     public static IEnumerable<object[]> LifecycleInvocations() =>

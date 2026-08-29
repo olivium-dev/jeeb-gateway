@@ -798,11 +798,7 @@ builder.Services.AddScoped<JeebGateway.service.ServicePushNotification.ServicePu
     var factory = sp.GetRequiredService<IHttpClientFactory>();
     var client = factory.CreateClient("ServicePushNotificationClient");
     var baseUrl = builder.Configuration["PushNotificationServiceApi:BaseUrl"];
-    var pushClient = new JeebGateway.service.ServicePushNotification.ServicePushNotificationClient(baseUrl, client);
-    // BUILD-NEWREQ-PUSH — forward the optional internal API key to the hand-written
-    // topic seam (Send_notification_to_topicAsync sends X-Api-Key when non-empty).
-    pushClient.InternalApiKey = builder.Configuration["PushNotificationServiceApi:InternalApiKey"];
-    return pushClient;
+    return new JeebGateway.service.ServicePushNotification.ServicePushNotificationClient(baseUrl, client);
 });
 builder.Services.AddTransient<JeebGateway.Services.Clients.IPushDispatchRecoveryClient,
     JeebGateway.Services.Clients.PushDispatchRecoveryClient>();

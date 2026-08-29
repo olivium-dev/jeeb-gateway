@@ -50,7 +50,7 @@ public sealed class NotificationDurableWriteStartupAlarmTests
         var logger = new RecordingLogger<NotificationDurableWriteStartupAlarm>();
         var alarm = NewAlarm(enabled: true, Environments.Production, logger,
             ("ServiceNotificationClient:ServiceToken", "startup-alarm-resolvable-token"),
-            ("PushNotificationServiceApi:InternalApiKey", "push-relay-resolvable-token"));
+            ("PushNotificationServiceApi:GatewayApiKey", "push-relay-resolvable-token"));
 
         await alarm.StartAsync(CancellationToken.None);
 
@@ -83,7 +83,7 @@ public sealed class NotificationDurableWriteStartupAlarmTests
         var alarm = NewAlarm(enabled: true, Environments.Production, logger,
             ("ServiceNotificationClient:ServiceTokenFile", "/run/secrets/notification_service_token"),
             ("ServiceNotificationClient:ApiToken", "native-msi-token"),
-            ("PushNotificationServiceApi:InternalApiKey", "push-relay-resolvable-token"));
+            ("PushNotificationServiceApi:GatewayApiKey", "push-relay-resolvable-token"));
 
         await alarm.StartAsync(CancellationToken.None);
 
