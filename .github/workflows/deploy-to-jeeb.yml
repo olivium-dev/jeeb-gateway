@@ -68,7 +68,7 @@ on:
       service_name:    { description: 'Swarm service name',              required: true, default: 'jeeb-gateway' }
       internal_port:   { description: 'Container port',                  required: true, default: '8080' }
       external_port:   { description: 'Published host port (Jeeb swarm)',required: true, default: '10000' }
-      health_path:     { description: 'HTTP health path',                required: true, default: '/api/health' }
+      health_path:     { description: 'HTTP readiness path (fixed)',     required: true, default: '/health/ready' }
       server_hostname: { description: 'Cloudflare tunnel hostname',      required: true, default: 'jeeb-ssh.fds-1.com' }
       server_user:     { description: 'SSH user',                        required: true, default: 'ec2-user' }
       jwt_issuer:                  { description: 'JWT issuer',                       required: true, default: 'https://jeeb.fds-1.com' }
@@ -539,6 +539,10 @@ jobs:
           EXPORT_SECRET='$EXPORT_SECRET'
           JOB_SECRET='$JOB_SECRET'
           REQUESTED_IMAGE='$IMAGE_PATH'
+          [ "$HEALTH" = /health/ready ] || {
+            echo 'Gateway deployment requires the scoped readiness path.' >&2
+            exit 1
+          }
           # These keys came from the retired gateway-local matching and STT paths.
           # Remove them on every update so an older service spec cannot preserve a
           # banned destination or a provider credential after the source is fixed.

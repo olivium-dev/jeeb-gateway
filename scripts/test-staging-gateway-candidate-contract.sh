@@ -83,10 +83,10 @@ validate "$candidate"
 validate "$candidate" devtool-reassert
 jq '
   .UpdateConfig = {
-    Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"stop-first"
+    Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"start-first"
   }
   | .RollbackConfig = {
-    Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"stop-first"
+    Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"start-first"
   }
 ' "$candidate" > "$cutover"
 validate "$cutover" security-cutover
@@ -152,8 +152,8 @@ for unsafe_filter in \
   '.UpdateConfig.Parallelism = 2' \
   '.UpdateConfig.Monitor = 19999999999' \
   '.UpdateConfig.FailureAction = "rollback"' \
-  '.UpdateConfig.Order = "start-first"' \
-  '.RollbackConfig.Order = "start-first"'; do
+  '.UpdateConfig.Order = "stop-first"' \
+  '.RollbackConfig.Order = "stop-first"'; do
   jq "$unsafe_filter" "$cutover" > "$mutant"
   if validate "$mutant" security-cutover; then
     echo "security-cutover contract accepted unsafe mutant: $unsafe_filter" >&2
@@ -263,7 +263,7 @@ jq --arg image "$image" '
         "SuperLogin__OpenMode=true","DemoUsers__Enabled=true",
         "Features__DevEndpoints__Enabled=true","Features__Swagger__Enabled=true"
       ])
-  | .UpdateConfig += {Parallelism:1,Monitor:20000000000,FailureAction:"rollback",Order:"start-first"}
+  | .UpdateConfig += {Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"start-first"}
   | .RollbackConfig += {Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"start-first"}
 ' "$devtool_incumbent" > "$devtool_candidate"
 validate "$devtool_candidate" devtool-reassert "$devtool_incumbent"

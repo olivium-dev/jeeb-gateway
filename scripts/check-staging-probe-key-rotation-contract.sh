@@ -24,7 +24,7 @@ required_workflow = (
 required_remote = (
     '--with-registry-auth',
     '--update-order start-first',
-    '--update-failure-action ' + 'rollback',
+    '--update-failure-action pause',
     '--update-parallelism 1',
     '--secret-rm "$old_probe_secret"',
     'staging_wss_probe_mint_key',

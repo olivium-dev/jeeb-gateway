@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 
 namespace JeebGateway.Notifications;
@@ -103,10 +104,18 @@ public sealed class PushRelayCredentialHandler(IConfiguration configuration)
         value is (byte)' ' or (byte)'\t' or (byte)'\r' or (byte)'\n';
 }
 
-public sealed class PushRelayCredentialHealthCheck(IConfiguration configuration)
+/// <summary>
+/// Verifies the provider-side, key-derived gateway registration scope without
+/// mutating provider state. Resolving a local secret alone is insufficient:
+/// readiness must prove the mounted credential is accepted by the relay.
+/// </summary>
+public sealed class PushRelayCredentialHealthCheck(IHttpClientFactory httpClientFactory)
     : IHealthCheck
 {
-    internal const string Name = "push-relay-credential";
+    internal const string Name = "push-relay-scoped-readiness";
+    internal const string ReadinessPath = "/api/v1/register/ready";
+    private const string ExpectedStatus = "ready";
+    private const string ExpectedScope = "gateway.registration";
 
     public async Task<HealthCheckResult> CheckHealthAsync(
         HealthCheckContext context,
@@ -114,13 +123,43 @@ public sealed class PushRelayCredentialHealthCheck(IConfiguration configuration)
     {
         try
         {
-            await PushRelayCredentialHandler.ReadTokenAsync(
-                configuration, cancellationToken);
-            return HealthCheckResult.Healthy("push relay credential resolves");
+            using var request = new HttpRequestMessage(HttpMethod.Get, ReadinessPath);
+            using var response = await httpClientFactory
+                .CreateClient("ServicePushNotificationClient")
+                .SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+
+            if (response.StatusCode != System.Net.HttpStatusCode.OK
+                || response.Content is null)
+            {
+                return HealthCheckResult.Unhealthy("push relay scoped readiness check failed");
+            }
+
+            await using var body = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var document = await JsonDocument.ParseAsync(body, cancellationToken: cancellationToken);
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object
+                || !root.TryGetProperty("status", out var status)
+                || status.ValueKind != JsonValueKind.String
+                || status.GetString() != ExpectedStatus
+                || !root.TryGetProperty("scope", out var scope)
+                || scope.ValueKind != JsonValueKind.String
+                || scope.GetString() != ExpectedScope)
+            {
+                return HealthCheckResult.Unhealthy("push relay scoped readiness check failed");
+            }
+
+            return HealthCheckResult.Healthy("push relay scoped readiness check passed");
         }
-        catch (Exception ex) when (ex is InvalidOperationException or IOException)
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            return HealthCheckResult.Unhealthy(ex.Message);
+            return HealthCheckResult.Unhealthy("push relay scoped readiness check failed");
+        }
+        catch (Exception ex) when (ex is HttpRequestException
+                                  or InvalidOperationException
+                                  or IOException
+                                  or JsonException)
+        {
+            return HealthCheckResult.Unhealthy("push relay scoped readiness check failed");
         }
     }
 }

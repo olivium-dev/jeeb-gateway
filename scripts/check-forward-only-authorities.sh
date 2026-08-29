@@ -86,34 +86,8 @@ def normalized_shell_source(source):
 
 
 def is_required_staging_failure_safety(path, label, line):
-    """Allow only the reviewed ingress-safe Swarm rollback configuration."""
-    stripped = line.strip()
-    if path == Path(".github/scripts/rotate-staging-gateway-probe-key.sh"):
-        allowed_rotation = {
-            "automatic rollback": (
-                stripped.startswith('docker service update --detach="$1" ')
-                and '--image "$expected_image"' in stripped
-                and "--with-registry-auth" in stripped
-                and "--update-order start-first" in stripped
-                and "--update-failure-action " + "rollback" in stripped
-            ),
-            "service rollback": stripped == (
-                "docker service " + 'rollback --detach=false "$service" >/dev/null || true'
-            ),
-        }
-        return allowed_rotation.get(label, False)
-    if path != Path(".github/workflows/jeeb-staging-deploy.yml"):
-        return False
-    allowed = {
-        "automatic rollback": {
-            "--update-failure-action " + "rollback",
-        },
-        "rollback option": {
-            "--" + "rollback-order start-first --" + "rollback-parallelism 1 --" + "rollback-monitor 20s",
-            "--" + "rollback-failure-action pause",
-        },
-    }
-    return stripped in allowed.get(label, set())
+    """No deployment path may exempt automatic or manual rollback controls."""
+    return False
 
 
 adversarial_canaries = {
@@ -432,10 +406,15 @@ PRODUCTION_CI_GATE_LINES = (
 )
 PRODUCTION_HEALTH_COMMAND_LINES = (
     "set -eu",
-    "wget --no-verbose --tries=1 --spider http://localhost:8080/health/live || exit 1",
+    "wget --no-verbose --tries=1 --spider http://localhost:8080/health/ready || exit 1",
 )
 PRODUCTION_REMOTE_LOGIN_BODY_SHA256 = "7728bc5eb7225a3c2763109f2920c2d88803278f2772d8d67a0ce623a97e6f26"
-PRODUCTION_UPDATE_BODY_SHA256 = "52ad2fdb5712d3afbbcbde2442419c743bb99ed0a521fe5510fd0f11bf878cd3"
+PRODUCTION_UPDATE_BODY_SHA256 = "e11c28f46c791518e51cb2089d7cfee459573f4c9932424048d5d63d0d6df012"
+PRODUCTION_RELAY_HOLD_NAME = "Hold production activation pending scoped relay preflight"
+PRODUCTION_RELAY_HOLD_LINES = (
+    "echo '::error::Production activation is held until the scoped relay key mount and authenticated provider-expand preflight are implemented.' >&2",
+    "exit 1",
+)
 MUTATION_STEP_MARKERS = (
     "docker/login-action@",
     "docker/build-push-action@",
@@ -628,8 +607,14 @@ def validate_production_authority(document, job_name, job, steps):
                 f"{PRODUCTION_WORKFLOW_NAME}:{job_name} gate predicate is not fail-closed"
             )
 
-    if len(steps) < 2 or set(steps[1]) != {"uses"} or not str(
-        steps[1]["uses"]
+    if len(steps) < 3 or set(steps[1]) != {"name", "run"}:
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} relay activation hold drifted")
+    if steps[1].get("name") != PRODUCTION_RELAY_HOLD_NAME or tuple(
+        str(steps[1].get("run", "")).splitlines()
+    ) != PRODUCTION_RELAY_HOLD_LINES:
+        raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} relay activation hold drifted")
+    if set(steps[2]) != {"uses"} or not str(
+        steps[2]["uses"]
     ).startswith("actions/checkout@"):
         raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} checkout is not after the gate")
     for index, step in enumerate(steps):
@@ -652,7 +637,7 @@ def validate_production_authority(document, job_name, job, steps):
         for index, step in enumerate(steps)
         if step.get("name") == "Require successful exact-SHA CI"
     ]
-    if ci_indices != [3] or first_mutation <= ci_indices[0]:
+    if ci_indices != [4] or first_mutation <= ci_indices[0]:
         raise ValueError(f"{PRODUCTION_WORKFLOW_NAME}:{job_name} exact-SHA CI gate drifted")
     ci_gate = steps[ci_indices[0]]
     if set(ci_gate) != {"name", "env", "run"} or ci_gate.get("env") != {
@@ -803,7 +788,7 @@ def validate_production_authority(document, job_name, job, steps):
         "--update-failure-action pause",
         "--update-max-failure-ratio 0",
         "--health-cmd",
-        "http://localhost:8080/health/live",
+        "http://localhost:8080/health/ready",
         "SuperLogin__OpenMode=false",
         "DemoUsers__Enabled=false",
         "Features__DevEndpoints__Enabled=false",
@@ -1137,7 +1122,7 @@ for name, path in workflow_authority_paths.items():
 
         for check_name in PRODUCTION_EXACT_SHA_CHECKS:
             mutation = copy.deepcopy(document)
-            ci_step = mutation["jobs"]["deploy"]["steps"][3]
+            ci_step = mutation["jobs"]["deploy"]["steps"][4]
             ci_step["run"] = ci_step["run"].replace(
                 check_name,
                 "",
@@ -1150,7 +1135,7 @@ for name, path in workflow_authority_paths.items():
             )
 
         unenforced_ci = copy.deepcopy(document)
-        ci_step = unenforced_ci["jobs"]["deploy"]["steps"][3]
+        ci_step = unenforced_ci["jobs"]["deploy"]["steps"][4]
         assertion = (
             '  [ "$state" = completed:success ] || {\n'
             '    echo "::error::Exact-SHA check \'$required\' is not successful ($state)." >&2\n'

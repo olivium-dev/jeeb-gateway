@@ -56,20 +56,12 @@ def forbidden_payment_gateway_reference:
   and .Mode.Replicated.Replicas == 1
   and (
     if ($deployment_mode == "normal"
+      or $deployment_mode == "security-cutover"
       or $deployment_mode == "otp-cutover"
       or $deployment_mode == "devtool-reassert") then
       .UpdateConfig.Order == "start-first"
-      and .UpdateConfig.FailureAction == "rollback"
-      and .RollbackConfig.Order == "start-first"
-      and .RollbackConfig.FailureAction == "pause"
-    elif $deployment_mode == "security-cutover" then
-      .UpdateConfig.Parallelism == 1
-      and .UpdateConfig.Monitor == 20000000000
-      and .UpdateConfig.Order == "stop-first"
       and .UpdateConfig.FailureAction == "pause"
-      and .RollbackConfig.Parallelism == 1
-      and .RollbackConfig.Monitor == 20000000000
-      and .RollbackConfig.Order == "stop-first"
+      and .RollbackConfig.Order == "start-first"
       and .RollbackConfig.FailureAction == "pause"
     else
       false

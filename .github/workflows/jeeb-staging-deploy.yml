@@ -1130,7 +1130,7 @@ jobs:
                 )
               | .UpdateConfig = ((.UpdateConfig // {}) + {
                   Parallelism:1,Monitor:20000000000,
-                  FailureAction:"rollback",Order:"start-first"
+                  FailureAction:"pause",Order:"start-first"
                 })
               | .RollbackConfig = ((.RollbackConfig // {}) + {
                   Parallelism:1,Monitor:20000000000,
@@ -1183,18 +1183,10 @@ jobs:
                   }
                 | .Mode.Replicated.Replicas = 1
                 | .UpdateConfig = ((.UpdateConfig // {}) + (
-                    if $deployment_mode == "security-cutover" then
-                      {Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"stop-first"}
-                    else
-                      {Parallelism:1,Monitor:20000000000,FailureAction:"rollback",Order:"start-first"}
-                    end
+                    {Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"start-first"}
                   ))
                 | .RollbackConfig = ((.RollbackConfig // {}) + (
-                    if $deployment_mode == "security-cutover" then
-                      {Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"stop-first"}
-                    else
-                      {Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"start-first"}
-                    end
+                    {Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"start-first"}
                   ))
               ' "$current_spec" > "$candidate"
           fi
@@ -1291,7 +1283,7 @@ jobs:
             verify_staging_overlay_and_dns
             if [ "$DEPLOYMENT_MODE" != security-cutover ]; then
             # The recoverable path includes the public OTP request/validation
-            # contract; it must never execute during the stop-first security cutover.
+            # contract; it must never execute during the security-cutover readiness gate.
               bash scripts/probe-staging-public-gateway-contract.sh invariant
             fi
             probe_staging_proxy_source_contract

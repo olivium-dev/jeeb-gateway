@@ -274,7 +274,7 @@ staging_gateway_security_cutover_observe() {
       and .Spec.Mode.Replicated.Replicas == 1
       and .Spec.UpdateConfig.Parallelism == 1
       and .Spec.UpdateConfig.Monitor == 20000000000
-      and .Spec.UpdateConfig.Order == "stop-first"
+      and .Spec.UpdateConfig.Order == "start-first"
       and .Spec.UpdateConfig.FailureAction == "pause"
     ' "$service_document" >/dev/null || return 41
   actual_spec_sha=$(jq -e -S -c -s '

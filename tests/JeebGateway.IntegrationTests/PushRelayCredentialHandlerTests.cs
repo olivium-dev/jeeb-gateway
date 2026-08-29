@@ -3,6 +3,9 @@ using JeebGateway.Notifications;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Diagnostics.HealthChecks;
 using System.Security.Cryptography;
+using System.Net;
+using System.Net.Http;
+using System.Text;
 using System.Text.Json;
 using Xunit;
 
@@ -25,7 +28,11 @@ public sealed class PushRelayCredentialHandlerTests
             };
             using var client = new HttpClient(handler);
 
-            await client.GetAsync("https://push.invalid/api/v1/register");
+            using var request = new HttpRequestMessage(
+                HttpMethod.Get, "https://push.invalid/api/v1/register");
+            request.Headers.TryAddWithoutValidation(PushRelayCredentialHandler.HeaderName, "forged-key");
+            request.Headers.TryAddWithoutValidation(PushRelayCredentialHandler.CallerHeaderName, "forged-caller");
+            await client.SendAsync(request);
 
             terminal.ApiKey.Should().Be("relay-key-with-newline");
             terminal.CallerId.Should().Be("jeeb-gateway");
@@ -72,9 +79,75 @@ public sealed class PushRelayCredentialHandlerTests
     }
 
     [Fact]
-    public async Task HealthCheck_IsUnhealthyWhenCredentialIsMissing()
+    public async Task ScopedReadiness_UsesTheMountedGatewayKeyAndExpectedProviderResponse()
     {
-        var check = new PushRelayCredentialHealthCheck(Configuration());
+        var path = Path.Combine(Path.GetTempPath(), $"jeeb-ready-key-{Guid.NewGuid():N}");
+        await File.WriteAllTextAsync(path, "gateway-readiness-key\n");
+        try
+        {
+            var terminal = new ReadinessHandler(HttpStatusCode.OK,
+                """{"status":"ready","scope":"gateway.registration"}""");
+            var check = Check(Configuration(
+                (PushRelayCredentialHandler.TokenFileKey, path)), terminal);
+
+            var result = await check.CheckHealthAsync(new HealthCheckContext());
+
+            result.Status.Should().Be(HealthStatus.Healthy);
+            terminal.Path.Should().Be(PushRelayCredentialHealthCheck.ReadinessPath);
+            terminal.ApiKey.Should().Be("gateway-readiness-key");
+            terminal.CallerId.Should().Be(PushRelayCredentialHandler.CallerId);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.Unauthorized)]
+    [InlineData(HttpStatusCode.Forbidden)]
+    public async Task ScopedReadiness_RejectsBadOrCrossScopeCredentials(HttpStatusCode status)
+    {
+        var check = Check(Configuration(
+            (PushRelayCredentialHandler.TokenKey, "gateway-readiness-key")),
+            new ReadinessHandler(status, "{}"));
+
+        var result = await check.CheckHealthAsync(new HealthCheckContext());
+
+        result.Status.Should().Be(HealthStatus.Unhealthy);
+    }
+
+    [Theory]
+    [InlineData("{not-json")]
+    [InlineData("{\"status\":\"ready\",\"scope\":\"notification.user-delivery\"}")]
+    public async Task ScopedReadiness_RejectsMalformedOrWrongScopeBodies(string body)
+    {
+        var check = Check(Configuration(
+            (PushRelayCredentialHandler.TokenKey, "gateway-readiness-key")),
+            new ReadinessHandler(HttpStatusCode.OK, body));
+
+        var result = await check.CheckHealthAsync(new HealthCheckContext());
+
+        result.Status.Should().Be(HealthStatus.Unhealthy);
+    }
+
+    [Fact]
+    public async Task ScopedReadiness_RejectsUnreachableProvider()
+    {
+        var check = Check(Configuration(
+            (PushRelayCredentialHandler.TokenKey, "gateway-readiness-key")),
+            new ThrowingHandler());
+
+        var result = await check.CheckHealthAsync(new HealthCheckContext());
+
+        result.Status.Should().Be(HealthStatus.Unhealthy);
+    }
+
+    [Fact]
+    public async Task ScopedReadiness_RejectsMissingCredential()
+    {
+        var check = Check(Configuration(), new ReadinessHandler(
+            HttpStatusCode.OK, """{"status":"ready","scope":"gateway.registration"}"""));
 
         var result = await check.CheckHealthAsync(new HealthCheckContext());
 
@@ -88,6 +161,21 @@ public sealed class PushRelayCredentialHandlerTests
                 pair => pair.Key,
                 pair => (string?)pair.Value))
             .Build();
+
+    private static PushRelayCredentialHealthCheck Check(
+        IConfiguration configuration,
+        HttpMessageHandler terminal)
+    {
+        var credentialHandler = new PushRelayCredentialHandler(configuration)
+        {
+            InnerHandler = terminal,
+        };
+        var client = new HttpClient(credentialHandler)
+        {
+            BaseAddress = new Uri("https://push.invalid"),
+        };
+        return new PushRelayCredentialHealthCheck(new SingleClientFactory(client));
+    }
 
     private static string FindContract()
     {
@@ -119,5 +207,38 @@ public sealed class PushRelayCredentialHandlerTests
                 PushRelayCredentialHandler.CallerHeaderName).Single();
             return Task.FromResult(new HttpResponseMessage(System.Net.HttpStatusCode.OK));
         }
+    }
+
+    private sealed class ReadinessHandler(HttpStatusCode status, string body) : HttpMessageHandler
+    {
+        public string? Path { get; private set; }
+        public string? ApiKey { get; private set; }
+        public string? CallerId { get; private set; }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            Path = request.RequestUri?.AbsolutePath;
+            ApiKey = request.Headers.GetValues(PushRelayCredentialHandler.HeaderName).Single();
+            CallerId = request.Headers.GetValues(PushRelayCredentialHandler.CallerHeaderName).Single();
+            return Task.FromResult(new HttpResponseMessage(status)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json"),
+            });
+        }
+    }
+
+    private sealed class ThrowingHandler : HttpMessageHandler
+    {
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken) =>
+            throw new HttpRequestException("provider unavailable");
+    }
+
+    private sealed class SingleClientFactory(HttpClient client) : IHttpClientFactory
+    {
+        public HttpClient CreateClient(string name) => client;
     }
 }

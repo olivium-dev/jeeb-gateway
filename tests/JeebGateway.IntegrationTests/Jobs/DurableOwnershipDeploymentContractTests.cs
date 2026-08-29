@@ -230,9 +230,9 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().Contain("[ \"$(hostname -s)\" = \"olivium-ephemerals\" ]");
         workflow.Should().Contain("grep -Fxc \"192.168.2.20\"");
         workflow.Should().Contain("Selective gateway deploy requires an incumbent service");
-        workflow.Should().Contain("FailureAction:\"rollback\",Order:\"start-first\"");
         workflow.Should().Contain("FailureAction:\"pause\",Order:\"start-first\"");
-        workflow.Should().Contain("FailureAction:\"pause\",Order:\"stop-first\"");
+        workflow.Should().NotContain("FailureAction:\"rollback\",Order:\"start-first\"");
+        workflow.Should().NotContain("FailureAction:\"pause\",Order:\"stop-first\"");
         workflow.Should().Contain("staging_gateway_external_gate_recover");
         workflow.Should().Contain("staging_gateway_forward_apply");
         workflow.Should().Contain("registryAuthFrom=previous-spec");
@@ -425,8 +425,9 @@ public sealed class DurableOwnershipDeploymentContractTests
         verifier.Should().Contain("{{.Image}}");
         if (workflowName == "jeeb-staging-deploy.yml")
         {
-            workflow.Should().Contain("FailureAction:\"rollback\",Order:\"start-first\"");
             workflow.Should().Contain("FailureAction:\"pause\",Order:\"start-first\"");
+            workflow.Should().NotContain("FailureAction:\"rollback\",Order:\"start-first\"");
+            workflow.Should().NotContain("FailureAction:\"pause\",Order:\"stop-first\"");
             workflow.Should().Contain("staging_gateway_external_gate_recover");
             workflow.Should().Contain("staging_gateway_forward_apply");
             workflow.Should().Contain("recovery_armed=true");
@@ -464,8 +465,9 @@ public sealed class DurableOwnershipDeploymentContractTests
     {
         var workflow = Workflow("jeeb-staging-deploy.yml");
         workflow.Should().Contain("Owner block - forward-only promotion pending");
-        workflow.Should().Contain("FailureAction:\"rollback\",Order:\"start-first\"");
         workflow.Should().Contain("FailureAction:\"pause\",Order:\"start-first\"");
+        workflow.Should().NotContain("FailureAction:\"rollback\",Order:\"start-first\"");
+        workflow.Should().NotContain("FailureAction:\"pause\",Order:\"stop-first\"");
         workflow.Should().NotContain("docker service " + "rollback");
         workflow.Should().NotContain("docker service update --detach=false");
         workflow.Should().Contain("staging_gateway_external_gate_recover");
