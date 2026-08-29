@@ -16,7 +16,10 @@ public sealed class NotificationDurableWriteStartupAlarmTests
         var logger = new RecordingLogger<NotificationDurableWriteStartupAlarm>();
         var alarm = NewAlarm(enabled: false, Environments.Production, logger);
 
-        await alarm.StartAsync(CancellationToken.None);
+        var action = () => alarm.StartAsync(CancellationToken.None);
+
+        await action.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*Durable notification writes are required*");
 
         logger.Entries.Should().ContainSingle(entry =>
             entry.Level == LogLevel.Critical
@@ -46,7 +49,8 @@ public sealed class NotificationDurableWriteStartupAlarmTests
     {
         var logger = new RecordingLogger<NotificationDurableWriteStartupAlarm>();
         var alarm = NewAlarm(enabled: true, Environments.Production, logger,
-            ("ServiceNotificationClient:ServiceToken", "startup-alarm-resolvable-token"));
+            ("ServiceNotificationClient:ServiceToken", "startup-alarm-resolvable-token"),
+            ("PushNotificationServiceApi:InternalApiKey", "push-relay-resolvable-token"));
 
         await alarm.StartAsync(CancellationToken.None);
 
@@ -59,7 +63,10 @@ public sealed class NotificationDurableWriteStartupAlarmTests
         var logger = new RecordingLogger<NotificationDurableWriteStartupAlarm>();
         var alarm = NewAlarm(enabled: true, Environments.Production, logger);
 
-        await alarm.StartAsync(CancellationToken.None);
+        var action = () => alarm.StartAsync(CancellationToken.None);
+
+        await action.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*notification owner credential*");
 
         logger.Entries.Should().ContainSingle(entry =>
             entry.Level == LogLevel.Critical
@@ -75,11 +82,30 @@ public sealed class NotificationDurableWriteStartupAlarmTests
         var logger = new RecordingLogger<NotificationDurableWriteStartupAlarm>();
         var alarm = NewAlarm(enabled: true, Environments.Production, logger,
             ("ServiceNotificationClient:ServiceTokenFile", "/run/secrets/notification_service_token"),
-            ("ServiceNotificationClient:ApiToken", "native-msi-token"));
+            ("ServiceNotificationClient:ApiToken", "native-msi-token"),
+            ("PushNotificationServiceApi:InternalApiKey", "push-relay-resolvable-token"));
 
         await alarm.StartAsync(CancellationToken.None);
 
         logger.Entries.Should().NotContain(entry => entry.Level == LogLevel.Critical);
+    }
+
+    [Fact]
+    public async Task Enabled_WithUnresolvablePushCredential_FailsStartup()
+    {
+        var logger = new RecordingLogger<NotificationDurableWriteStartupAlarm>();
+        var alarm = NewAlarm(enabled: true, Environments.Production, logger,
+            ("ServiceNotificationClient:ServiceToken", "startup-alarm-resolvable-token"));
+
+        var action = () => alarm.StartAsync(CancellationToken.None);
+
+        await action.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*push relay credential*");
+        logger.Entries.Should().ContainSingle(entry =>
+            entry.Level == LogLevel.Critical
+            && Equals(
+                entry.Properties["event"],
+                NotificationDurableWriteStartupAlarm.PushCredentialAlarmEvent));
     }
 
     [Fact]

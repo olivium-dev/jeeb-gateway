@@ -439,6 +439,10 @@ builder.Services.AddHealthChecks()
     .AddCheck<JeebGateway.Notifications.NotificationCredentialHealthCheck>(
         JeebGateway.Notifications.NotificationCredentialHealthCheck.Name,
         failureStatus: HealthStatus.Unhealthy,
+        tags: new[] { "ready" })
+    .AddCheck<JeebGateway.Notifications.PushRelayCredentialHealthCheck>(
+        JeebGateway.Notifications.PushRelayCredentialHealthCheck.Name,
+        failureStatus: HealthStatus.Unhealthy,
         tags: new[] { "ready" });
 
 // ---------------------------------------------------------------------------
@@ -777,6 +781,7 @@ if (notificationUpstreamEnabled && notificationSeederEnabled)
 // SINGLE-PRODUCER SETTLEMENT — notification-service owns push production.
 // The gateway client permanently rejects direct-send routes.
 builder.Services.AddTransient<GatewayDirectPushDispatchGuardHandler>();
+builder.Services.AddTransient<JeebGateway.Notifications.PushRelayCredentialHandler>();
 ServiceClientExtensions.AttachPushBreakerAndTimeout(builder.Services.AddHttpClient("ServicePushNotificationClient", client =>
 {
     var apiUrl = builder.Configuration["PushNotificationServiceApi:BaseUrl"];
@@ -785,7 +790,9 @@ ServiceClientExtensions.AttachPushBreakerAndTimeout(builder.Services.AddHttpClie
         client.BaseAddress = new Uri(apiUrl);
     }
     client.Timeout = TimeSpan.FromSeconds(30);
-}).AddHttpMessageHandler<GatewayDirectPushDispatchGuardHandler>());
+})
+    .AddHttpMessageHandler<GatewayDirectPushDispatchGuardHandler>()
+    .AddHttpMessageHandler<JeebGateway.Notifications.PushRelayCredentialHandler>());
 builder.Services.AddScoped<JeebGateway.service.ServicePushNotification.ServicePushNotificationClient>(sp =>
 {
     var factory = sp.GetRequiredService<IHttpClientFactory>();

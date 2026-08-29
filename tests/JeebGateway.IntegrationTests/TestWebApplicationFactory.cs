@@ -61,6 +61,12 @@ public class WebApplicationFactory<TEntryPoint>
     {
         builder.UseEnvironment("Testing");
         builder.UseSetting("DELIVERY_SERVICE_TOKEN", new string('t', 48));
+        builder.UseSetting(
+            "ServiceNotificationClient:ServiceToken",
+            "integration-test-notification-owner-token");
+        builder.UseSetting(
+            "PushNotificationServiceApi:InternalApiKey",
+            "integration-test-push-relay-key");
         // A full gateway host is created by thousands of integration cases. Its
         // production console providers otherwise stream every background-worker
         // retry into VSTest, overwhelming the CI runner before the suite finishes.

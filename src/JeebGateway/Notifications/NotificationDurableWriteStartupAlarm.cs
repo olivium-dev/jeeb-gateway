@@ -13,6 +13,7 @@ internal sealed class NotificationDurableWriteStartupAlarm : IHostedService
 {
     internal const string AlarmEvent = "notif.durable_write.disabled_prod_like";
     internal const string CredentialAlarmEvent = "notif.durable_write.credential_unresolvable";
+    internal const string PushCredentialAlarmEvent = "push.relay.credential_unresolvable";
 
     private readonly IConfiguration _configuration;
     private readonly IHostEnvironment _environment;
@@ -39,24 +40,25 @@ internal sealed class NotificationDurableWriteStartupAlarm : IHostedService
             return Task.CompletedTask;
         }
 
-        if (enabled)
+        if (!enabled)
         {
-            return VerifyCredentialResolvesAsync(cancellationToken);
+            _logger.LogCritical(
+                "event={event} enabled={enabled} environment={environment} " +
+                "DURABLE NOTIFICATION WRITES ARE DISABLED IN A PROD-LIKE ENVIRONMENT; " +
+                "JEBV4-333 missed-push durability is unavailable; fix the owner path forward.",
+                AlarmEvent,
+                false,
+                _environment.EnvironmentName);
+            throw new InvalidOperationException(
+                "Durable notification writes are required in production-like environments.");
         }
 
-        _logger.LogCritical(
-            "event={event} enabled={enabled} environment={environment} " +
-            "DURABLE NOTIFICATION WRITES ARE DISABLED IN A PROD-LIKE ENVIRONMENT; " +
-            "JEBV4-333 missed-push durability is unavailable; fix the owner path forward.",
-            AlarmEvent,
-            false,
-            _environment.EnvironmentName);
-        return Task.CompletedTask;
+        return VerifyCredentialsResolveAsync(cancellationToken);
     }
 
     // 608debf outage: the flag said "enabled" while the credential chain failed closed
     // on every send. Resolving it here makes that state loud at the moment of boot.
-    private async Task VerifyCredentialResolvesAsync(CancellationToken cancellationToken)
+    private async Task VerifyCredentialsResolveAsync(CancellationToken cancellationToken)
     {
         try
         {
@@ -71,6 +73,25 @@ internal sealed class NotificationDurableWriteStartupAlarm : IHostedService
                 "CREDENTIAL DOES NOT RESOLVE; EVERY PUSH HANDOVER WILL FAIL CLOSED.",
                 CredentialAlarmEvent,
                 _environment.EnvironmentName);
+            throw new InvalidOperationException(
+                "The notification owner credential does not resolve.", ex);
+        }
+
+        try
+        {
+            await PushRelayCredentialHandler.ReadTokenAsync(
+                _configuration, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogCritical(ex,
+                "event={event} environment={environment} " +
+                "THE PUSH RELAY CREDENTIAL DOES NOT RESOLVE; REGISTRATION AND RECOVERY " +
+                "CALLS WILL FAIL CLOSED.",
+                PushCredentialAlarmEvent,
+                _environment.EnvironmentName);
+            throw new InvalidOperationException(
+                "The push relay credential does not resolve.", ex);
         }
     }
 

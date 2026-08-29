@@ -43,6 +43,7 @@ public sealed class StagingRealtimeProbeProgramWiringTests
             .WithWebHostBuilder(builder =>
             {
                 builder.UseEnvironment("Staging");
+                builder.UseSetting("FeatureFlags:NotificationDurableWrite:Enabled", "true");
                 builder.UseSetting("Jwt:SigningKey", new string('j', 48));
                 builder.UseSetting("Jwt:SigningKeyFile", "");
                 builder.UseSetting("UmJwt:SigningKey", "");

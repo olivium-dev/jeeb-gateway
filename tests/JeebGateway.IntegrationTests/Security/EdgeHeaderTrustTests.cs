@@ -34,6 +34,9 @@ public class EdgeHeaderTrustTests
             // deferred ConfigureAppConfiguration source. A real (non-placeholder) key also keeps the
             // SEC-H2 boot guard from masking the C1 behaviour under test.
             b.UseEnvironment("Production");
+            b.UseSetting(
+                JeebGateway.Notifications.NotificationRecordWriter.EnabledConfigurationKey,
+                "true");
             b.UseSetting(Fakes.ProductionMountedSecrets.StateServiceTokenFileKey,
                 Fakes.ProductionMountedSecrets.StateServiceTokenFile);
             b.UseSetting("Security:RateLimit:Enabled", "false");

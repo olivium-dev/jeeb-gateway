@@ -207,6 +207,7 @@ jobs:
           JEEB_FIREBASE_JSON: ${{ secrets.JEEB_FIREBASE_JSON }}
           JEEB_STATE_SERVICE_TOKEN: ${{ secrets.JEEB_STATE_SERVICE_TOKEN }}
           NOTIFICATION_SERVICE_TOKEN: ${{ secrets.NOTIFICATION_SERVICE_TOKEN }}
+          JEEB_PUSH_INTERNAL_API_KEY: ${{ secrets.JEEB_PUSH_INTERNAL_API_KEY }}
           SETTLEMENT_SERVICE_TOKEN: ${{ secrets.SETTLEMENT_SERVICE_TOKEN }}
           BUNDLER_CMS_BEARER_TOKEN: ${{ secrets.BUNDLER_CMS_BEARER_TOKEN }}
           JEEB_GATEWAY_JOB_TOKEN: ${{ secrets.JEEB_GATEWAY_JOB_TOKEN }}
@@ -223,6 +224,7 @@ jobs:
           esac
           state_secret_name=''
           notification_secret_name=''
+          push_secret_name=''
           settlement_secret_name=''
           bundler_secret_name=''
           job_secret_name=''
@@ -242,6 +244,8 @@ jobs:
               [ "$(printf '%s' "$JEEB_STAGING_WSS_PROBE_MINT_KEY" | LC_ALL=C wc -c)" -ge 32 ]
               : "${JEEB_STATE_SERVICE_TOKEN:?JEEB_STATE_SERVICE_TOKEN is required}"
               : "${NOTIFICATION_SERVICE_TOKEN:?NOTIFICATION_SERVICE_TOKEN is required}"
+              : "${JEEB_PUSH_INTERNAL_API_KEY:?JEEB_PUSH_INTERNAL_API_KEY is required}"
+              [ "${#JEEB_PUSH_INTERNAL_API_KEY}" -ge 32 ]
               : "${SETTLEMENT_SERVICE_TOKEN:?SETTLEMENT_SERVICE_TOKEN is required}"
               : "${BUNDLER_CMS_BEARER_TOKEN:?BUNDLER_CMS_BEARER_TOKEN is required}"
               : "${JEEB_GATEWAY_JOB_TOKEN:?JEEB_GATEWAY_JOB_TOKEN is required}"
@@ -271,6 +275,7 @@ jobs:
               bash scripts/assert-distinct-staging-signing-keys.sh
               state_secret_name="jeeb_staging_gateway_state_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
               notification_secret_name="jeeb_staging_gateway_notification_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+              push_secret_name="jeeb_staging_gateway_push_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
               settlement_secret_name="jeeb_staging_gateway_settlement_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
               bundler_secret_name="jeeb_staging_gateway_bundler_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
               job_secret_name="jeeb_staging_gateway_job_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
@@ -685,7 +690,7 @@ jobs:
               for created in "$jwt_secret_name" "$umjwt_secret_name" "$guardian_secret_name" \
                 "$probe_secret_name" "$membership_secret_name" "$firebase_secret_name" "$state_secret_name" \
                 "$notification_secret_name" "$settlement_secret_name" "$bundler_secret_name" \
-                "$job_secret_name" "$service_auth_secret_name"; do
+                "$job_secret_name" "$service_auth_secret_name" "$push_secret_name"; do
                 # The generated secret name is intentionally expanded by the runner.
                 # shellcheck disable=SC2029
                 if [ -n "$created" ] && [ "$STAGING_GATEWAY_LOCK_HELD" = true ]; then
@@ -746,6 +751,7 @@ jobs:
             if [ "$DEPLOYMENT_MODE" != devtool-reassert ]; then
               stream_secret "$state_secret_name" "$JEEB_STATE_SERVICE_TOKEN"
               stream_secret "$notification_secret_name" "$NOTIFICATION_SERVICE_TOKEN"
+              stream_secret "$push_secret_name" "$JEEB_PUSH_INTERNAL_API_KEY"
               stream_secret "$settlement_secret_name" "$SETTLEMENT_SERVICE_TOKEN"
               stream_secret "$bundler_secret_name" "$BUNDLER_CMS_BEARER_TOKEN"
               stream_secret "$job_secret_name" "$JEEB_GATEWAY_JOB_TOKEN"
@@ -758,7 +764,7 @@ jobs:
               [ -z "$service_auth_secret_name" ] || \
                 stream_secret "$service_auth_secret_name" "$JEEB_OTP_SERVICE_AUTH_KEY"
             fi
-            unset JEEB_STATE_SERVICE_TOKEN NOTIFICATION_SERVICE_TOKEN SETTLEMENT_SERVICE_TOKEN \
+            unset JEEB_STATE_SERVICE_TOKEN NOTIFICATION_SERVICE_TOKEN JEEB_PUSH_INTERNAL_API_KEY SETTLEMENT_SERVICE_TOKEN \
               BUNDLER_CMS_BEARER_TOKEN \
               JEEB_GATEWAY_JOB_TOKEN JWT_SIGNING_KEY UMJWT_SIGNING_KEY \
               JEEB_RTC_GUARDIAN_SECRET_KEY JEEB_STAGING_WSS_PROBE_MINT_KEY \
@@ -799,6 +805,7 @@ jobs:
               EXPECTED_INCUMBENT_SPEC_SHA \
               STAGING_GATEWAY_LOCK_OWNER \
               state_secret_name notification_secret_name settlement_secret_name \
+              push_secret_name \
               bundler_secret_name job_secret_name jwt_secret_name umjwt_secret_name \
               guardian_secret_name probe_secret_name membership_secret_name firebase_secret_name \
               service_auth_secret_name; do
@@ -864,6 +871,7 @@ jobs:
                 : "${probe_secret_name:?file-backed staging WSS probe secret is required}"
                 : "${membership_secret_name:?file-backed membership-ticket secret is required}"
                 : "${firebase_secret_name:?file-backed Firebase service account is required}"
+                : "${push_secret_name:?file-backed push relay credential is required}"
               fi
               add_env ASPNETCORE_ENVIRONMENT Staging
               add_env ASPNETCORE_URLS http://+:8080
@@ -902,6 +910,7 @@ jobs:
               add_env JeebStateService__Enabled true
               add_env JeebStateService__ServiceTokenFile /run/secrets/jeeb_state_service_token
               add_env ServiceNotificationClient__ServiceTokenFile /run/secrets/notification_service_token
+              add_env PushNotificationServiceApi__InternalApiKeyFile /run/secrets/push_internal_api_key
               add_env Services__Settlement__BaseUrl http://jeeb-staging-settlement-service:8080
               add_env Services__Settlement__ApiTokenFile /run/secrets/settlement_service_token
               add_env BUNDLER_CMS_BASE_URL http://192.168.2.20:10056/
@@ -935,6 +944,7 @@ jobs:
               if [ "$DEPLOYMENT_MODE" != devtool-reassert ]; then
                 add_rotated_secret "$state_secret_name" jeeb_state_service_token
                 add_rotated_secret "$notification_secret_name" notification_service_token
+                add_rotated_secret "$push_secret_name" push_internal_api_key
                 add_rotated_secret "$settlement_secret_name" settlement_service_token
                 add_rotated_secret "$bundler_secret_name" bundler_cms_bearer_token
                 add_rotated_secret "$job_secret_name" jeeb_gateway_job_token
@@ -963,6 +973,8 @@ jobs:
                 done
               fi
               add_env FeatureFlags__DurableRequests__Enabled true
+              add_env FeatureFlags__NotificationDurableWrite__Enabled true
+              add_env FeatureFlags__NotificationOutboxMode upstream-authority
               add_env FeatureFlags__UseUpstream__UserManagement true
               add_env FeatureFlags__UseUpstream__RemoteUserPreferences true
               add_env FeatureFlags__UseUpstream__Ratings true
@@ -1021,7 +1033,7 @@ jobs:
               add_env ServiceOTPApi__BaseUrl http://jeeb-staging-one-time-password:8080
               add_env ChatServiceApi__BaseUrl http://192.168.2.20:10028
               add_env ServiceNotificationClient__BaseUrl http://jeeb-staging-notification:8000/
-              add_env PushNotificationServiceApi__BaseUrl http://192.168.2.20:10040
+              add_env PushNotificationServiceApi__BaseUrl http://jeeb-staging-push-notification:8080
               ;;
             *) echo "Unsupported repository: $REPOSITORY" >&2; exit 1 ;;
           esac

@@ -10,6 +10,7 @@ public sealed class DurableOwnershipDeploymentContractTests
         ("jeeb_state_service_token", "add_rotated_secret jeeb_state_service_token \"\\$STATE_SECRET\""),
         ("delivery_service_token", "add_rotated_secret delivery_service_token \"\\$DELIVERY_SECRET\""),
         ("notification_service_token", "add_rotated_secret notification_service_token \"\\$NOTIFICATION_SECRET\""),
+        ("push_internal_api_key", "add_rotated_secret push_internal_api_key \"\\$PUSH_SECRET\""),
         ("bundler_cms_bearer_token", "add_rotated_secret bundler_cms_bearer_token \"\\$BUNDLER_SECRET\""),
         ("private_artifact_store_bearer_token", "add_rotated_secret private_artifact_store_bearer_token \"\\$ARTIFACT_SECRET\""),
         ("data_export_token_signing_key", "add_rotated_secret data_export_token_signing_key \"\\$EXPORT_SECRET\""),
@@ -20,6 +21,7 @@ public sealed class DurableOwnershipDeploymentContractTests
     [
         ("jeeb_state_service_token", "add_rotated_secret \"$state_secret_name\" jeeb_state_service_token"),
         ("notification_service_token", "add_rotated_secret \"$notification_secret_name\" notification_service_token"),
+        ("push_internal_api_key", "add_rotated_secret \"$push_secret_name\" push_internal_api_key"),
         ("settlement_service_token", "add_rotated_secret \"$settlement_secret_name\" settlement_service_token"),
         ("bundler_cms_bearer_token", "add_rotated_secret \"$bundler_secret_name\" bundler_cms_bearer_token"),
         ("jeeb_gateway_job_token", "add_rotated_secret \"$job_secret_name\" jeeb_gateway_job_token"),
@@ -77,6 +79,7 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().Contain("/run/secrets/jeeb_state_service_token");
         workflow.Should().Contain("BUNDLER_CMS_BEARER_TOKEN_FILE");
         workflow.Should().Contain("InternalJobAuth__TokenFile");
+        workflow.Should().Contain("PushNotificationServiceApi__InternalApiKeyFile");
         workflow.Should().NotContain("JeebStateService__ServiceToken=");
         workflow.Should().NotContain("InternalJobAuth__Token=");
 
@@ -133,6 +136,20 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().NotContain("WalletServiceApi__BaseUrl http://192.168.2.20");
         workflow.Should().NotContain("ServiceNotificationClient__BaseUrl http://192.168.2.20");
         workflow.Should().NotContain("11026");
+    }
+
+    [Theory]
+    [InlineData("deploy-to-jeeb.yml")]
+    [InlineData("jeeb-staging-deploy.yml")]
+    public void Gateway_deploys_enable_the_single_push_owner_contract(string workflowName)
+    {
+        var workflow = Workflow(workflowName);
+
+        workflow.Should().Contain("FeatureFlags__NotificationDurableWrite__Enabled");
+        workflow.Should().Contain("FeatureFlags__NotificationOutboxMode");
+        workflow.Should().Contain("upstream-authority");
+        workflow.Should().Contain("PushNotificationServiceApi__InternalApiKeyFile");
+        workflow.Should().Contain("push_internal_api_key");
     }
 
     [Fact]
