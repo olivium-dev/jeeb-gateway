@@ -177,7 +177,8 @@ public class JeebWalletUpstreamSanitizationTests
 
         var resp = await client.GetAsync("/v1/jeeb/wallet");
 
-        resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        resp.StatusCode.Should().Be(HttpStatusCode.BadGateway,
+            "the currency table is a gateway dependency, not a public resource");
         var raw = await resp.Content.ReadAsStringAsync();
         raw.Should().Contain("The wallet request could not be completed.");
         raw.Should().NotContain("availableBalance");

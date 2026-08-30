@@ -91,7 +91,16 @@ public sealed class JeebWalletController : ControllerBase
                 return Ok(JeebWalletProjection.ProjectBalance(null));
             }
 
-            var currencies = await _wallet.CurrenciesAsync(ct);
+            System.Collections.Generic.ICollection<JeebGateway.service.ServiceWallet.Currency> currencies;
+            try
+            {
+                currencies = await _wallet.CurrenciesAsync(ct);
+            }
+            catch (WalletApiException ex)
+            {
+                return CurrencyTableProblem(ex);
+            }
+
             return Ok(JeebWalletProjection.ProjectBalance(holder, currencies, _currencyId));
         }
         catch (WalletApiException ex)
@@ -221,6 +230,16 @@ public sealed class JeebWalletController : ControllerBase
         return Problem(
             title: "The wallet request could not be completed.",
             statusCode: status);
+    }
+
+    private IActionResult CurrencyTableProblem(WalletApiException ex)
+    {
+        _log.LogWarning(ex,
+            "Wallet BFF: authoritative currency-table read failed on {Method} {Path}.",
+            Request.Method, Request.Path);
+        return Problem(
+            title: "The wallet request could not be completed.",
+            statusCode: StatusCodes.Status502BadGateway);
     }
 
     private IActionResult LedgerUnavailable(WalletLedgerUnavailableException ex)
