@@ -44,12 +44,16 @@ public static class JeebWalletProjection
     /// (<see cref="SpendableWalletTypes"/>) contribute; an absent/empty holder
     /// projects to a zeroed, "empty"-affordability balance (mobile is defensive).
     /// </summary>
-    public static JeebWalletBalanceResponse ProjectBalance(GetHolderWallets? holder)
+    public static JeebWalletBalanceResponse ProjectBalance(
+        GetHolderWallets? holder,
+        IEnumerable<Currency>? currencies = null,
+        int? currencyId = null)
     {
         var wallets = holder?.Wallets ?? new List<service.ServiceWallet.Wallet>();
         // R-M1 (G-01): cod_* legs are COD float, never user-spendable balance.
         var active = wallets
             .Where(w => w is { IsActive: true } && SpendableWalletTypes.IsSpendable(w.Type))
+            .Where(w => currencyId is null || w.CurrencyID == currencyId.Value)
             .ToList();
 
         // JEBV4-49 (M4): the generic wallet-service primitive exposes Amount as a
@@ -60,7 +64,7 @@ public static class JeebWalletProjection
         // conversion is lossless; keeping the DTO decimal stops the value from
         // being re-serialized as a double with fractional artifacts.
         var available = (decimal)active.Sum(w => w.Amount);
-        var currency = ResolveCurrency(active);
+        var currency = ResolveCurrency(active, currencies, currencyId);
 
         return new JeebWalletBalanceResponse
         {
@@ -84,11 +88,29 @@ public static class JeebWalletProjection
     }
 
     /// <summary>
-    /// The generic wallet row carries only a numeric <c>CurrencyID</c> (the wallet
-    /// service's own currency table key), not an ISO code, so the gateway cannot
-    /// faithfully name it without inventing a mapping (which would be domain state
-    /// the gateway must not hold). Leave it null and let the mobile parser apply its
-    /// documented default — honest over fabricated.
+    /// Resolve the numeric wallet currency through wallet-service's authoritative
+    /// currency table. Ambiguous, absent, or malformed provider data stays null so a
+    /// caller that needs money-movement proof can fail closed rather than fabricate a
+    /// currency identity.
     /// </summary>
-    private static string? ResolveCurrency(IReadOnlyCollection<service.ServiceWallet.Wallet> _) => null;
+    private static string? ResolveCurrency(
+        IReadOnlyCollection<service.ServiceWallet.Wallet> active,
+        IEnumerable<Currency>? currencies,
+        int? configuredCurrencyId)
+    {
+        var resolvedCurrencyId = configuredCurrencyId;
+        if (resolvedCurrencyId is null)
+        {
+            var walletCurrencyIds = active.Select(wallet => wallet.CurrencyID).Distinct().ToArray();
+            if (walletCurrencyIds.Length != 1) return null;
+            resolvedCurrencyId = walletCurrencyIds[0];
+        }
+
+        var matches = currencies?
+            .Where(currency => currency.Id == resolvedCurrencyId.Value)
+            .ToArray();
+        if (matches is not { Length: 1 } || string.IsNullOrWhiteSpace(matches[0].Code)) return null;
+
+        return matches[0].Code.Trim().ToUpperInvariant();
+    }
 }

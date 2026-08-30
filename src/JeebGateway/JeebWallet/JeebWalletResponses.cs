@@ -25,8 +25,9 @@ public sealed class JeebWalletBalanceResponse
     public string AffordabilityState { get; set; } = JeebWalletProjection.Affordability.Empty;
 
     /// <summary>
-    /// ISO currency code, or null when the generic wallet row cannot supply one
-    /// (mobile applies its own default). Omitted from the payload when null.
+    /// ISO currency code resolved from wallet-service's authoritative configured
+    /// currencies, or null when that mapping is unavailable or ambiguous. Omitted
+    /// from the payload when null so verification callers can fail closed.
     /// </summary>
     [JsonPropertyName("currency")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
