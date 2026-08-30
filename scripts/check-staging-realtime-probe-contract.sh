@@ -22,9 +22,7 @@ contract_path = Path(
 )
 transaction_path = Path("scripts/staging-gateway-spec-recovery.sh")
 authenticated_probe_path = Path("scripts/probe-staging-authenticated-realtime.py")
-ingress_proxy_discovery_path = Path(
-    "scripts/staging-gateway-ingress-proxy-discovery.sh"
-)
+untrusted_xff_probe_path = Path("scripts/probe-staging-untrusted-xff.sh")
 candidate_contract_path = Path("scripts/staging-gateway-candidate-contract.jq")
 
 documents = {
@@ -39,7 +37,7 @@ documents = {
     "API-key middleware": middleware_path.read_text(),
     "Spec transaction": transaction_path.read_text(),
     "authenticated probe": authenticated_probe_path.read_text(),
-    "ingress proxy discovery": ingress_proxy_discovery_path.read_text(),
+    "untrusted XFF probe": untrusted_xff_probe_path.read_text(),
     "candidate contract": candidate_contract_path.read_text(),
 }
 
@@ -76,9 +74,9 @@ require(
         "bash scripts/assert-distinct-staging-signing-keys.sh",
         'stream_secret "$probe_secret_name" "$JEEB_STAGING_WSS_PROBE_MINT_KEY"',
         "add_env Operations__RealtimeProbe__MintKeyFile /run/secrets/staging_wss_probe_mint_key",
-        "scripts/staging-gateway-ingress-proxy-discovery.sh",
-        "ingress_proxy_ip=$(discover_staging_ingress_proxy)",
-        'add_env ForwardedHeaders__KnownProxies__0 "$ingress_proxy_ip"',
+        "ForwardedHeaders__KnownProxies__0",
+        "probe_staging_untrusted_xff_contract",
+        "scripts/probe-staging-untrusted-xff.sh",
         "add_env Services__Realtime__GuardianSecretFile /run/secrets/realtime_guardian_secret",
         "add_env Services__Realtime__MembershipTicketSigningKeyFile /run/secrets/realtime_membership_ticket_key",
         "add_env Services__Realtime__PublicSocketUrl wss://app.jeeb.fds-1.com/socket/websocket",
@@ -144,21 +142,16 @@ exact_join = authenticated_probe.index(
 )
 if not single_connection < cross_topic_denial < forged_ticket_denial < exact_join:
     raise SystemExit("FAIL: authenticated probe join sequence drifted")
+
 require(
-    "ingress proxy discovery",
+    "untrusted XFF probe",
     (
-        "http://127.0.0.1:10000/internal/ops/staging/realtime-probe-descriptor",
+        "X-Forwarded-For: $spoofed_remote_ip",
         "x-jeeb-staging-observed-remote-ip",
-        "docker network inspect ingress",
-        'network.get("Driver") != "overlay"',
-        'network.get("Scope") != "swarm"',
-        'network.get("Ingress") is not True',
-        "ipaddress.ip_network(value, strict=False)",
-        "if len(matches) != 1:",
+        "ipaddress.ip_address(sys.argv[1])",
+        "if observed == spoofed:",
     ),
 )
-if "X-Forwarded-For" in documents["ingress proxy discovery"]:
-    raise SystemExit("FAIL: ingress proxy discovery may not accept a claimed client address")
 
 require(
     "candidate contract",
@@ -171,6 +164,8 @@ require(
         '$environment["auth__otp__phone__enforceregion"] == "false"',
         '$environment["featureflags__useupstream__voice"] == "false"',
         '$environment["features__realtimewebsocketproxy__enabled"] == "false"',
+        'startswith("forwardedheaders__knownproxies__") | not',
+        'startswith("forwardedheaders__knownnetworks__") | not',
         '$environment["features__devendpoints__enabled"] == "true"',
         '$environment["features__swagger__enabled"] == "true"',
         '.UpdateConfig.Order == "start-first"',
@@ -275,10 +270,8 @@ def validate_bootstrap_workflow(text):
         "verify_bootstrap_flags",
         "probe_staging_authenticated_realtime",
         "python3 scripts/probe-staging-authenticated-realtime.py",
-        "probe_staging_proxy_source_contract",
-        "x-jeeb-staging-observed-remote-ip",
-        "staging phase=ingress-proxy-discovery result=passed (redacted)",
-        "staging phase=proxy-source-contract result=passed (redacted)",
+        "probe_staging_untrusted_xff_contract",
+        "staging phase=untrusted-xff-contract result=passed (redacted)",
         "staging phase=authenticated-realtime result=passed (redacted)",
         "verify_staging_overlay_and_dns",
         "jeeb-staging-one-time-password",
@@ -405,9 +398,6 @@ def validate_bootstrap_workflow(text):
     pre_update = text.index(
         'capture_remote_spec "$pre_update_spec" "$pre_update_version" "$pre_update_id"'
     )
-    ingress_discovery = text.index(
-        "ingress_proxy_ip=$(discover_staging_ingress_proxy)", pre_update
-    )
     candidate = text.index(
         'staging_gateway_canonicalize_spec_file "$candidate_raw_spec" "$candidate_spec"'
     )
@@ -435,7 +425,7 @@ def validate_bootstrap_workflow(text):
         "bash scripts/staging-gateway-public-edge-backoff.sh", verifier
     )
     network = text.index("verify_staging_overlay_and_dns", public_probe)
-    proxy_probe = text.index("probe_staging_proxy_source_contract", public_probe)
+    proxy_probe = text.index("probe_staging_untrusted_xff_contract", public_probe)
     descriptor_probe = text.index("probe_staging_authenticated_realtime", proxy_probe)
     final_candidate = text.index(
         "verify_exact_candidate_after_checks", descriptor_probe
@@ -446,7 +436,7 @@ def validate_bootstrap_workflow(text):
     )
     final_confirm = text.index("verify_exact_candidate_after_checks", post_freeze)
     disarm = text.index("recovery_armed=false", final_confirm)
-    if not pre_update < ingress_discovery < candidate < candidate_validation < task_capture < pre_cas_freeze < cutover_forward < arm < forward < manifest < verifier < readiness < false_flags < public_probe < network < proxy_probe < descriptor_probe < final_candidate < old_task_proof < post_freeze < final_confirm < disarm:
+    if not pre_update < candidate < candidate_validation < task_capture < pre_cas_freeze < cutover_forward < arm < forward < manifest < verifier < readiness < false_flags < public_probe < network < proxy_probe < descriptor_probe < final_candidate < old_task_proof < post_freeze < final_confirm < disarm:
         raise ValueError("candidate verification order drifted")
 
 
@@ -567,8 +557,12 @@ negative_controls = (
         workflow.replace("python3 scripts/probe-staging-authenticated-realtime.py", ":", 1),
     ),
     (
-        "proxy source evidence probe removed",
-        workflow.replace("x-jeeb-staging-observed-remote-ip", "x-removed-evidence", 1),
+        "untrusted XFF evidence probe removed",
+        workflow.replace(
+            "            probe_staging_untrusted_xff_contract\n",
+            "            :\n",
+            1,
+        ),
     ),
     (
         "canonical ingress preflight weakened to host mode",
@@ -758,6 +752,6 @@ bash scripts/test-staging-public-gateway-probe-diagnostics.sh
 bash scripts/test-staging-gateway-transaction-summary.sh
 bash scripts/test-super-login-redaction-contract.sh
 bash scripts/test-verify-staging-otp-verify-freeze.sh
-bash scripts/test-staging-gateway-ingress-proxy-discovery.sh
+bash scripts/test-probe-staging-untrusted-xff.sh
 bash scripts/check-staging-gateway-phase-contracts.sh
 bash scripts/test-assert-distinct-staging-signing-keys.sh

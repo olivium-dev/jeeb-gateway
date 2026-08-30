@@ -1348,9 +1348,9 @@ for token in (
     "GITHUB_OUTPUT",
     "sha256:",
     "scripts/verify-swarm-service-image.sh",
-    'add_env ForwardedHeaders__KnownProxies__0 "$ingress_proxy_ip"',
-    "scripts/staging-gateway-ingress-proxy-discovery.sh",
-    "ingress_proxy_ip=$(discover_staging_ingress_proxy)",
+    "ForwardedHeaders__KnownProxies__0",
+    "probe_staging_untrusted_xff_contract",
+    "scripts/probe-staging-untrusted-xff.sh",
     "add_env Gateway__PublicBaseUrl https://app.jeeb.fds-1.com",
     "add_env AdminPortal__AllowedOrigins__0 https://app.jeeb.fds-1.com",
     "add_env AdminPortal__AllowedOrigins__1 https://cms.jeeb.fds-1.com",
@@ -1378,6 +1378,8 @@ for token in (
         raise SystemExit(f"FAIL: staging deploy lacks commit/image/runtime proof: {token}")
 if "ForwardedHeaders__KnownNetworks" in staging:
     raise SystemExit("FAIL: staging deploy trusts a forwarded-header network range")
+if "add_env ForwardedHeaders__KnownProxies" in staging:
+    raise SystemExit("FAIL: staging deploy trusts the Swarm L4 ingress peer as an HTTP proxy")
 
 build = (workflow_dir / "build.yml").read_text()
 if ":" + "latest" in build.lower() or "type=raw,value=" + "latest" in build:

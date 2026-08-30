@@ -91,12 +91,8 @@ def forbidden_payment_gateway_reference:
       and $environment["featureflags__useupstream__voice"] == "false"
       and $environment["superlogin__openmode"] == "true"
       and $environment["demousers__enabled"] == "true"
-      and ($environment["forwardedheaders__knownproxies__0"]
-        | split(".") as $octets
-        | ($octets | length) == 4
-          and ($octets | all(
-            test("^[0-9]{1,3}$")
-            and ((tonumber >= 0) and (tonumber <= 255)))))
+      and ($lower_keys | all(startswith("forwardedheaders__knownproxies__") | not))
+      and ($lower_keys | all(startswith("forwardedheaders__knownnetworks__") | not))
       and (
         if $deployment_mode == "otp-cutover" then
           $environment["serviceauth__enabled"] == "true"

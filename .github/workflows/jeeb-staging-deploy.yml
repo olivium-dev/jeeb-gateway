@@ -246,9 +246,6 @@ jobs:
           membership_secret_name=''
           firebase_secret_name=''
           service_auth_secret_name=''
-          # Forwarded through the generated private remote candidate builder.
-          # shellcheck disable=SC2034
-          ingress_proxy_ip=''
           service=jeeb-staging-jeeb-gateway
           published=10000
           health=/health/ready
@@ -504,7 +501,8 @@ jobs:
           print(hmac.new(key, canonical, hashlib.sha256).hexdigest())
           PY
             }
-            discover_staging_ingress_proxy() {
+            probe_staging_untrusted_xff_contract() {
+              local spoofed_source_ip=198.51.100.42
               local -a probe_auth
               mapfile -t probe_auth < <(staging_probe_auth)
               [ "${#probe_auth[@]}" -eq 3 ]
@@ -513,44 +511,8 @@ jobs:
               [[ "${probe_auth[2]}" =~ ^[0-9a-f]{64}$ ]]
               ssh jeeb-staging bash -s -- \
                 "${probe_auth[0]}" "${probe_auth[1]}" "${probe_auth[2]}" \
-                < scripts/staging-gateway-ingress-proxy-discovery.sh
-            }
-            probe_staging_proxy_source_contract() {
-              local probe_source_ip=198.51.100.42
-              local -a probe_auth
-              mapfile -t probe_auth < <(staging_probe_auth)
-              [ "${#probe_auth[@]}" -eq 3 ]
-              [[ "${probe_auth[0]}" =~ ^[0-9]+$ ]]
-              [[ "${probe_auth[1]}" =~ ^[0-9a-f-]{36}$ ]]
-              [[ "${probe_auth[2]}" =~ ^[0-9a-f]{64}$ ]]
-              ssh jeeb-staging bash -s -- \
-                "${probe_auth[0]}" "${probe_auth[1]}" "${probe_auth[2]}" \
-                "$probe_source_ip" <<'PROXY_SOURCE'
-                set -euo pipefail
-                timestamp=$1
-                nonce=$2
-                signature=$3
-                expected_remote_ip=$4
-                response_headers=$(mktemp)
-                trap 'rm -f -- "$response_headers"' EXIT
-                status=$(curl --silent --show-error --max-time 20 \
-                  --output /dev/null --dump-header "$response_headers" \
-                  --write-out '%{http_code}' --request POST \
-                  --header "X-Forwarded-For: $expected_remote_ip" \
-                  --header "X-Jeeb-Staging-Probe-Timestamp: $timestamp" \
-                  --header "X-Jeeb-Staging-Probe-Nonce: $nonce" \
-                  --header "X-Jeeb-Staging-Probe-Signature: $signature" \
-                  http://127.0.0.1:10000/internal/ops/staging/realtime-probe-descriptor)
-                [ "$status" = 200 ]
-                awk -F': *' -v expected="$expected_remote_ip" '
-                  tolower($1) == "x-jeeb-staging-observed-remote-ip" {
-                    gsub(/\r$/, "", $2)
-                    matches++
-                    if ($2 == expected) exact++
-                  }
-                  END { exit !(matches == 1 && exact == 1) }
-                ' "$response_headers"
-          PROXY_SOURCE
+                "$spoofed_source_ip" \
+                < scripts/probe-staging-untrusted-xff.sh
             }
             verify_staging_overlay_and_dns() {
               ssh jeeb-staging bash -s -- \
@@ -816,13 +778,6 @@ jobs:
             exit 1
           fi
           verify_staging_overlay_and_dns
-          if [ "$DEPLOYMENT_MODE" != devtool-reassert ]; then
-            echo 'staging phase=ingress-proxy-discovery result=started (redacted)'
-            # Consumed through the generated remote builder's indirect variable loop.
-            # shellcheck disable=SC2034
-            ingress_proxy_ip=$(discover_staging_ingress_proxy)
-            echo 'staging phase=ingress-proxy-discovery result=passed (redacted)'
-          fi
           # Serialized into the private remote builder below.
           # shellcheck disable=SC2034
           EXPECTED_INCUMBENT_IMAGE=$incumbent_image
@@ -837,7 +792,6 @@ jobs:
               EXPECTED_INCUMBENT_IMAGE \
               EXPECTED_INCUMBENT_SPEC_SHA \
               STAGING_GATEWAY_LOCK_OWNER \
-              ingress_proxy_ip \
               state_secret_name notification_secret_name settlement_secret_name \
               push_secret_name \
               bundler_secret_name job_secret_name jwt_secret_name umjwt_secret_name \
@@ -865,6 +819,7 @@ jobs:
             Whisper__ApiKey
             OPENAI_API_KEY
             OLIVIUM_OPEN_AI_KEY
+            ForwardedHeaders__KnownProxies__0
           )
           desired_env=()
           env_remove_keys=()
@@ -886,16 +841,6 @@ jobs:
             echo 'Approved staging overlay is absent, inexact, or not encrypted' >&2
             exit 1
           }
-          if [ "$DEPLOYMENT_MODE" != devtool-reassert ]; then
-            printf '%s\n' "$ingress_proxy_ip" | awk -F. '
-              NF == 4 {
-                for (i = 1; i <= 4; i++)
-                  if ($i !~ /^[0-9]+$/ || $i < 0 || $i > 255) exit 1
-                exit 0
-              }
-              { exit 1 }
-            ' || { echo 'Invalid discovered Swarm ingress proxy address' >&2; exit 1; }
-          fi
           case "$REPOSITORY" in
             jeeb-gateway)
               service=jeeb-staging-jeeb-gateway; published=10000; target=8080; health=/health/ready
@@ -928,10 +873,8 @@ jobs:
                 add_env Features__Swagger__Enabled true
               fi
               add_env Security__TokenMint__Enabled true
-              # Trust only the exact peer observed through the host's current Swarm
-              # ingress path. The pre-mutation discovery also proves that this peer
-              # belongs to the inspected ingress overlay subnet.
-              add_env ForwardedHeaders__KnownProxies__0 "$ingress_proxy_ip"
+              # Swarm ingress is an L4/NAT peer, not a header-sanitizing HTTP proxy.
+              # Staging therefore removes the stale trust row and rejects spoofed XFF.
               add_env AdminPortal__AllowedOrigins__0 https://app.jeeb.fds-1.com
               add_env AdminPortal__AllowedOrigins__1 https://cms.jeeb.fds-1.com
               add_env Settlements__CodOwnerVerified true
@@ -1309,9 +1252,9 @@ jobs:
             # contract; it must never execute during the security-cutover readiness gate.
               bash scripts/probe-staging-public-gateway-contract.sh invariant
             fi
-            echo 'staging phase=proxy-source-contract result=started (redacted)'
-            probe_staging_proxy_source_contract
-            echo 'staging phase=proxy-source-contract result=passed (redacted)'
+            echo 'staging phase=untrusted-xff-contract result=started (redacted)'
+            probe_staging_untrusted_xff_contract
+            echo 'staging phase=untrusted-xff-contract result=passed (redacted)'
             echo 'staging phase=authenticated-realtime result=started (redacted)'
             probe_staging_authenticated_realtime
             echo 'staging phase=authenticated-realtime result=passed (redacted)'
