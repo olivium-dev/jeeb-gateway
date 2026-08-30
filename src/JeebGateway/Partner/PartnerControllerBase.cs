@@ -93,7 +93,7 @@ public abstract class PartnerControllerBase : ControllerBase
     /// configured ceiling BEFORE any wallet-service call (a 400, NOT a fee rule — the authoritative
     /// limits stay wallet-service's). Applied on the admin cash-CREATE path too (money creation).
     /// </summary>
-    protected bool TryEnforceAmountCeiling(double amount, double maxAmount, out IActionResult problem)
+    protected bool TryEnforceAmountCeiling(decimal amount, decimal maxAmount, out IActionResult problem)
     {
         if (amount > maxAmount)
         {
@@ -142,7 +142,7 @@ public abstract class PartnerControllerBase : ControllerBase
     // extensions the portal keys on serialize as top-level members (ProblemDetails.Extensions).
 
     /// <summary>Challenge endpoint refusal: an amount at or below the threshold needs no step-up code.</summary>
-    protected IActionResult OtpNotRequiredProblem(double threshold)
+    protected IActionResult OtpNotRequiredProblem(decimal threshold)
         => OtpProblem(
             StatusCodes.Status400BadRequest,
             "https://jeeb.dev/errors/otp-not-required",

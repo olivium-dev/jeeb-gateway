@@ -53,6 +53,7 @@ public sealed class StateServiceRefreshTokenStore : IRefreshTokenStore
     internal const string StatusKeyPrefix = "refresh-token-status:";
     internal const string HashKeyPrefix = "refresh-token-hash:";
     internal const string UserKeyPrefix = "refresh-token-user:";
+    internal const string BoundedRevocationKeyPrefix = "bounded-session-revoked:";
 
     /// <summary>90-day TTL (seconds) — outlives the 30-day refresh lifetime.</summary>
     internal const int TtlSeconds = 90 * 24 * 60 * 60;
@@ -198,6 +199,57 @@ public sealed class StateServiceRefreshTokenStore : IRefreshTokenStore
     {
         if (string.IsNullOrWhiteSpace(userId)) return Task.FromResult(0);
         return RevokeActiveForUserAsync(userId.Trim(), reason, ct);
+    }
+
+    public async Task MarkBoundedSessionRevokedAsync(string sessionFamilyId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(sessionFamilyId))
+            throw new ArgumentException("sessionFamilyId is required.", nameof(sessionFamilyId));
+        await _kv.PutOrGetAsync(
+            BoundedRevocationKeyPrefix + sessionFamilyId.Trim(),
+            statusCode: 200,
+            responseBodyJson: "{}",
+            ttlSeconds: 5 * 60,
+            ct);
+    }
+
+    public async Task<bool> IsBoundedSessionRevokedAsync(string sessionFamilyId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(sessionFamilyId)) return false;
+        return await _kv.GetAsync(
+            BoundedRevocationKeyPrefix + sessionFamilyId.Trim(), ct) is not null;
+    }
+
+    public async Task<int> RevokeBoundedFamilyAsync(
+        string sessionFamilyId,
+        RevocationReason reason,
+        CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(sessionFamilyId)) return 0;
+
+        var currentId = sessionFamilyId.Trim();
+        var visited = new HashSet<string>(StringComparer.Ordinal);
+        var count = 0;
+        while (visited.Add(currentId))
+        {
+            var current = await ResolveLatestAsync(currentId, ct);
+            if (current is null
+                || !string.Equals(
+                    current.BoundedSessionFamilyId,
+                    sessionFamilyId,
+                    StringComparison.Ordinal))
+            {
+                break;
+            }
+            if (current.RevokedAt is null)
+            {
+                await RevokeAsync(current.TokenId, reason, ct);
+                count++;
+            }
+            if (string.IsNullOrWhiteSpace(current.ReplacedByTokenId)) break;
+            currentId = current.ReplacedByTokenId;
+        }
+        return count;
     }
 
     public async Task<int> RevokeChainAsync(string startTokenId, RevocationReason reason, CancellationToken ct)

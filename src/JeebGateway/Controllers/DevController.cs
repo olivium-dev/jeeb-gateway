@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using JeebGateway.Auth.Capabilities;
+using JeebGateway.JeebWallet;
 using JeebGateway.Security;
 using JeebGateway.service.ServiceUserManagement;
 using Microsoft.AspNetCore.Mvc;
@@ -61,15 +62,18 @@ public sealed class DevController : ControllerBase
 {
     private readonly ServiceUserManagementClient _userManagement;
     private readonly GwSeededRoles _seededRoles;
+    private readonly IJeeberWalletProvisioner _jeeberWallets;
     private readonly ILogger<DevController> _logger;
 
     public DevController(
         ServiceUserManagementClient userManagement,
         GwSeededRoles seededRoles,
+        IJeeberWalletProvisioner jeeberWallets,
         ILogger<DevController> logger)
     {
         _userManagement = userManagement;
         _seededRoles = seededRoles;
+        _jeeberWallets = jeeberWallets;
         _logger = logger;
     }
 
@@ -208,6 +212,43 @@ public sealed class DevController : ControllerBase
                 detail: "The dev seed call to user-management did not complete.",
                 statusCode: StatusCodes.Status502BadGateway,
                 type: "https://datatracker.ietf.org/doc/html/rfc7231#section-6.6.3");
+        }
+    }
+
+    /// <summary>
+    /// Idempotently converges the wallet for an already-created dev Jeeber. Keeping this separate
+    /// from user creation makes a wallet outage recoverable: the client retains the canonical
+    /// holder id and can safely retry only this additive operation.
+    /// </summary>
+    [HttpPut("wallets/jeeber/{holderId:guid}/ensure")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(void), StatusCodes.Status404NotFound)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status502BadGateway)]
+    public async Task<IActionResult> EnsureJeeberWallet(Guid holderId, CancellationToken ct)
+    {
+        if (holderId == Guid.Empty)
+        {
+            return Problem(
+                title: "Invalid Jeeber holder id",
+                detail: "holderId must be a non-zero UUID.",
+                statusCode: StatusCodes.Status400BadRequest,
+                type: "https://jeeb.dev/errors/invalid-holder-id");
+        }
+
+        try
+        {
+            await _jeeberWallets.EnsureAsync(holderId, ct);
+            return NoContent();
+        }
+        catch (WalletProvisioningUnavailableException ex)
+        {
+            _logger.LogWarning(ex, "Dev Jeeber wallet provisioning failed");
+            return Problem(
+                title: "wallet-service unavailable",
+                detail: "The Jeeber wallet is not ready. This ensure operation can be retried.",
+                statusCode: StatusCodes.Status502BadGateway,
+                type: "https://jeeb.dev/errors/dev-jeeber-wallet-provisioning");
         }
     }
 

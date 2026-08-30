@@ -39,7 +39,7 @@ public interface IPartnerOtpChallengeStore
     /// <paramref name="expiresAt"/>. Returns the new challenge id.
     /// </summary>
     Task<Guid> IssueAsync(
-        Guid partnerId, Guid jeeberId, double amount, string codeHash, DateTimeOffset expiresAt,
+        Guid partnerId, Guid jeeberId, decimal amount, string codeHash, DateTimeOffset expiresAt,
         CancellationToken ct);
 
     /// <summary>
@@ -50,7 +50,7 @@ public interface IPartnerOtpChallengeStore
     /// remaining attempts in <see cref="PartnerOtpValidation.AttemptsRemaining"/>.
     /// </summary>
     Task<PartnerOtpValidation> ValidateAndConsumeAsync(
-        Guid challengeId, Guid partnerId, Guid jeeberId, double amount, string codeHash,
+        Guid challengeId, Guid partnerId, Guid jeeberId, decimal amount, string codeHash,
         CancellationToken ct);
 }
 

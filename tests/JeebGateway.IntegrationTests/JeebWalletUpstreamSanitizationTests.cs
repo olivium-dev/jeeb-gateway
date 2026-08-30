@@ -4,6 +4,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Security.Claims;
 using System.Text;
+using System.Text.Json;
 using FluentAssertions;
 using JeebGateway.service.ServiceWallet;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -84,6 +85,150 @@ public class JeebWalletUpstreamSanitizationTests
             "an upstream 404 is the empty-wallet default, not a client-facing error");
         var raw = await resp.Content.ReadAsStringAsync();
         raw.Should().NotContain("SECRET_CANARY_wallet7f3");
+    }
+
+    [Fact]
+    public async Task GetBalance_Resolves_Configured_Currency_From_Wallet_Service()
+    {
+        var requestedPaths = new List<string>();
+        var stub = new StubHttpMessageHandler(request =>
+        {
+            var path = request.RequestUri!.AbsolutePath;
+            requestedPaths.Add(path);
+            if (path.EndsWith($"/Wallet/holder/{HolderGuid}/wallets", StringComparison.OrdinalIgnoreCase))
+            {
+                return JsonResponse($$"""
+                    {
+                      "walletHolder": { "holderId": "{{HolderGuid}}", "holderType": "jeeber" },
+                      "wallets": [
+                        {
+                          "walletId": "22222222-2222-2222-2222-222222222222",
+                          "holderId": "{{HolderGuid}}",
+                          "currencyID": 1,
+                          "amount": 125.5,
+                          "isActive": true,
+                          "type": "jeeber"
+                        },
+                        {
+                          "walletId": "33333333-3333-3333-3333-333333333333",
+                          "holderId": "{{HolderGuid}}",
+                          "currencyID": 2,
+                          "amount": 999,
+                          "isActive": true,
+                          "type": "jeeber"
+                        }
+                      ]
+                    }
+                    """);
+            }
+
+            if (path.EndsWith("/Fees/currencies", StringComparison.OrdinalIgnoreCase))
+            {
+                return JsonResponse("""
+                    [
+                      { "id": 1, "code": "USD", "fullName": "US Dollar", "rate": 1 },
+                      { "id": 2, "code": "LBP", "fullName": "Lebanese Pound", "rate": 89500 }
+                    ]
+                    """);
+            }
+
+            return new HttpResponseMessage(HttpStatusCode.NotFound);
+        });
+
+        using var factory = NewFactoryWithWalletStub(stub);
+        var client = MintBearerClient(factory, HolderGuid);
+
+        var resp = await client.GetAsync("/v1/jeeb/wallet");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        using var body = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        body.RootElement.GetProperty("availableBalance").GetDecimal().Should().Be(125.5m);
+        body.RootElement.GetProperty("currency").GetString().Should().Be("USD");
+        requestedPaths.Should().Contain(path => path.EndsWith("/Fees/currencies"));
+    }
+
+    [Fact]
+    public async Task GetBalance_CurrencyTable404_DoesNot_Masquerade_As_An_Empty_Wallet()
+    {
+        var stub = new StubHttpMessageHandler(request =>
+            request.RequestUri!.AbsolutePath.Contains("/Wallet/holder/", StringComparison.OrdinalIgnoreCase)
+                ? JsonResponse($$"""
+                    {
+                      "walletHolder": { "holderId": "{{HolderGuid}}", "holderType": "jeeber" },
+                      "wallets": [
+                        {
+                          "walletId": "22222222-2222-2222-2222-222222222222",
+                          "holderId": "{{HolderGuid}}",
+                          "currencyID": 1,
+                          "amount": 125.5,
+                          "isActive": true,
+                          "type": "jeeber"
+                        }
+                      ]
+                    }
+                    """)
+                : new HttpResponseMessage(HttpStatusCode.NotFound)
+                {
+                    Content = new StringContent(Canary, Encoding.UTF8, "text/plain"),
+                });
+
+        using var factory = NewFactoryWithWalletStub(stub);
+        var client = MintBearerClient(factory, HolderGuid);
+
+        var resp = await client.GetAsync("/v1/jeeb/wallet");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadGateway,
+            "the currency table is a gateway dependency, not a public resource");
+        var raw = await resp.Content.ReadAsStringAsync();
+        raw.Should().Contain("The wallet request could not be completed.");
+        raw.Should().NotContain("availableBalance");
+        raw.Should().NotContain(Canary);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GetBalance_CurrencyTableTransportFailure_Is_Sanitized_502(bool timeout)
+    {
+        var stub = new StubHttpMessageHandler(request =>
+        {
+            if (request.RequestUri!.AbsolutePath.Contains("/Wallet/holder/", StringComparison.OrdinalIgnoreCase))
+            {
+                return JsonResponse($$"""
+                    {
+                      "walletHolder": { "holderId": "{{HolderGuid}}", "holderType": "jeeber" },
+                      "wallets": [
+                        {
+                          "walletId": "22222222-2222-2222-2222-222222222222",
+                          "holderId": "{{HolderGuid}}",
+                          "currencyID": 1,
+                          "amount": 125.5,
+                          "isActive": true,
+                          "type": "jeeber"
+                        }
+                      ]
+                    }
+                    """);
+            }
+
+            if (timeout)
+            {
+                throw new TaskCanceledException(Canary);
+            }
+
+            throw new HttpRequestException(Canary);
+        });
+
+        using var factory = NewFactoryWithWalletStub(stub);
+        var client = MintBearerClient(factory, HolderGuid);
+
+        var resp = await client.GetAsync("/v1/jeeb/wallet");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadGateway);
+        var raw = await resp.Content.ReadAsStringAsync();
+        raw.Should().Contain("The wallet request could not be completed.");
+        raw.Should().NotContain("availableBalance");
+        raw.Should().NotContain(Canary);
     }
 
     [Fact]
@@ -174,6 +319,12 @@ public class JeebWalletUpstreamSanitizationTests
             new AuthenticationHeaderValue("Bearer", new JwtSecurityTokenHandler().WriteToken(token));
         return client;
     }
+
+    private static HttpResponseMessage JsonResponse(string json) =>
+        new(HttpStatusCode.OK)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json"),
+        };
 
     private sealed class StubHttpMessageHandler : HttpMessageHandler
     {

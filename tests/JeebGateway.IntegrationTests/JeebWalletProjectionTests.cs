@@ -64,12 +64,40 @@ public class JeebWalletProjectionTests
     }
 
     [Fact]
-    public void ProjectBalance_Currency_Is_Null_So_Mobile_Applies_Its_Default()
+    public void ProjectBalance_Currency_Is_Null_Without_Authoritative_Mapping()
     {
-        // The generic wallet row exposes only a numeric CurrencyID, not an ISO code;
-        // the gateway must not fabricate one (it would be domain state). Null lets the
-        // mobile parser apply its documented default.
+        // The generic wallet row exposes only a numeric CurrencyID, not an ISO code.
+        // Without wallet-service's currency table the gateway must not fabricate one.
         var view = JeebWalletProjection.ProjectBalance(Holder(ActiveWallet(50)));
+
+        view.Currency.Should().BeNull();
+    }
+
+    [Fact]
+    public void ProjectBalance_Uses_Authoritative_Configured_Currency_Without_Blending_Others()
+    {
+        var view = JeebWalletProjection.ProjectBalance(
+            Holder(
+                new Wallet { IsActive = true, Amount = 50, CurrencyID = 1 },
+                new Wallet { IsActive = true, Amount = 999, CurrencyID = 2 }),
+            new List<Currency>
+            {
+                new() { Id = 1, Code = " usd " },
+                new() { Id = 2, Code = "LBP" },
+            },
+            currencyId: 1);
+
+        view.AvailableBalance.Should().Be(50);
+        view.Currency.Should().Be("USD");
+    }
+
+    [Fact]
+    public void ProjectBalance_Missing_Configured_Currency_Mapping_Fails_Closed()
+    {
+        var view = JeebWalletProjection.ProjectBalance(
+            Holder(ActiveWallet(50)),
+            new List<Currency> { new() { Id = 2, Code = "LBP" } },
+            currencyId: 1);
 
         view.Currency.Should().BeNull();
     }

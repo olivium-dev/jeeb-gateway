@@ -37,6 +37,13 @@ public class RefreshToken
     /// </summary>
     public string? IdentityProvider { get; init; }
     public DateTimeOffset? AuthenticationSessionExpiresAt { get; init; }
+    public DateTimeOffset? AbsoluteSessionExpiresAt { get; init; }
+    /// <summary>
+    /// Root refresh-token id for an isolated bounded Dev Tool session. Every rotation keeps the
+    /// same family id so cleanup can revoke only this short-lived session without touching the
+    /// holder's ordinary sessions.
+    /// </summary>
+    public string? BoundedSessionFamilyId { get; init; }
     public string? DisplayName { get; init; }
     public string? Email { get; init; }
     public IReadOnlyList<string>? RoleSnapshot { get; init; }
@@ -61,4 +68,5 @@ public enum RevocationReason
     AccountDeleted,
     Reauthenticated,
     LegacyPhoneSubject,
+    DevCredentialRemoved,
 }

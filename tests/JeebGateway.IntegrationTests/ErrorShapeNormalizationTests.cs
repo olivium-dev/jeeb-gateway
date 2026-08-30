@@ -16,6 +16,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.IdentityModel.Tokens;
 using Xunit;
+using AspNetProblemDetails = Microsoft.AspNetCore.Mvc.ProblemDetails;
 
 namespace JeebGateway.IntegrationTests;
 
@@ -60,7 +61,7 @@ public class ErrorShapeNormalizationTests
         // JEBV4-63: was a bare StatusCode(ex.StatusCode, ex.Message) string body.
         resp.StatusCode.Should().Be(HttpStatusCode.BadGateway);
         resp.Content.Headers.ContentType?.MediaType.Should().Be("application/problem+json");
-        var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
+        var problem = await resp.Content.ReadFromJsonAsync<AspNetProblemDetails>();
         problem!.Status.Should().Be((int)HttpStatusCode.BadGateway);
         problem.Title.Should().Be("Upstream wallet-service error");
     }
@@ -98,7 +99,7 @@ public class ErrorShapeNormalizationTests
         // [Produces("application/json")] keeps the header application/json; the
         // BODY is the ProblemDetails envelope.)
         resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
-        var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
+        var problem = await resp.Content.ReadFromJsonAsync<AspNetProblemDetails>();
         problem!.Title.Should().Be("template render failed (simulated DLQ)");
         problem.Status.Should().Be((int)HttpStatusCode.BadRequest);
         problem.Type.Should().Be("https://jeeb.dev/errors/notification-dispatch-failed");
@@ -129,7 +130,7 @@ public class ErrorShapeNormalizationTests
         // JEBV4-63: was `NotFound(new { error = "Masked calls are not enabled" })`.
         resp.StatusCode.Should().Be(HttpStatusCode.NotFound);
         resp.Content.Headers.ContentType?.MediaType.Should().Be("application/problem+json");
-        var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
+        var problem = await resp.Content.ReadFromJsonAsync<AspNetProblemDetails>();
         problem!.Title.Should().Be("Masked calls are not enabled");
     }
 

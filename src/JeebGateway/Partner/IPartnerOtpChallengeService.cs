@@ -20,14 +20,14 @@ public interface IPartnerOtpChallengeService
     /// id, the validity window, and the RAW code (for the controller to surface in-app as devCode only
     /// when the dev-endpoints flag is on — never otherwise).
     /// </summary>
-    Task<PartnerOtpIssued> IssueAsync(Guid partnerId, Guid jeeberId, double amount, CancellationToken ct);
+    Task<PartnerOtpIssued> IssueAsync(Guid partnerId, Guid jeeberId, decimal amount, CancellationToken ct);
 
     /// <summary>
     /// Validate a confirm's code against the challenge and, on a full match, consume it single-use.
     /// The raw <paramref name="code"/> is hashed here and compared constant-time in the store.
     /// </summary>
     Task<PartnerOtpValidation> VerifyAsync(
-        Guid challengeId, Guid partnerId, Guid jeeberId, double amount, string code, CancellationToken ct);
+        Guid challengeId, Guid partnerId, Guid jeeberId, decimal amount, string code, CancellationToken ct);
 }
 
 /// <summary>A freshly minted challenge: its id, validity window, and the RAW code (dev-surfaced only).</summary>

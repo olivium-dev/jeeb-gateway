@@ -2,10 +2,12 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using JeebGateway.Auth.Capabilities;
+using JeebGateway.Partner;
 using JeebGateway.Users;
 using JeebGateway.JeebWallet;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using ServiceWalletClient = JeebGateway.service.ServiceWallet.ServiceWalletClient;
 using WalletApiException = JeebGateway.service.ServiceWallet.ApiException;
 
@@ -47,15 +49,18 @@ public sealed class JeebWalletController : ControllerBase
 {
     private readonly ServiceWalletClient _wallet;
     private readonly IJeebWalletLedgerReader _ledger;
+    private readonly int _currencyId;
     private readonly ILogger<JeebWalletController> _log;
 
     public JeebWalletController(
         ServiceWalletClient wallet,
         IJeebWalletLedgerReader ledger,
+        IOptions<PartnerWalletOptions> partnerWalletOptions,
         ILogger<JeebWalletController> log)
     {
         _wallet = wallet;
         _ledger = ledger;
+        _currencyId = partnerWalletOptions.Value.CurrencyId;
         _log = log;
     }
 
@@ -74,14 +79,37 @@ public sealed class JeebWalletController : ControllerBase
 
         try
         {
-            var holder = await _wallet.WalletsAsync(holderId, ct);
-            return Ok(JeebWalletProjection.ProjectBalance(holder));
-        }
-        catch (WalletApiException ex) when (ex.StatusCode == StatusCodes.Status404NotFound)
-        {
-            // No holder/wallet provisioned yet → an empty wallet, not an error
-            // (matches the mobile "empty" affordability default).
-            return Ok(JeebWalletProjection.ProjectBalance(null));
+            JeebGateway.service.ServiceWallet.GetHolderWallets holder;
+            try
+            {
+                holder = await _wallet.WalletsAsync(holderId, ct);
+            }
+            catch (WalletApiException ex) when (ex.StatusCode == StatusCodes.Status404NotFound)
+            {
+                // No holder/wallet provisioned yet → an empty wallet, not an error
+                // (matches the mobile "empty" affordability default).
+                return Ok(JeebWalletProjection.ProjectBalance(null));
+            }
+
+            System.Collections.Generic.ICollection<JeebGateway.service.ServiceWallet.Currency> currencies;
+            try
+            {
+                currencies = await _wallet.CurrenciesAsync(ct);
+            }
+            catch (WalletApiException ex)
+            {
+                return CurrencyTableProblem(ex);
+            }
+            catch (HttpRequestException ex)
+            {
+                return CurrencyTableProblem(ex);
+            }
+            catch (TaskCanceledException ex) when (!ct.IsCancellationRequested)
+            {
+                return CurrencyTableProblem(ex);
+            }
+
+            return Ok(JeebWalletProjection.ProjectBalance(holder, currencies, _currencyId));
         }
         catch (WalletApiException ex)
         {
@@ -210,6 +238,16 @@ public sealed class JeebWalletController : ControllerBase
         return Problem(
             title: "The wallet request could not be completed.",
             statusCode: status);
+    }
+
+    private IActionResult CurrencyTableProblem(Exception ex)
+    {
+        _log.LogWarning(ex,
+            "Wallet BFF: authoritative currency-table read failed on {Method} {Path}.",
+            Request.Method, Request.Path);
+        return Problem(
+            title: "The wallet request could not be completed.",
+            statusCode: StatusCodes.Status502BadGateway);
     }
 
     private IActionResult LedgerUnavailable(WalletLedgerUnavailableException ex)

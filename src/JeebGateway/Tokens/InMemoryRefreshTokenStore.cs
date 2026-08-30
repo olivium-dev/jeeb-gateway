@@ -29,6 +29,7 @@ public class InMemoryRefreshTokenStore : IRefreshTokenStore
     private readonly ConcurrentDictionary<string, RefreshToken> _byId = new();
     private readonly ConcurrentDictionary<string, string> _hashToId = new();
     private readonly object _writeLock = new();
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _boundedRevocations = new();
 
     public Task AddAsync(RefreshToken token, CancellationToken ct)
     {
@@ -89,6 +90,41 @@ public class InMemoryRefreshTokenStore : IRefreshTokenStore
             {
                 t.RevokedAt = now;
                 t.RevokedReason = reason.ToString();
+                count++;
+            }
+        }
+        return Task.FromResult(count);
+    }
+
+    public Task MarkBoundedSessionRevokedAsync(string sessionFamilyId, CancellationToken ct)
+    {
+        _boundedRevocations[sessionFamilyId] = DateTimeOffset.UtcNow.AddMinutes(5);
+        return Task.CompletedTask;
+    }
+
+    public Task<bool> IsBoundedSessionRevokedAsync(string sessionFamilyId, CancellationToken ct) =>
+        Task.FromResult(
+            _boundedRevocations.TryGetValue(sessionFamilyId, out var until)
+            && until > DateTimeOffset.UtcNow);
+
+    public Task<int> RevokeBoundedFamilyAsync(
+        string sessionFamilyId,
+        RevocationReason reason,
+        CancellationToken ct)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var count = 0;
+        lock (_writeLock)
+        {
+            foreach (var token in _byId.Values.Where(token =>
+                         string.Equals(
+                             token.BoundedSessionFamilyId,
+                             sessionFamilyId,
+                             StringComparison.Ordinal)
+                         && token.RevokedAt is null))
+            {
+                token.RevokedAt = now;
+                token.RevokedReason = reason.ToString();
                 count++;
             }
         }

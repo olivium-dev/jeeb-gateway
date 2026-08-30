@@ -218,31 +218,90 @@ builder.Services
         {
             OnTokenValidated = async context =>
             {
+                var runtimeExpiry = context.Principal?.FindFirst(
+                    JeebGateway.Tokens.TokenService.RuntimeSessionExpiryClaim)?.Value;
                 var subject = context.Principal?.FindFirst("sub")?.Value;
-                if (!JeebGateway.Auth.LegacyPhoneSessionRejection.IsLegacySubject(subject))
-                    return;
-
-                JeebGateway.Observability.BusinessOutcomeTelemetry.RecordLegacySessionRejection(
-                    JeebGateway.Observability.LegacySessionRejectionReason.AccessTokenLegacySubject);
-
-                try
+                if (runtimeExpiry is not null)
                 {
-                    var refreshStore = context.HttpContext.RequestServices
-                        .GetRequiredService<IRefreshTokenStore>();
-                    await JeebGateway.Auth.LegacyPhoneSessionRejection.RevokeRefreshFamiliesAsync(
-                        refreshStore, subject!, context.HttpContext.RequestAborted);
+                    var runtimeRefreshHash = context.Principal?.FindFirst(
+                        JeebGateway.Tokens.TokenService.RuntimeRefreshHashClaim)?.Value;
+                    var runtimeSessionFamily = context.Principal?.FindFirst(
+                        JeebGateway.Tokens.TokenService.RuntimeSessionFamilyClaim)?.Value;
+                    if (!long.TryParse(runtimeExpiry, out var runtimeExpirySeconds)
+                        || DateTimeOffset.FromUnixTimeSeconds(runtimeExpirySeconds)
+                            <= DateTimeOffset.UtcNow
+                        || string.IsNullOrWhiteSpace(runtimeRefreshHash)
+                        || string.IsNullOrWhiteSpace(runtimeSessionFamily))
+                    {
+                        context.Fail("Bearer token validation failed.");
+                        return;
+                    }
+
+                    try
+                    {
+                        var refreshStore = context.HttpContext.RequestServices
+                            .GetRequiredService<IRefreshTokenStore>();
+                        if (string.IsNullOrWhiteSpace(subject)
+                            || await refreshStore.IsBoundedSessionRevokedAsync(
+                                runtimeSessionFamily,
+                                context.HttpContext.RequestAborted))
+                        {
+                            context.Fail("Bearer token validation failed.");
+                            return;
+                        }
+                        var runtimeRefresh = await refreshStore.FindByHashAsync(
+                            runtimeRefreshHash,
+                            context.HttpContext.RequestAborted);
+                        if (runtimeRefresh is null
+                            || runtimeRefresh.RevokedAt is not null
+                            || runtimeRefresh.ExpiresAt <= DateTimeOffset.UtcNow
+                            || runtimeRefresh.AbsoluteSessionExpiresAt is null
+                            || runtimeRefresh.AbsoluteSessionExpiresAt <= DateTimeOffset.UtcNow
+                            || runtimeRefresh.UserId != subject
+                            || runtimeRefresh.BoundedSessionFamilyId != runtimeSessionFamily
+                            || runtimeRefresh.AbsoluteSessionExpiresAt.Value.ToUnixTimeSeconds()
+                                != runtimeExpirySeconds)
+                        {
+                            context.Fail("Bearer token validation failed.");
+                            return;
+                        }
+                    }
+                    catch (Exception)
+                    {
+                        context.Fail("Bearer token validation failed.");
+                        return;
+                    }
                 }
-                catch (Exception)
+
+                if (JeebGateway.Auth.LegacyPhoneSessionRejection.IsLegacySubject(subject))
                 {
-                    // DI/store resolution is part of the same best-effort revoke
-                    // boundary: authentication still fails closed.
                     JeebGateway.Observability.BusinessOutcomeTelemetry.RecordLegacySessionRejection(
-                        JeebGateway.Observability.LegacySessionRejectionReason.RevocationFailure);
+                        JeebGateway.Observability.LegacySessionRejectionReason.AccessTokenLegacySubject);
+
+                    try
+                    {
+                        var refreshStore = context.HttpContext.RequestServices
+                            .GetRequiredService<IRefreshTokenStore>();
+                        await JeebGateway.Auth.LegacyPhoneSessionRejection.RevokeRefreshFamiliesAsync(
+                            refreshStore, subject!, context.HttpContext.RequestAborted);
+                    }
+                    catch (Exception)
+                    {
+                        // DI/store resolution is part of the same best-effort revoke
+                        // boundary: authentication still fails closed.
+                        JeebGateway.Observability.BusinessOutcomeTelemetry.RecordLegacySessionRejection(
+                            JeebGateway.Observability.LegacySessionRejectionReason.RevocationFailure);
+                    }
+
+                    // Keep the public contract identical to every other invalid bearer.
+                    // The generic reason contains no subject, phone, token, or identifier.
+                    context.Fail("Bearer token validation failed.");
+                    return;
                 }
 
-                // Keep the public contract identical to every other invalid bearer.
-                // The generic reason contains no subject, phone, token, or identifier.
-                context.Fail("Bearer token validation failed.");
+                // Runtime access tokens were already checked above against their linked durable
+                // refresh row and shared bounded-session tombstone. No process-local credential
+                // state participates in bearer acceptance.
             }
         };
     })
@@ -1495,8 +1554,11 @@ ServiceClientExtensions.AttachBreakerAndTimeoutOnly(builder.Services.AddHttpClie
         }
         client.Timeout = TimeSpan.FromSeconds(30);
     }));
-builder.Services.AddScoped<JeebGateway.JeebWallet.IJeeberWalletProvisioner,
-    JeebGateway.JeebWallet.WalletServiceJeeberWalletProvisioner>();
+builder.Services.AddScoped<JeebGateway.JeebWallet.WalletServiceJeeberWalletProvisioner>();
+builder.Services.AddScoped<JeebGateway.JeebWallet.IJeeberWalletProvisioner>(sp =>
+    sp.GetRequiredService<JeebGateway.JeebWallet.WalletServiceJeeberWalletProvisioner>());
+builder.Services.AddScoped<JeebGateway.JeebWallet.IPartnerWalletProvisioner>(sp =>
+    sp.GetRequiredService<JeebGateway.JeebWallet.WalletServiceJeeberWalletProvisioner>());
 
 builder.Services.AddScoped<JeebGateway.service.ServiceWallet.ServiceWalletClient>(sp =>
 {

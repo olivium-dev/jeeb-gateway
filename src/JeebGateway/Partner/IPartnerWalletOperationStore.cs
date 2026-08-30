@@ -93,7 +93,7 @@ public sealed record PartnerOperationKey(PartnerOperationType Type, Guid ActorId
 /// audit record" requirement: operator/actor, partner, amount, evidence, txId, timestamps).
 /// </summary>
 public sealed record PartnerOperationIntent(
-    Guid PartnerId, Guid? CounterpartyId, double Amount, string? EvidenceNote);
+    Guid PartnerId, Guid? CounterpartyId, decimal Amount, string? EvidenceNote);
 
 /// <summary>The result of a claim attempt.</summary>
 public sealed record PartnerOperationClaim(PartnerClaimKind Kind, PartnerWalletMoveResponse? Result);

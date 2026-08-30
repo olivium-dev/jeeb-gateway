@@ -82,9 +82,56 @@ public sealed class PartnerAuthController : ControllerBase
         }
 
         var userId = account.HolderId.ToString();
-
-        var pair = await _tokens.IssueAsync(
-            userId, new[] { Roles.Partner }, Roles.Partner, authentication: null, ct);
+        TokenPair pair;
+        if (account.RuntimeSessionExpiresAt is { } runtimeExpiresAt)
+        {
+            TokenPair? runtimePair = null;
+            try
+            {
+                runtimePair = await _tokens.IssueBoundedAsync(
+                    userId, new[] { Roles.Partner }, Roles.Partner, runtimeExpiresAt, ct);
+                if (string.IsNullOrWhiteSpace(runtimePair.BoundedSessionFamilyId))
+                    throw new InvalidOperationException(
+                        "The bounded runtime token is missing its session family.");
+                await _credentials.BindRuntimeSessionAsync(
+                    account.Login,
+                    account.HolderId,
+                    runtimePair.BoundedSessionFamilyId,
+                    ct);
+                pair = runtimePair;
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                if (runtimePair?.BoundedSessionFamilyId is { } orphanedFamily)
+                {
+                    try
+                    {
+                        await _tokens.RevokeBoundedSessionAsync(
+                            orphanedFamily,
+                            RevocationReason.DevCredentialRemoved,
+                            CancellationToken.None);
+                    }
+                    catch (Exception cleanupEx)
+                    {
+                        _log.LogError(
+                            cleanupEx,
+                            "partner.auth.login could not revoke an unbound runtime token family.");
+                    }
+                }
+                _log.LogWarning(ex, "partner.auth.login rejected an unusable runtime credential.");
+                _log.LogWarning("partner.auth.login rejected a revoked or expired runtime credential.");
+                return InvalidCredentialProblem();
+            }
+        }
+        else
+        {
+            pair = await _tokens.IssueAsync(
+                userId, new[] { Roles.Partner }, Roles.Partner, authentication: null, ct);
+        }
 
         _log.LogInformation("partner.auth.login ok partnerId={PartnerId}", userId);
 
@@ -109,4 +156,10 @@ public sealed class PartnerAuthController : ControllerBase
             },
         });
     }
+
+    private ObjectResult InvalidCredentialProblem() => Problem(
+        title: "Invalid partner credentials.",
+        detail: "The login or secret is incorrect.",
+        statusCode: StatusCodes.Status401Unauthorized,
+        type: "https://jeeb.dev/errors/invalid-partner-credentials");
 }

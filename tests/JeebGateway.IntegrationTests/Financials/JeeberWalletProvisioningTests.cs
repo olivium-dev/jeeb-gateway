@@ -42,6 +42,78 @@ public sealed class JeeberWalletProvisioningTests
     }
 
     [Fact]
+    public async Task EnsurePartner_UsesPartnerHolderTypeAndRuntimeDisplayName()
+    {
+        var handler = new ProvisioningHandler();
+        var provisioner = (IPartnerWalletProvisioner)NewProvisioner(handler);
+
+        await provisioner.EnsureAsync(HolderId, "Dev Tool Partner", CancellationToken.None);
+
+        using var request = JsonDocument.Parse(handler.EnsureBody!);
+        var holder = request.RootElement.GetProperty("walletHolder");
+        holder.GetProperty("holderId").GetGuid().Should().Be(HolderId);
+        holder.GetProperty("holderName").GetString().Should().Be("Dev Tool Partner");
+        holder.GetProperty("holderType").GetString().Should().Be("partner");
+        request.RootElement.GetProperty("wallets").EnumerateArray()
+            .Should().OnlyContain(wallet =>
+                wallet.GetProperty("note").GetString() ==
+                "devtool-partner-wallet-bootstrap");
+    }
+
+    [Fact]
+    public async Task EnsurePartner_RejectsExistingOppositeHolderTypeBeforePut()
+    {
+        var handler = new ProvisioningHandler(
+            existingWalletType: "legacy-cash",
+            existingHolderType: "person");
+        var provisioner = (IPartnerWalletProvisioner)NewProvisioner(handler);
+
+        await provisioner.Invoking(value => value.EnsureAsync(
+                HolderId,
+                "Dev Tool Partner",
+                CancellationToken.None))
+            .Should().ThrowAsync<WalletProvisioningUnavailableException>()
+            .WithMessage("*not 'partner'*");
+
+        handler.EnsureBody.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task EnsureJeeber_RejectsExistingOppositeHolderTypeBeforePut()
+    {
+        var handler = new ProvisioningHandler(
+            existingWalletType: "legacy-cash",
+            existingHolderType: "person");
+        var provisioner = NewProvisioner(handler);
+
+        await provisioner.Invoking(value => value.EnsureAsync(
+                HolderId,
+                CancellationToken.None))
+            .Should().ThrowAsync<WalletProvisioningUnavailableException>()
+            .WithMessage("*not 'jeeber'*");
+
+        handler.EnsureBody.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task EnsurePartner_RejectsExistingHolderWithMissingActorTypeBeforePut()
+    {
+        var handler = new ProvisioningHandler(
+            existingWalletType: "legacy-cash",
+            existingHolderType: "");
+        var provisioner = (IPartnerWalletProvisioner)NewProvisioner(handler);
+
+        await provisioner.Invoking(value => value.EnsureAsync(
+                HolderId,
+                "Dev Tool Partner",
+                CancellationToken.None))
+            .Should().ThrowAsync<WalletProvisioningUnavailableException>()
+            .WithMessage("*missing its actor type*");
+
+        handler.EnsureBody.Should().BeNull();
+    }
+
+    [Fact]
     public async Task Ensure_Reuses_The_Only_Existing_Active_Wallet_Type()
     {
         var handler = new ProvisioningHandler(existingWalletType: "legacy-cash");
@@ -161,13 +233,16 @@ public sealed class JeeberWalletProvisioningTests
     {
         private readonly string? _existingWalletType;
         private readonly bool _duplicateActiveWallet;
+        private readonly string _existingHolderType;
 
         public ProvisioningHandler(
             string? existingWalletType = null,
-            bool duplicateActiveWallet = false)
+            bool duplicateActiveWallet = false,
+            string existingHolderType = "jeeber")
         {
             _existingWalletType = existingWalletType;
             _duplicateActiveWallet = duplicateActiveWallet;
+            _existingHolderType = existingHolderType;
         }
 
         public List<string> Paths { get; } = new();
@@ -198,14 +273,16 @@ public sealed class JeeberWalletProvisioningTests
                     ? $",{{\"walletId\":\"{Guid.NewGuid():D}\",\"currencyID\":2,\"type\":\"other\",\"isActive\":true}}"
                     : string.Empty;
                 return Json(
-                    $"{{\"walletHolder\":{{\"holderId\":\"{HolderId:D}\",\"holderName\":\"legacy\",\"holderType\":\"person\",\"isActive\":true}},"
+                    $"{{\"walletHolder\":{{\"holderId\":\"{HolderId:D}\",\"holderName\":\"legacy\",\"holderType\":\"{_existingHolderType}\",\"isActive\":true}},"
                     + $"\"wallets\":[{{\"walletId\":\"{WalletOne:D}\",\"currencyID\":2,\"type\":\"{_existingWalletType ?? "jeeb"}\",\"isActive\":true}}{duplicate}]}}");
             }
             if (request.Method == HttpMethod.Put && path == "/Wallet/holder/ensure")
             {
                 EnsureBody = await request.Content!.ReadAsStringAsync(cancellationToken);
-                var holderName = _existingWalletType is null ? HolderId.ToString("D") : "legacy";
-                var holderType = _existingWalletType is null ? "jeeber" : "person";
+                using var body = JsonDocument.Parse(EnsureBody);
+                var requestedHolder = body.RootElement.GetProperty("walletHolder");
+                var holderName = requestedHolder.GetProperty("holderName").GetString();
+                var holderType = requestedHolder.GetProperty("holderType").GetString();
                 var firstType = _existingWalletType ?? "jeeb";
                 return Json(
                     $"{{\"walletHolder\":{{\"holderId\":\"{HolderId:D}\",\"holderName\":\"{holderName}\",\"holderType\":\"{holderType}\",\"isActive\":true}},"

@@ -18,12 +18,12 @@ public sealed class PartnerStateServiceStoreTests
     {
         var store = WalletStore();
         var key = new PartnerOperationKey(PartnerOperationType.Topup, PartnerId, "idem-12345678");
-        var intent = new PartnerOperationIntent(PartnerId, JeeberId, 25d, null);
+        var intent = new PartnerOperationIntent(PartnerId, JeeberId, 25m, null);
         var result = new PartnerWalletMoveResponse
         {
             TransactionId = Guid.NewGuid(),
-            Amount = 25d,
-            Fees = 1d,
+            Amount = 25m,
+            Fees = 1m,
         };
 
         (await store.TryClaimAsync(key, intent, default)).Kind.Should().Be(PartnerClaimKind.Won);
@@ -39,7 +39,7 @@ public sealed class PartnerStateServiceStoreTests
     {
         var store = WalletStore();
         var key = new PartnerOperationKey(PartnerOperationType.Topup, PartnerId, "idem-retry-1234");
-        var intent = new PartnerOperationIntent(PartnerId, JeeberId, 25d, null);
+        var intent = new PartnerOperationIntent(PartnerId, JeeberId, 25m, null);
 
         (await store.TryClaimAsync(key, intent, default)).Kind.Should().Be(PartnerClaimKind.Won);
         await store.ReleaseAsync(key, default);
@@ -55,7 +55,7 @@ public sealed class PartnerStateServiceStoreTests
         var id = await store.IssueAsync(
             PartnerId,
             JeeberId,
-            75d,
+            75m,
             Hash("123456"),
             DateTimeOffset.UtcNow.AddMinutes(5),
             default);
@@ -63,13 +63,13 @@ public sealed class PartnerStateServiceStoreTests
         for (var attempt = 1; attempt <= PartnerOtpChallengePolicy.MaxAttempts; attempt++)
         {
             var verdict = await store.ValidateAndConsumeAsync(
-                id, PartnerId, JeeberId, 75d, Hash("000000"), default);
+                id, PartnerId, JeeberId, 75m, Hash("000000"), default);
             verdict.Outcome.Should().Be(PartnerOtpOutcome.WrongCode);
             verdict.AttemptsRemaining.Should().Be(PartnerOtpChallengePolicy.MaxAttempts - attempt);
         }
 
         var exhausted = await store.ValidateAndConsumeAsync(
-            id, PartnerId, JeeberId, 75d, Hash("123456"), default);
+            id, PartnerId, JeeberId, 75m, Hash("123456"), default);
         exhausted.Outcome.Should().Be(PartnerOtpOutcome.Exhausted);
     }
 
@@ -80,14 +80,14 @@ public sealed class PartnerStateServiceStoreTests
         var id = await store.IssueAsync(
             PartnerId,
             JeeberId,
-            75d,
+            75m,
             Hash("123456"),
             DateTimeOffset.UtcNow.AddMinutes(5),
             default);
 
         var submits = await Task.WhenAll(
-            store.ValidateAndConsumeAsync(id, PartnerId, JeeberId, 75d, Hash("123456"), default),
-            store.ValidateAndConsumeAsync(id, PartnerId, JeeberId, 75d, Hash("123456"), default));
+            store.ValidateAndConsumeAsync(id, PartnerId, JeeberId, 75m, Hash("123456"), default),
+            store.ValidateAndConsumeAsync(id, PartnerId, JeeberId, 75m, Hash("123456"), default));
 
         submits.Select(x => x.Outcome).Should().ContainSingle(x => x == PartnerOtpOutcome.Valid);
         submits.Select(x => x.Outcome).Should().ContainSingle(x => x == PartnerOtpOutcome.Consumed);

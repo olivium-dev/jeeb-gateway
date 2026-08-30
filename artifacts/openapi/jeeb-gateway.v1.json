@@ -25817,8 +25817,21 @@
               }
             }
           },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
           "404": {
-            "description": "Not Found",
+            "description": "Not Found"
+          },
+          "502": {
+            "description": "Bad Gateway",
             "content": {
               "application/json": {
                 "schema": {
@@ -34373,6 +34386,122 @@
           }
         ]
       }
+    },
+    "/dev/partner/credentials/{identifier}": {
+      "delete": {
+        "tags": [
+          "PartnerAuthDev"
+        ],
+        "summary": "Partner auth dev: Remove credential",
+        "operationId": "PartnerAuthDevController_RemoveCredential_DELETE_dev_partner_credentials_identifier",
+        "parameters": [
+          {
+            "name": "identifier",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "holderId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found"
+          },
+          "409": {
+            "description": "Conflict",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "Bad Gateway",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
+    },
+    "/dev/wallets/jeeber/{holderId}/ensure": {
+      "put": {
+        "tags": [
+          "Dev"
+        ],
+        "summary": "Dev: Ensure jeeber wallet",
+        "operationId": "DevController_EnsureJeeberWallet_PUT_dev_wallets_jeeber_holderId_ensure",
+        "parameters": [
+          {
+            "name": "holderId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "No Content"
+          },
+          "400": {
+            "description": "Bad Request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Not Found"
+          },
+          "502": {
+            "description": "Bad Gateway",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProblemDetails"
+                }
+              }
+            }
+          }
+        },
+        "security": []
+      }
     }
   },
   "components": {
@@ -41732,9 +41861,11 @@
         "type": "object",
         "properties": {
           "amount": {
+            "maximum": 79228162514264337593543950335,
             "minimum": 0.01,
             "type": "number",
-            "format": "double"
+            "format": "double",
+            "multipleOf": 0.01
           },
           "evidenceNote": {
             "maxLength": 280,
@@ -41852,9 +41983,11 @@
             "format": "uuid"
           },
           "amount": {
+            "maximum": 79228162514264337593543950335,
             "minimum": 0.01,
             "type": "number",
-            "format": "double"
+            "format": "double",
+            "multipleOf": 0.01
           }
         },
         "additionalProperties": false
@@ -41911,9 +42044,11 @@
             "format": "uuid"
           },
           "amount": {
+            "maximum": 79228162514264337593543950335,
             "minimum": 0.01,
             "type": "number",
-            "format": "double"
+            "format": "double",
+            "multipleOf": 0.01
           },
           "idempotencyKey": {
             "maxLength": 128,
@@ -41947,14 +42082,19 @@
             "format": "uuid"
           },
           "amount": {
+            "maximum": 79228162514264337593543950335,
             "minimum": 0.01,
             "type": "number",
-            "format": "double"
+            "format": "double",
+            "multipleOf": 0.01
           }
         },
         "additionalProperties": false
       },
       "PartnerTopupPreviewResponse": {
+        "required": [
+          "otpRequired"
+        ],
         "type": "object",
         "properties": {
           "jeeberId": {
@@ -41972,6 +42112,9 @@
           "netToJeeber": {
             "type": "number",
             "format": "double"
+          },
+          "otpRequired": {
+            "type": "boolean"
           },
           "summary": {
             "type": "string",

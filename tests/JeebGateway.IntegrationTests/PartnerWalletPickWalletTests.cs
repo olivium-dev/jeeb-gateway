@@ -38,7 +38,7 @@ public sealed class PartnerWalletPickWalletTests
         var wallet = Wallet(Currency, "main", isActive: false);
         var svc = Service(new StubWalletClient { HolderWallets = { wallet } });
 
-        var act = async () => await svc.ExecuteTopupAsync(PartnerId, TargetHolderId, 10d, "idem-1", null, default);
+        var act = async () => await svc.ExecuteTopupAsync(PartnerId, TargetHolderId, 10m, "idem-1", null, default);
 
         await act.Should().ThrowAsync<PartnerWalletException>();
     }
@@ -58,26 +58,26 @@ public sealed class PartnerWalletPickWalletTests
     {
         var svc = Service(new StubWalletClient
         {
-            HolderWallets = { Wallet(Currency, "main", isActive: false, amount: 500d) },
+            HolderWallets = { Wallet(Currency, "main", isActive: false, amount: 500m) },
         });
 
         var result = await svc.GetPartnerBalanceAsync(PartnerId, default);
 
-        result.Balance.Should().Be(0d, "the only wallet is deactivated, so nothing is spendable");
+        result.Balance.Should().Be(0m, "the only wallet is deactivated, so nothing is spendable");
     }
 
     [Fact]
     public async Task An_Active_Wallet_Is_Selected_Over_A_Deactivated_One_Earlier_In_The_List()
     {
-        var active = Wallet(Currency, "main", isActive: true, amount: 42d);
+        var active = Wallet(Currency, "main", isActive: true, amount: 42m);
         var stub = new StubWalletClient
         {
-            HolderWallets = { Wallet(Currency, "main", isActive: false, amount: 500d), active },
+            HolderWallets = { Wallet(Currency, "main", isActive: false, amount: 500m), active },
         };
 
         var result = await Service(stub).GetPartnerBalanceAsync(PartnerId, default);
 
-        result.Balance.Should().Be(42d);
+        result.Balance.Should().Be(42m);
     }
 
     // ── the wrong-currency fallback is gone ───────────────────────────────────────────────────
@@ -87,7 +87,7 @@ public sealed class PartnerWalletPickWalletTests
     {
         var svc = Service(new StubWalletClient { HolderWallets = { Wallet(OtherCurrency, "main", true) } });
 
-        var act = async () => await svc.ExecuteTopupAsync(PartnerId, TargetHolderId, 10d, "idem-2", null, default);
+        var act = async () => await svc.ExecuteTopupAsync(PartnerId, TargetHolderId, 10m, "idem-2", null, default);
 
         await act.Should().ThrowAsync<PartnerWalletException>();
     }
@@ -98,7 +98,7 @@ public sealed class PartnerWalletPickWalletTests
         // The exact live failure mode: the only wallet is a system wallet in a foreign currency.
         var svc = Service(new StubWalletClient { HolderWallets = { Wallet(OtherCurrency, SystemType, true) } });
 
-        var act = async () => await svc.ExecuteTopupAsync(PartnerId, TargetHolderId, 10d, "idem-3", null, default);
+        var act = async () => await svc.ExecuteTopupAsync(PartnerId, TargetHolderId, 10m, "idem-3", null, default);
 
         await act.Should().ThrowAsync<PartnerWalletException>();
     }
@@ -120,7 +120,7 @@ public sealed class PartnerWalletPickWalletTests
     {
         var svc = Service(new StubWalletClient { HolderWallets = { Wallet(Currency, SystemType, true) } });
 
-        var act = async () => await svc.ExecuteTopupAsync(PartnerId, TargetHolderId, 10d, "idem-4", null, default);
+        var act = async () => await svc.ExecuteTopupAsync(PartnerId, TargetHolderId, 10m, "idem-4", null, default);
 
         await act.Should().ThrowAsync<PartnerWalletException>();
     }
@@ -139,11 +139,13 @@ public sealed class PartnerWalletPickWalletTests
         };
 
         await Service(stub).CreditPartnerFromCashAsync(
-            PartnerId, OperatorId, 25d, "idem-5", "cash at counter", default);
+            PartnerId, OperatorId, 25m, "idem-5", "cash at counter", default);
 
         var source = stub.LastInitiated!.Transactions.First().SourceWalletId;
         source.Should().Be(systemWallet.WalletId, "the system source is chosen by Type");
         source.Should().NotBe(decoy.WalletId, "position 0 must not decide the system source");
+        stub.LastInitiated.ApplyConfiguredFees.Should().BeFalse(
+            "cash-credit must explicitly suppress wallet-service's configured fee default");
     }
 
     [Fact]
@@ -158,7 +160,7 @@ public sealed class PartnerWalletPickWalletTests
         };
 
         await Service(stub).CreditPartnerFromCashAsync(
-            PartnerId, OperatorId, 25d, "idem-6", "cash at counter", default);
+            PartnerId, OperatorId, 25m, "idem-6", "cash at counter", default);
 
         stub.LastInitiated!.Transactions.First().SourceWalletId.Should().Be(active.WalletId);
     }
@@ -175,7 +177,7 @@ public sealed class PartnerWalletPickWalletTests
         };
 
         await Service(stub).CreditPartnerFromCashAsync(
-            PartnerId, OperatorId, 25d, "idem-11", "cash at counter", default);
+            PartnerId, OperatorId, 25m, "idem-11", "cash at counter", default);
 
         stub.LastInitiated!.Transactions.First().SourceWalletId.Should().Be(systemWallet.WalletId);
     }
@@ -190,7 +192,7 @@ public sealed class PartnerWalletPickWalletTests
         };
 
         var act = async () => await Service(stub).CreditPartnerFromCashAsync(
-            PartnerId, OperatorId, 25d, "idem-7", "cash at counter", default);
+            PartnerId, OperatorId, 25m, "idem-7", "cash at counter", default);
 
         await act.Should().ThrowAsync<PartnerWalletException>();
     }
@@ -201,7 +203,7 @@ public sealed class PartnerWalletPickWalletTests
         var stub = new StubWalletClient { HolderWallets = { Wallet(Currency, "main", isActive: false) } };
 
         var act = async () => await Service(stub).ExecuteTopupAsync(
-            PartnerId, TargetHolderId, 10d, "idem-8", null, default);
+            PartnerId, TargetHolderId, 10m, "idem-8", null, default);
 
         await act.Should().ThrowAsync<PartnerWalletException>();
         stub.InitiateCount.Should().Be(0, "selection fails before the saga starts");
@@ -216,7 +218,7 @@ public sealed class PartnerWalletPickWalletTests
         // sufficiency guard and the partner path would disagree about what is spendable.
         var svc = Service(new StubWalletClient { HolderWallets = { Wallet(Currency, "cod_float", true) } });
 
-        var act = async () => await svc.ExecuteTopupAsync(PartnerId, TargetHolderId, 10d, "idem-10", null, default);
+        var act = async () => await svc.ExecuteTopupAsync(PartnerId, TargetHolderId, 10m, "idem-10", null, default);
 
         await act.Should().ThrowAsync<PartnerWalletException>();
     }
@@ -228,12 +230,12 @@ public sealed class PartnerWalletPickWalletTests
         // type must stay spendable — an invented allow-list here would strand real balances.
         var svc = Service(new StubWalletClient
         {
-            HolderWallets = { Wallet(Currency, "general", isActive: true, amount: 31d) },
+            HolderWallets = { Wallet(Currency, "general", isActive: true, amount: 31m) },
         });
 
         var result = await svc.GetPartnerBalanceAsync(PartnerId, default);
 
-        result.Balance.Should().Be(31d);
+        result.Balance.Should().Be(31m);
     }
 
     // ── documented posture: an unclassified (blank) Type degrades OPEN ─────────────────────────
@@ -243,12 +245,12 @@ public sealed class PartnerWalletPickWalletTests
     {
         var svc = Service(new StubWalletClient
         {
-            HolderWallets = { Wallet(Currency, type: null, isActive: true, amount: 7d) },
+            HolderWallets = { Wallet(Currency, type: null, isActive: true, amount: 7m) },
         });
 
         var result = await svc.GetPartnerBalanceAsync(PartnerId, default);
 
-        result.Balance.Should().Be(7d, "wallet-service types the field as optional with no enum");
+        result.Balance.Should().Be(7m, "wallet-service types the field as optional with no enum");
     }
 
     [Fact]
@@ -263,19 +265,53 @@ public sealed class PartnerWalletPickWalletTests
             },
         });
 
-        var act = async () => await svc.ExecuteTopupAsync(PartnerId, TargetHolderId, 10d, "idem-9", null, default);
+        var act = async () => await svc.ExecuteTopupAsync(PartnerId, TargetHolderId, 10m, "idem-9", null, default);
 
         await act.Should().ThrowAsync<PartnerWalletException>();
     }
 
+    [Fact]
+    public async Task Missing_Holder_Type_Is_Rejected_Fail_Closed()
+    {
+        var wallet = new StubWalletClient
+        {
+            HolderTypeOverride = string.Empty,
+            HolderWallets = { Wallet(Currency, "main", isActive: true) },
+        };
+
+        var act = async () => await Service(wallet)
+            .ExecuteTopupAsync(PartnerId, TargetHolderId, 10m, "idem-type-missing", null, default);
+
+        await act.Should().ThrowAsync<PartnerWalletException>()
+            .WithMessage("*not an eligible partner target*");
+        wallet.InitiateCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Cross_Type_Jeeber_Destination_Is_Rejected_Before_Money_Move()
+    {
+        var wallet = new StubWalletClient
+        {
+            TargetHolderTypeOverride = "partner",
+            HolderWallets = { Wallet(Currency, "main", isActive: true) },
+        };
+
+        var act = async () => await Service(wallet)
+            .ExecuteTopupAsync(PartnerId, TargetHolderId, 10m, "idem-type-cross", null, default);
+
+        await act.Should().ThrowAsync<PartnerWalletException>()
+            .WithMessage("*not an eligible jeeber target*");
+        wallet.InitiateCount.Should().Be(0);
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────────────────────────
 
-    private static Wallet Wallet(int currency, string? type, bool isActive, double amount = 100d)
+    private static Wallet Wallet(int currency, string? type, bool isActive, decimal amount = 100m)
         => new()
         {
             WalletId = Guid.NewGuid(),
             CurrencyID = currency,
-            Amount = amount,
+            Amount = (double)amount,
             Type = type!,
             IsActive = isActive,
         };
@@ -297,6 +333,8 @@ public sealed class PartnerWalletPickWalletTests
         public List<Wallet> SystemWallets { get; } = new();
         public TransactionRequest? LastInitiated { get; private set; }
         public int InitiateCount { get; private set; }
+        public string? HolderTypeOverride { get; init; }
+        public string? TargetHolderTypeOverride { get; init; }
 
         public StubWalletClient() : base("http://localhost", new HttpClient())
         {
@@ -305,7 +343,14 @@ public sealed class PartnerWalletPickWalletTests
         public override Task<GetHolderWallets> WalletsAsync(Guid holderId)
             => Task.FromResult(new GetHolderWallets
             {
-                WalletHolder = new WalletHolder { HolderId = holderId, HolderName = "stub", IsActive = true },
+                WalletHolder = new WalletHolder
+                {
+                    HolderId = holderId,
+                    HolderName = "stub",
+                    IsActive = true,
+                    HolderType = HolderTypeOverride
+                        ?? (holderId == TargetHolderId ? TargetHolderTypeOverride ?? "jeeber" : "partner"),
+                },
                 Wallets = HolderWallets,
             });
 
@@ -324,7 +369,9 @@ public sealed class PartnerWalletPickWalletTests
         public override Task<ExpectedTransaction> PredictAsync(TransactionRequest body, CancellationToken ct)
             => PredictAsync(body);
 
-        public override Task<Transaction> InitiateAsync(TransactionRequest body)
+        public override Task<Transaction> InitiateAsync(
+            string idempotencyKey,
+            TransactionRequest body)
         {
             InitiateCount++;
             LastInitiated = body;
@@ -334,8 +381,11 @@ public sealed class PartnerWalletPickWalletTests
             });
         }
 
-        public override Task<Transaction> InitiateAsync(TransactionRequest body, CancellationToken ct)
-            => InitiateAsync(body);
+        public override Task<Transaction> InitiateAsync(
+            string idempotencyKey,
+            TransactionRequest body,
+            CancellationToken ct)
+            => InitiateAsync(idempotencyKey, body);
 
         public override Task ExecuteAsync(Guid transactionHeaderId) => Task.CompletedTask;
         public override Task ExecuteAsync(Guid transactionHeaderId, CancellationToken ct) => Task.CompletedTask;

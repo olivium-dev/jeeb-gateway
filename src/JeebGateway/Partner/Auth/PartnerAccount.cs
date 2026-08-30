@@ -10,4 +10,12 @@ namespace JeebGateway.Partner.Auth;
 /// <param name="HolderId">The partner's user-management userId, which IS the wallet holder id.</param>
 /// <param name="Login">The login handle that was verified (echoed back as a profile basic).</param>
 /// <param name="DisplayName">Human display name for the signed-in partner.</param>
-public sealed record PartnerAccount(Guid HolderId, string Login, string DisplayName);
+/// <param name="RuntimeSessionExpiresAt">
+/// Non-null only for the one-shot, short-lived Dev Tool credential. Token issuance is bounded to
+/// this deadline so a missed cleanup cannot leave a long-lived demo session.
+/// </param>
+public sealed record PartnerAccount(
+    Guid HolderId,
+    string Login,
+    string DisplayName,
+    DateTimeOffset? RuntimeSessionExpiresAt = null);

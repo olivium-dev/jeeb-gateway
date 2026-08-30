@@ -3,7 +3,8 @@ namespace JeebGateway.Tokens;
 /// <summary>
 /// JWT token rotation policy for T-backend-043. Bound from the "Jwt"
 /// configuration section. Defaults encode the MVP security policy:
-///   - access  token: 15 minutes (short-lived, no revocation list lookup)
+///   - access  token: 15 minutes (ordinary sessions); bounded dev sessions additionally
+///     resolve their linked refresh row and durable revocation tombstone on every request
 ///   - refresh token: 30 days, single-use, rotated on every refresh
 /// </summary>
 public class JwtOptions

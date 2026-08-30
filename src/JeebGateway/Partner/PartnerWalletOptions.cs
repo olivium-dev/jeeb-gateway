@@ -45,21 +45,21 @@ public sealed class PartnerWalletOptions
     /// any wallet-service call — a cheap guardrail against fat-finger amounts, NOT a fee rule. The
     /// authoritative limits (balance, fees, BR caps) remain wallet-service's.
     /// </summary>
-    [Range(0.01, double.MaxValue)]
-    public double MaxTransferAmount { get; init; } = 100_000d;
+    [Range(typeof(decimal), "0.01", "79228162514264337593543950335")]
+    public decimal MaxTransferAmount { get; init; } = 100_000m;
 
     /// <summary>
     /// PP-7 OTP step-up threshold (config key <c>PartnerWallet__OtpStepUpThreshold</c>). A
-    /// partner→jeeber top-up whose gross Amount is STRICTLY ABOVE this value requires a one-time
+    /// partner→jeeber top-up whose net Amount is STRICTLY ABOVE this value requires a one-time
     /// step-up code (challenge → verify) before it executes; an amount AT OR BELOW it flows unchanged
     /// (backward compatible — an existing client that never sends the OTP fields is unaffected).
     /// Default 50 is an owner-gated assumption (surfaced, not decided). Amounts compared here are the
-    /// transfer's gross Amount in the partner wallet currency. Same <see cref="RangeAttribute"/>
+    /// transfer's net Amount in the partner wallet currency. Same <see cref="RangeAttribute"/>
     /// fail-fast style as <see cref="MaxTransferAmount"/> so a mis-configured threshold fails the host
     /// loudly at startup rather than at first high-value move (dotnet-options-pattern skill).
     /// </summary>
-    [Range(0.01, double.MaxValue)]
-    public double OtpStepUpThreshold { get; init; } = 50d;
+    [Range(typeof(decimal), "0.01", "79228162514264337593543950335")]
+    public decimal OtpStepUpThreshold { get; init; } = 50m;
 
     // ── BOPLA / target-type guard (OWASP API3) ──────────────────────────────────────────────
     //
@@ -67,23 +67,15 @@ public sealed class PartnerWalletOptions
     // holder GUID. Without a type check a partner could direct their own money into ANY provisioned
     // wallet (another partner, a customer, an admin), and the route/DTO name "jeeber" would misstate
     // the enforced constraint. When ENABLED, a move is rejected unless the destination/source holder's
-    // wallet-service HolderType is in the configured set for its role.
+    // wallet-service HolderType MUST be in the configured set for its role. This
+    // guard is mandatory and fail-closed; money routes cannot be configured back
+    // to accepting an arbitrary provisioned holder GUID.
 
-    /// <summary>
-    /// When <c>true</c>, enforce that a top-up destination is a jeeber and an admin-credit target is a
-    /// partner (verified against wallet-service <c>WalletHolder.HolderType</c>). DEFAULT <c>false</c>:
-    /// the enforced vocabulary depends on wallet-service's holder-type tokens, which are pending owner
-    /// confirmation (Q5). Until then the "any provisioned wallet" trust boundary is documented and
-    /// accepted; flip this on (and set the token lists below) once Q5 is answered. Enforcement only
-    /// ever REJECTS a confirmed-mismatch holder — an empty/unknown HolderType degrades open with a log.
-    /// </summary>
-    public bool EnforceHolderType { get; init; } = false;
-
-    /// <summary>Comma-separated wallet-service <c>HolderType</c> tokens that count as a jeeber (top-up destination).</summary>
+    /// <summary>Comma-separated authoritative holder types accepted as Jeeber top-up destinations.</summary>
     [Required, MinLength(1), MaxLength(128)]
     public string JeeberHolderTypes { get; init; } = "jeeber";
 
-    /// <summary>Comma-separated wallet-service <c>HolderType</c> tokens that count as a partner (admin-credit target).</summary>
+    /// <summary>Comma-separated authoritative holder types accepted as partner cash-credit targets.</summary>
     [Required, MinLength(1), MaxLength(128)]
     public string PartnerHolderTypes { get; init; } = "partner";
 

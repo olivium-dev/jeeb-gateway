@@ -15,9 +15,9 @@ public sealed class PartnerTopupPredictRequest
     [Required]
     public Guid JeeberId { get; init; }
 
-    /// <summary>The gross amount the partner intends to move into the jeeber wallet.</summary>
-    [Range(0.01, double.MaxValue, ErrorMessage = "amount must be greater than 0.")]
-    public double Amount { get; init; }
+    /// <summary>The net amount the partner intends to credit into the jeeber wallet.</summary>
+    [Range(typeof(decimal), "0.01", "79228162514264337593543950335"), MoneyAmount]
+    public decimal Amount { get; init; }
 }
 
 /// <summary>Execute a partner→jeeber top-up (POST v1/partner/wallet/transfers).</summary>
@@ -27,9 +27,9 @@ public sealed class PartnerTopupExecuteRequest
     [Required]
     public Guid JeeberId { get; init; }
 
-    /// <summary>The gross amount to move from the partner wallet into the jeeber wallet.</summary>
-    [Range(0.01, double.MaxValue, ErrorMessage = "amount must be greater than 0.")]
-    public double Amount { get; init; }
+    /// <summary>The net amount to move from the partner wallet into the jeeber wallet.</summary>
+    [Range(typeof(decimal), "0.01", "79228162514264337593543950335"), MoneyAmount]
+    public decimal Amount { get; init; }
 
     /// <summary>
     /// Client-supplied idempotency key so a retried confirm does not double-move money. Echoed to
@@ -43,7 +43,7 @@ public sealed class PartnerTopupExecuteRequest
     public string? Note { get; init; }
 
     /// <summary>
-    /// PP-7 OTP step-up. OPTIONAL: consulted only when the gross <see cref="Amount"/> is ABOVE
+    /// PP-7 OTP step-up. OPTIONAL: consulted only when the net <see cref="Amount"/> is ABOVE
     /// <see cref="PartnerWalletOptions.OtpStepUpThreshold"/>. The challenge id returned by
     /// POST v1/partner/wallet/transfers/otp/challenge. Ignored for at-or-below-threshold transfers
     /// (backward compatible — no <c>[Required]</c>, so an existing client that never sends it is
@@ -60,7 +60,7 @@ public sealed class PartnerTopupExecuteRequest
 
 /// <summary>
 /// PP-7 step 1: request a one-time step-up code for a partner→jeeber top-up above the OTP threshold
-/// (POST v1/partner/wallet/transfers/otp/challenge). The gross <see cref="Amount"/> and
+/// (POST v1/partner/wallet/transfers/otp/challenge). The net <see cref="Amount"/> and
 /// <see cref="JeeberId"/> must match the subsequent transfer EXACTLY, or verification fails
 /// (403 otp-invalid). An amount at or below the threshold is refused here (400 otp-not-required) so
 /// the portal never shows an OTP step it does not need.
@@ -71,9 +71,9 @@ public sealed class PartnerOtpChallengeRequest
     [Required]
     public Guid JeeberId { get; init; }
 
-    /// <summary>The gross amount the code will authorize (must match the confirm's Amount exactly).</summary>
-    [Range(0.01, double.MaxValue, ErrorMessage = "amount must be greater than 0.")]
-    public double Amount { get; init; }
+    /// <summary>The net amount the code will authorize (must match the confirm's Amount exactly).</summary>
+    [Range(typeof(decimal), "0.01", "79228162514264337593543950335"), MoneyAmount]
+    public decimal Amount { get; init; }
 }
 
 /// <summary>
@@ -83,8 +83,8 @@ public sealed class PartnerOtpChallengeRequest
 public sealed class PartnerCashCreditRequest
 {
     /// <summary>The cash amount received from the partner, to credit into the partner wallet.</summary>
-    [Range(0.01, double.MaxValue, ErrorMessage = "amount must be greater than 0.")]
-    public double Amount { get; init; }
+    [Range(typeof(decimal), "0.01", "79228162514264337593543950335"), MoneyAmount]
+    public decimal Amount { get; init; }
 
     /// <summary>
     /// MANDATORY evidence note (receipt no. / handover reference / who received the cash). Recorded
@@ -110,7 +110,7 @@ public sealed class PartnerWalletBalanceResponse
 {
     public Guid PartnerId { get; init; }
     public string? PartnerName { get; init; }
-    public double Balance { get; init; }
+    public decimal Balance { get; init; }
     public int CurrencyId { get; init; }
     public bool IsActive { get; init; }
 }
@@ -119,10 +119,16 @@ public sealed class PartnerWalletBalanceResponse
 public sealed class PartnerTopupPreviewResponse
 {
     public Guid JeeberId { get; init; }
-    public double GrossAmount { get; init; }
-    /// <summary>Fees as computed by wallet-service (NOT the gateway). Flows to the system wallet.</summary>
-    public double Fees { get; init; }
-    public double NetToJeeber { get; init; }
+    public decimal GrossAmount { get; init; }
+    /// <summary>Fees as computed by wallet-service (NOT the gateway); zero while fee legs are disabled.</summary>
+    public decimal Fees { get; init; }
+    public decimal NetToJeeber { get; init; }
+    /// <summary>
+    /// Whether this exact net credit amount requires the configured OTP step-up. This is gateway-authored
+    /// because <c>PartnerWallet:OtpStepUpThreshold</c> is an environment policy, not a client constant.
+    /// </summary>
+    [Required]
+    public bool OtpRequired { get; init; }
     public string? Summary { get; init; }
 }
 
@@ -148,8 +154,13 @@ public sealed class PartnerOtpChallengeResponse
 public sealed class PartnerWalletMoveResponse
 {
     public Guid TransactionId { get; init; }
-    public double Amount { get; init; }
-    public double Fees { get; init; }
+    /// <summary>
+    /// Net amount credited to the destination. Configured fees, when enabled, are separate wallet
+    /// legs and are reported by <see cref="Fees"/>; they are never subtracted from this amount.
+    /// </summary>
+    public decimal Amount { get; init; }
+    /// <summary>Separate provider-authored fee legs; gross debit is <c>Amount + Fees</c>.</summary>
+    public decimal Fees { get; init; }
     public string Status { get; init; } = "executed";
 }
 
@@ -159,6 +170,19 @@ public sealed class PartnerJeeberTargetResponse
     public Guid JeeberId { get; init; }
     public bool HasWallet { get; init; }
     public string? JeeberName { get; init; }
+}
+
+/// <summary>Validates current Jeeb wallet money as positive major units with at most two decimals.</summary>
+[AttributeUsage(AttributeTargets.Property | AttributeTargets.Parameter)]
+public sealed class MoneyAmountAttribute : ValidationAttribute
+{
+    public MoneyAmountAttribute() =>
+        ErrorMessage = "amount must be at least 0.01 and have at most two decimal places.";
+
+    public override bool IsValid(object? value) =>
+        value is decimal amount
+        && amount >= 0.01m
+        && decimal.Round(amount, 2, MidpointRounding.ToEven) == amount;
 }
 
 /// <summary>

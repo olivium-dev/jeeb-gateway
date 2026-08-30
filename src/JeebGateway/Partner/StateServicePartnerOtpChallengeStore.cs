@@ -12,7 +12,6 @@ namespace JeebGateway.Partner;
 /// </summary>
 public sealed class StateServicePartnerOtpChallengeStore : IPartnerOtpChallengeStore
 {
-    private const double AmountEpsilon = 0.00005d;
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     private readonly IIdempotencyStore _state;
@@ -27,7 +26,7 @@ public sealed class StateServicePartnerOtpChallengeStore : IPartnerOtpChallengeS
     public async Task<Guid> IssueAsync(
         Guid partnerId,
         Guid jeeberId,
-        double amount,
+        decimal amount,
         string codeHash,
         DateTimeOffset expiresAt,
         CancellationToken ct)
@@ -53,7 +52,7 @@ public sealed class StateServicePartnerOtpChallengeStore : IPartnerOtpChallengeS
         Guid challengeId,
         Guid partnerId,
         Guid jeeberId,
-        double amount,
+        decimal amount,
         string codeHash,
         CancellationToken ct)
     {
@@ -66,7 +65,7 @@ public sealed class StateServicePartnerOtpChallengeStore : IPartnerOtpChallengeS
 
         if (challenge.PartnerId != partnerId
             || challenge.JeeberId != jeeberId
-            || Math.Abs(challenge.Amount - amount) >= AmountEpsilon)
+            || challenge.Amount != amount)
         {
             return new PartnerOtpValidation(PartnerOtpOutcome.Mismatch, 0);
         }
@@ -154,7 +153,7 @@ public sealed class StateServicePartnerOtpChallengeStore : IPartnerOtpChallengeS
     private sealed record StoredChallenge(
         Guid PartnerId,
         Guid JeeberId,
-        double Amount,
+        decimal Amount,
         string CodeHash,
         DateTimeOffset ExpiresAt);
 }
