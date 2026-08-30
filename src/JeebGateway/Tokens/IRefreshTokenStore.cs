@@ -33,6 +33,17 @@ public interface IRefreshTokenStore
     Task<int> RevokeAllForUserAsync(string userId, RevocationReason reason, CancellationToken ct);
 
     /// <summary>
+    /// Writes/reads a short-lived durable tombstone for bounded Dev Tool sessions. This closes
+    /// the cross-replica race where DELETE wins just before a concurrent token row is added.
+    /// </summary>
+    Task MarkBoundedSessionRevokedAsync(string userId, CancellationToken ct) =>
+        throw new NotSupportedException(
+            "This refresh-token store does not implement bounded-session revocation.");
+    Task<bool> IsBoundedSessionRevokedAsync(string userId, CancellationToken ct) =>
+        throw new NotSupportedException(
+            "This refresh-token store does not implement bounded-session revocation.");
+
+    /// <summary>
     /// Walk the rotation chain from <paramref name="startTokenId"/> and
     /// revoke every token that is or was active for the owning user.
     /// Invoked when reuse of a rotated token is detected.

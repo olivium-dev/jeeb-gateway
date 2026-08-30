@@ -37,6 +37,7 @@ public class RefreshToken
     /// </summary>
     public string? IdentityProvider { get; init; }
     public DateTimeOffset? AuthenticationSessionExpiresAt { get; init; }
+    public DateTimeOffset? AbsoluteSessionExpiresAt { get; init; }
     public string? DisplayName { get; init; }
     public string? Email { get; init; }
     public IReadOnlyList<string>? RoleSnapshot { get; init; }
@@ -61,4 +62,5 @@ public enum RevocationReason
     AccountDeleted,
     Reauthenticated,
     LegacyPhoneSubject,
+    DevCredentialRemoved,
 }

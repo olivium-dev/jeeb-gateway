@@ -11,6 +11,15 @@ public interface ITokenService
         VerifiedAuthenticationContext? authentication,
         CancellationToken ct) => IssueAsync(userId, roles, ct);
 
+    Task<TokenPair> IssueBoundedAsync(
+        string userId,
+        IEnumerable<string> roles,
+        string activeRole,
+        DateTimeOffset absoluteSessionExpiresAt,
+        CancellationToken ct) =>
+        throw new NotSupportedException(
+            "This token service does not implement bounded runtime sessions.");
+
     /// <summary>
     /// Rotate a refresh token: validate, revoke the presented one, and
     /// return a fresh access + refresh pair. Reuse of an already-rotated
@@ -26,6 +35,13 @@ public interface ITokenService
     Task RevokeAsync(string refreshToken, RevocationReason reason, CancellationToken ct);
 
     Task<int> RevokeAllForUserAsync(string userId, RevocationReason reason, CancellationToken ct);
+
+    Task<int> RevokeBoundedSessionForUserAsync(
+        string userId,
+        RevocationReason reason,
+        CancellationToken ct) =>
+        throw new NotSupportedException(
+            "This token service does not implement bounded-session revocation.");
 }
 
 public sealed record TokenRoleContext(

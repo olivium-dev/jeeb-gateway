@@ -14,6 +14,15 @@ public interface IJeeberWalletProvisioner
     Task EnsureAsync(Guid holderId, CancellationToken ct);
 }
 
+/// <summary>
+/// Dev-only partner bootstrap boundary. It converges a real partner holder in wallet-service;
+/// credentials are not exposed until this succeeds.
+/// </summary>
+public interface IPartnerWalletProvisioner
+{
+    Task EnsureAsync(Guid holderId, string holderName, CancellationToken ct);
+}
+
 public sealed class WalletProvisioningUnavailableException : Exception
 {
     public WalletProvisioningUnavailableException(string message, Exception? innerException = null)
@@ -22,30 +31,66 @@ public sealed class WalletProvisioningUnavailableException : Exception
     }
 }
 
-public sealed class WalletServiceJeeberWalletProvisioner : IJeeberWalletProvisioner
+public sealed class WalletServiceJeeberWalletProvisioner :
+    IJeeberWalletProvisioner,
+    IPartnerWalletProvisioner
 {
     public const string HttpClientName = "wallet-holder-provisioning-api";
 
-    private const string DefaultHolderType = "jeeber";
+    private const string JeeberHolderType = "jeeber";
+    private const string PartnerHolderType = "partner";
     private const string DefaultWalletType = "jeeb";
-    private const string ProvisioningNote = "gateway-jeeber-role-activation";
+    private const string JeeberProvisioningNote = "gateway-jeeber-role-activation";
+    private const string PartnerProvisioningNote = "devtool-partner-wallet-bootstrap";
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     private readonly IHttpClientFactory _clients;
 
     public WalletServiceJeeberWalletProvisioner(IHttpClientFactory clients) => _clients = clients;
 
-    public async Task EnsureAsync(Guid holderId, CancellationToken ct)
+    public Task EnsureAsync(Guid holderId, CancellationToken ct) => EnsureAsync(
+        holderId,
+        holderId.ToString("D"),
+        JeeberHolderType,
+        JeeberProvisioningNote,
+        enforceHolderType: true,
+        ct);
+
+    Task IPartnerWalletProvisioner.EnsureAsync(
+        Guid holderId,
+        string holderName,
+        CancellationToken ct) => EnsureAsync(
+            holderId,
+            string.IsNullOrWhiteSpace(holderName) ? holderId.ToString("D") : holderName.Trim(),
+            PartnerHolderType,
+            PartnerProvisioningNote,
+            enforceHolderType: true,
+            ct);
+
+    private async Task EnsureAsync(
+        Guid holderId,
+        string holderName,
+        string holderType,
+        string provisioningNote,
+        bool enforceHolderType,
+        CancellationToken ct)
     {
         if (holderId == Guid.Empty)
-            throw new ArgumentException("The system holder cannot receive a Jeeber wallet.", nameof(holderId));
+            throw new ArgumentException("The system holder cannot receive a user wallet.", nameof(holderId));
 
         var client = _clients.CreateClient(HttpClientName);
         try
         {
             var currencies = await ReadCurrenciesAsync(client, ct);
             var current = await ReadHolderAsync(client, holderId, ct);
-            var request = BuildEnsureRequest(holderId, currencies, current);
+            var request = BuildEnsureRequest(
+                holderId,
+                holderName,
+                holderType,
+                provisioningNote,
+                enforceHolderType,
+                currencies,
+                current);
 
             using var response = await client.PutAsJsonAsync("Wallet/holder/ensure", request, Json, ct);
             await EnsureSuccessAsync(response, "ensure holder wallets", ct);
@@ -54,7 +99,7 @@ public sealed class WalletServiceJeeberWalletProvisioner : IJeeberWalletProvisio
                 ?? throw new WalletProvisioningUnavailableException(
                     "Wallet-service returned an invalid holder provisioning response.");
 
-            VerifyReady(holderId, currencies, ensured);
+            VerifyReady(holderId, holderType, enforceHolderType, currencies, ensured);
         }
         catch (WalletProvisioningUnavailableException)
         {
@@ -117,6 +162,10 @@ public sealed class WalletServiceJeeberWalletProvisioner : IJeeberWalletProvisio
 
     private static EnsureHolderRequest BuildEnsureRequest(
         Guid holderId,
+        string holderName,
+        string holderType,
+        string provisioningNote,
+        bool enforceHolderType,
         IReadOnlyList<WalletCurrency> currencies,
         WalletHolderResponse current)
     {
@@ -141,7 +190,7 @@ public sealed class WalletServiceJeeberWalletProvisioner : IJeeberWalletProvisio
             var walletType = matches.Length == 1 && !string.IsNullOrWhiteSpace(matches[0].Type)
                 ? matches[0].Type
                 : DefaultWalletType;
-            requestedWallets.Add(new EnsureWallet(currency.Id, walletType, ProvisioningNote));
+            requestedWallets.Add(new EnsureWallet(currency.Id, walletType, provisioningNote));
         }
 
         var holder = current.WalletHolder;
@@ -150,17 +199,31 @@ public sealed class WalletServiceJeeberWalletProvisioner : IJeeberWalletProvisio
             throw new WalletProvisioningUnavailableException(
                 "Wallet-service returned a holder id that does not match the requested user.");
         }
+        if (enforceHolderType && holder is not null && string.IsNullOrWhiteSpace(holder.HolderType))
+        {
+            throw new WalletProvisioningUnavailableException(
+                "Existing holder metadata is missing its actor type.");
+        }
+        if (enforceHolderType
+            && holder is not null
+            && !string.Equals(holder.HolderType, holderType, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new WalletProvisioningUnavailableException(
+                $"Holder is already provisioned as '{holder.HolderType}', not '{holderType}'.");
+        }
 
         return new EnsureHolderRequest(
             new WalletHolderPayload(
                 holderId,
-                string.IsNullOrWhiteSpace(holder?.HolderName) ? holderId.ToString("D") : holder.HolderName,
-                string.IsNullOrWhiteSpace(holder?.HolderType) ? DefaultHolderType : holder.HolderType),
+                string.IsNullOrWhiteSpace(holder?.HolderName) ? holderName : holder.HolderName,
+                holder is null ? holderType : holder.HolderType),
             requestedWallets);
     }
 
     private static void VerifyReady(
         Guid holderId,
+        string expectedHolderType,
+        bool enforceHolderType,
         IReadOnlyList<WalletCurrency> currencies,
         WalletHolderResponse response)
     {
@@ -170,6 +233,15 @@ public sealed class WalletServiceJeeberWalletProvisioner : IJeeberWalletProvisio
         {
             throw new WalletProvisioningUnavailableException(
                 "Wallet-service did not return the expected active holder.");
+        }
+        if (enforceHolderType
+            && !string.Equals(
+                response.WalletHolder.HolderType,
+                expectedHolderType,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new WalletProvisioningUnavailableException(
+                "Wallet-service returned a holder with the wrong actor type.");
         }
 
         var active = (response.Wallets ?? Array.Empty<WalletAccount>())

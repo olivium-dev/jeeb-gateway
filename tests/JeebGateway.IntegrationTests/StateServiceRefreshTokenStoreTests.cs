@@ -389,6 +389,22 @@ public sealed class StateServiceRefreshTokenStoreTests
     }
 
     [Fact]
+    public async Task BoundedSessionRevocation_IsVisibleToAColdReplica()
+    {
+        var kv = new FakeIdempotencyStore();
+        var instanceA = NewStore(kv);
+        var instanceB = NewStore(kv);
+
+        (await instanceB.IsBoundedSessionRevokedAsync("runtime-holder", CancellationToken.None))
+            .Should().BeFalse();
+
+        await instanceA.MarkBoundedSessionRevokedAsync("runtime-holder", CancellationToken.None);
+
+        (await instanceB.IsBoundedSessionRevokedAsync("runtime-holder", CancellationToken.None))
+            .Should().BeTrue("the shared tombstone must reject a bounded session on every gateway replica");
+    }
+
+    [Fact]
     public async Task RevokeChain_Revokes_Every_Active_Token_For_The_Owner()
     {
         var kv = new FakeIdempotencyStore();

@@ -123,6 +123,11 @@ public sealed class PartnerTopupPreviewResponse
     /// <summary>Fees as computed by wallet-service (NOT the gateway). Flows to the system wallet.</summary>
     public double Fees { get; init; }
     public double NetToJeeber { get; init; }
+    /// <summary>
+    /// Whether this exact gross amount requires the configured OTP step-up. This is gateway-authored
+    /// because <c>PartnerWallet:OtpStepUpThreshold</c> is an environment policy, not a client constant.
+    /// </summary>
+    public bool OtpRequired { get; init; }
     public string? Summary { get; init; }
 }
 

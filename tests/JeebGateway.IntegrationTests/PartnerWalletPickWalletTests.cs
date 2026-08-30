@@ -144,6 +144,8 @@ public sealed class PartnerWalletPickWalletTests
         var source = stub.LastInitiated!.Transactions.First().SourceWalletId;
         source.Should().Be(systemWallet.WalletId, "the system source is chosen by Type");
         source.Should().NotBe(decoy.WalletId, "position 0 must not decide the system source");
+        stub.LastInitiated.ApplyConfiguredFees.Should().BeFalse(
+            "cash-credit must explicitly suppress wallet-service's configured fee default");
     }
 
     [Fact]

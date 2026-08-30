@@ -29,6 +29,7 @@ public class InMemoryRefreshTokenStore : IRefreshTokenStore
     private readonly ConcurrentDictionary<string, RefreshToken> _byId = new();
     private readonly ConcurrentDictionary<string, string> _hashToId = new();
     private readonly object _writeLock = new();
+    private readonly ConcurrentDictionary<string, DateTimeOffset> _boundedRevocations = new();
 
     public Task AddAsync(RefreshToken token, CancellationToken ct)
     {
@@ -94,6 +95,17 @@ public class InMemoryRefreshTokenStore : IRefreshTokenStore
         }
         return Task.FromResult(count);
     }
+
+    public Task MarkBoundedSessionRevokedAsync(string userId, CancellationToken ct)
+    {
+        _boundedRevocations[userId] = DateTimeOffset.UtcNow.AddMinutes(5);
+        return Task.CompletedTask;
+    }
+
+    public Task<bool> IsBoundedSessionRevokedAsync(string userId, CancellationToken ct) =>
+        Task.FromResult(
+            _boundedRevocations.TryGetValue(userId, out var until)
+            && until > DateTimeOffset.UtcNow);
 
     public Task<int> RevokeChainAsync(string startTokenId, RevocationReason reason, CancellationToken ct)
     {

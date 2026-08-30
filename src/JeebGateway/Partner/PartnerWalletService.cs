@@ -103,6 +103,7 @@ public sealed class PartnerWalletService : IPartnerWalletService
             GrossAmount = gross,
             Fees = fees,
             NetToJeeber = gross - fees,
+            OtpRequired = amount > _options.OtpStepUpThreshold,
             Summary = expected?.Summary,
         };
     }
@@ -149,7 +150,8 @@ public sealed class PartnerWalletService : IPartnerWalletService
         var systemWalletId = await RequireSystemWalletIdAsync(ct);
 
         var request = BuildRequest(systemWalletId, destWalletId, amount, _options.CreditTag,
-            notes: $"cash-credit;operator:{operatorId};evidence:{evidenceNote}");
+            notes: $"cash-credit;operator:{operatorId};evidence:{evidenceNote}",
+            applyConfiguredFees: false);
 
         var key = new PartnerOperationKey(PartnerOperationType.CashCredit, operatorId, idempotencyKey);
         var intent = new PartnerOperationIntent(partnerId, null, amount, evidenceNote);
@@ -343,12 +345,18 @@ public sealed class PartnerWalletService : IPartnerWalletService
     }
 
     private SwTransactionRequest BuildRequest(
-        Guid sourceWalletId, Guid destWalletId, double amount, string tag, string notes)
+        Guid sourceWalletId,
+        Guid destWalletId,
+        double amount,
+        string tag,
+        string notes,
+        bool? applyConfiguredFees = null)
         => new()
         {
             ServiceName = _options.ServiceName,
             Tag = tag,
             Notes = notes,
+            ApplyConfiguredFees = applyConfiguredFees,
             Transactions = new List<SwTransactionDetailsRequest>
             {
                 new()

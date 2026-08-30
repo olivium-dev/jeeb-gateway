@@ -53,6 +53,7 @@ public sealed class StateServiceRefreshTokenStore : IRefreshTokenStore
     internal const string StatusKeyPrefix = "refresh-token-status:";
     internal const string HashKeyPrefix = "refresh-token-hash:";
     internal const string UserKeyPrefix = "refresh-token-user:";
+    internal const string BoundedRevocationKeyPrefix = "bounded-session-revoked:";
 
     /// <summary>90-day TTL (seconds) — outlives the 30-day refresh lifetime.</summary>
     internal const int TtlSeconds = 90 * 24 * 60 * 60;
@@ -198,6 +199,24 @@ public sealed class StateServiceRefreshTokenStore : IRefreshTokenStore
     {
         if (string.IsNullOrWhiteSpace(userId)) return Task.FromResult(0);
         return RevokeActiveForUserAsync(userId.Trim(), reason, ct);
+    }
+
+    public async Task MarkBoundedSessionRevokedAsync(string userId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(userId))
+            throw new ArgumentException("userId is required.", nameof(userId));
+        await _kv.PutOrGetAsync(
+            BoundedRevocationKeyPrefix + userId.Trim(),
+            statusCode: 200,
+            responseBodyJson: "{}",
+            ttlSeconds: 5 * 60,
+            ct);
+    }
+
+    public async Task<bool> IsBoundedSessionRevokedAsync(string userId, CancellationToken ct)
+    {
+        if (string.IsNullOrWhiteSpace(userId)) return false;
+        return await _kv.GetAsync(BoundedRevocationKeyPrefix + userId.Trim(), ct) is not null;
     }
 
     public async Task<int> RevokeChainAsync(string startTokenId, RevocationReason reason, CancellationToken ct)

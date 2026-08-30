@@ -39,9 +39,21 @@ public sealed class PartnerWalletEndpointsTests
     private const string JeeberId = "22222222-2222-2222-2222-222222222222";
     private const string OtherJeeberId = "44444444-4444-4444-4444-444444444444";
 
-    private static WebApplicationFactory<Program> FactoryWithFakeWallet(FakeWalletClient fake)
+    private static WebApplicationFactory<Program> FactoryWithFakeWallet(
+        FakeWalletClient fake, double? otpThreshold = null)
         => new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
-            b.ConfigureTestServices(s => s.AddScoped<SwServiceWalletClient>(_ => fake)));
+        {
+            if (otpThreshold is not null)
+            {
+                b.ConfigureAppConfiguration((_, cfg) => cfg.AddInMemoryCollection(
+                    new Dictionary<string, string?>
+                    {
+                        ["PartnerWallet:OtpStepUpThreshold"] = otpThreshold.Value.ToString(
+                            CultureInfo.InvariantCulture),
+                    }));
+            }
+            b.ConfigureTestServices(s => s.AddScoped<SwServiceWalletClient>(_ => fake));
+        });
 
     /// <summary>
     /// As <see cref="FactoryWithFakeWallet"/> but with <c>Features:DevEndpoints:Enabled=true</c>, so the
@@ -112,6 +124,25 @@ public sealed class PartnerWalletEndpointsTests
         var body = await resp.Content.ReadFromJsonAsync<PreviewDto>();
         body!.Fees.Should().Be(2.5);
         body.NetToJeeber.Should().Be(47.5);
+        body.OtpRequired.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task Partner_Predict_Reports_Configured_Otp_Requirement()
+    {
+        await using var factory = FactoryWithFakeWallet(
+            new FakeWalletClient { PredictFees = 2.5 }, otpThreshold: 10.0);
+        using var client = AsPartner(factory);
+
+        var resp = await client.PostAsJsonAsync("/v1/partner/wallet/transfers/predict", new
+        {
+            jeeberId = JeeberId,
+            amount = 50.0,
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        var body = await resp.Content.ReadFromJsonAsync<PreviewDto>();
+        body!.OtpRequired.Should().BeTrue();
     }
 
     [Fact]
@@ -1125,7 +1156,13 @@ public sealed class PartnerWalletEndpointsTests
     private sealed record PartnerDto(Guid PartnerId, string? Login, string? DisplayName, string? Role);
 
     private sealed record MoveDto(Guid TransactionId, double Amount, double Fees, string Status);
-    private sealed record PreviewDto(Guid JeeberId, double GrossAmount, double Fees, double NetToJeeber, string? Summary);
+    private sealed record PreviewDto(
+        Guid JeeberId,
+        double GrossAmount,
+        double Fees,
+        double NetToJeeber,
+        bool OtpRequired,
+        string? Summary);
 
     /// <summary>
     /// Offline fake — overrides only the (virtual) wallet-service methods the partner BFF calls.

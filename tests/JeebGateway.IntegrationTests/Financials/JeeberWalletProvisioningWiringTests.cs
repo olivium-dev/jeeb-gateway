@@ -49,6 +49,8 @@ public sealed class JeeberWalletProvisioningWiringTests
 
         scope.ServiceProvider.GetRequiredService<IJeeberWalletProvisioner>()
             .Should().BeOfType<WalletServiceJeeberWalletProvisioner>();
+        scope.ServiceProvider.GetRequiredService<IPartnerWalletProvisioner>()
+            .Should().BeOfType<WalletServiceJeeberWalletProvisioner>();
     }
 
     [Fact]

@@ -82,9 +82,25 @@ public sealed class PartnerAuthController : ControllerBase
         }
 
         var userId = account.HolderId.ToString();
-
-        var pair = await _tokens.IssueAsync(
-            userId, new[] { Roles.Partner }, Roles.Partner, authentication: null, ct);
+        TokenPair pair;
+        if (account.RuntimeSessionExpiresAt is { } runtimeExpiresAt)
+        {
+            try
+            {
+                pair = await _tokens.IssueBoundedAsync(
+                    userId, new[] { Roles.Partner }, Roles.Partner, runtimeExpiresAt, ct);
+            }
+            catch (InvalidOperationException)
+            {
+                _log.LogWarning("partner.auth.login rejected a revoked or expired runtime credential.");
+                return InvalidCredentialProblem();
+            }
+        }
+        else
+        {
+            pair = await _tokens.IssueAsync(
+                userId, new[] { Roles.Partner }, Roles.Partner, authentication: null, ct);
+        }
 
         _log.LogInformation("partner.auth.login ok partnerId={PartnerId}", userId);
 
@@ -109,4 +125,10 @@ public sealed class PartnerAuthController : ControllerBase
             },
         });
     }
+
+    private ObjectResult InvalidCredentialProblem() => Problem(
+        title: "Invalid partner credentials.",
+        detail: "The login or secret is incorrect.",
+        statusCode: StatusCodes.Status401Unauthorized,
+        type: "https://jeeb.dev/errors/invalid-partner-credentials");
 }
