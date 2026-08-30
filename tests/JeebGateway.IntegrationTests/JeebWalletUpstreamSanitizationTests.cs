@@ -185,6 +185,52 @@ public class JeebWalletUpstreamSanitizationTests
         raw.Should().NotContain(Canary);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task GetBalance_CurrencyTableTransportFailure_Is_Sanitized_502(bool timeout)
+    {
+        var stub = new StubHttpMessageHandler(request =>
+        {
+            if (request.RequestUri!.AbsolutePath.Contains("/Wallet/holder/", StringComparison.OrdinalIgnoreCase))
+            {
+                return JsonResponse($$"""
+                    {
+                      "walletHolder": { "holderId": "{{HolderGuid}}", "holderType": "jeeber" },
+                      "wallets": [
+                        {
+                          "walletId": "22222222-2222-2222-2222-222222222222",
+                          "holderId": "{{HolderGuid}}",
+                          "currencyID": 1,
+                          "amount": 125.5,
+                          "isActive": true,
+                          "type": "jeeber"
+                        }
+                      ]
+                    }
+                    """);
+            }
+
+            if (timeout)
+            {
+                throw new TaskCanceledException(Canary);
+            }
+
+            throw new HttpRequestException(Canary);
+        });
+
+        using var factory = NewFactoryWithWalletStub(stub);
+        var client = MintBearerClient(factory, HolderGuid);
+
+        var resp = await client.GetAsync("/v1/jeeb/wallet");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadGateway);
+        var raw = await resp.Content.ReadAsStringAsync();
+        raw.Should().Contain("The wallet request could not be completed.");
+        raw.Should().NotContain("availableBalance");
+        raw.Should().NotContain(Canary);
+    }
+
     [Fact]
     public async Task GetBalance_Upstream_Status_Outside_Error_Range_Is_Clamped_To_502()
     {

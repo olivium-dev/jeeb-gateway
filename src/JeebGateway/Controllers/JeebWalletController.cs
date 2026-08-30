@@ -100,6 +100,14 @@ public sealed class JeebWalletController : ControllerBase
             {
                 return CurrencyTableProblem(ex);
             }
+            catch (HttpRequestException ex)
+            {
+                return CurrencyTableProblem(ex);
+            }
+            catch (TaskCanceledException ex) when (!ct.IsCancellationRequested)
+            {
+                return CurrencyTableProblem(ex);
+            }
 
             return Ok(JeebWalletProjection.ProjectBalance(holder, currencies, _currencyId));
         }
@@ -232,7 +240,7 @@ public sealed class JeebWalletController : ControllerBase
             statusCode: status);
     }
 
-    private IActionResult CurrencyTableProblem(WalletApiException ex)
+    private IActionResult CurrencyTableProblem(Exception ex)
     {
         _log.LogWarning(ex,
             "Wallet BFF: authoritative currency-table read failed on {Method} {Path}.",
