@@ -190,6 +190,10 @@ reject_mutant 'staging trusts a forwarded proxy' \
   '.TaskTemplate.ContainerSpec.Env += ["ForwardedHeaders__KnownProxies__0=10.0.0.2"]'
 reject_mutant 'staging trusts a forwarded network' \
   '.TaskTemplate.ContainerSpec.Env += ["forwardedheaders__KNOWNNETWORKS__0=10.0.0.0/24"]'
+reject_mutant 'staging trusts a colon-delimited forwarded proxy' \
+  '.TaskTemplate.ContainerSpec.Env += ["ForwardedHeaders:KnownProxies:0=10.0.0.2"]'
+reject_mutant 'staging trusts a colon-delimited forwarded network' \
+  '.TaskTemplate.ContainerSpec.Env += ["ForwardedHeaders:KnownNetworks:0=10.0.0.0/24"]'
 # Owner ruling 2026-08-27: Super Login IS open on staging. The mutant keeps
 # its MECHANISM — any drift from the pinned Spec must be rejected — and only
 # flips polarity to match the new pinned value. Deleting it would have removed
@@ -270,6 +274,15 @@ validate "$devtool_candidate" devtool-reassert "$devtool_incumbent"
 jq -e --arg image "$image" --slurpfile incumbent "$devtool_incumbent" \
   -f "$repository_root/scripts/staging-gateway-devtool-reassert-candidate.jq" \
   "$devtool_candidate" >/dev/null
+
+jq '.TaskTemplate.ContainerSpec.Env += ["ForwardedHeaders__KnownProxies__0=10.0.0.2"]' \
+  "$devtool_incumbent" > "$test_root/devtool-unsafe-incumbent.json"
+jq '.TaskTemplate.ContainerSpec.Env += ["ForwardedHeaders__KnownProxies__0=10.0.0.2"]' \
+  "$devtool_candidate" > "$mutant"
+if validate "$mutant" devtool-reassert "$test_root/devtool-unsafe-incumbent.json"; then
+  echo 'devtool-reassert accepted preserved forwarded-proxy trust' >&2
+  exit 1
+fi
 
 for unsafe_filter in \
   '.TaskTemplate.ContainerSpec.Env += ["Unrelated__Drift=true"]' \
