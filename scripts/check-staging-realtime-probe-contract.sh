@@ -22,6 +22,7 @@ contract_path = Path(
 )
 transaction_path = Path("scripts/staging-gateway-spec-recovery.sh")
 authenticated_probe_path = Path("scripts/probe-staging-authenticated-realtime.py")
+untrusted_xff_probe_path = Path("scripts/probe-staging-untrusted-xff.sh")
 candidate_contract_path = Path("scripts/staging-gateway-candidate-contract.jq")
 
 documents = {
@@ -36,6 +37,7 @@ documents = {
     "API-key middleware": middleware_path.read_text(),
     "Spec transaction": transaction_path.read_text(),
     "authenticated probe": authenticated_probe_path.read_text(),
+    "untrusted XFF probe": untrusted_xff_probe_path.read_text(),
     "candidate contract": candidate_contract_path.read_text(),
 }
 
@@ -72,6 +74,9 @@ require(
         "bash scripts/assert-distinct-staging-signing-keys.sh",
         'stream_secret "$probe_secret_name" "$JEEB_STAGING_WSS_PROBE_MINT_KEY"',
         "add_env Operations__RealtimeProbe__MintKeyFile /run/secrets/staging_wss_probe_mint_key",
+        "ForwardedHeaders__KnownProxies__0",
+        "probe_staging_untrusted_xff_contract",
+        "scripts/probe-staging-untrusted-xff.sh",
         "add_env Services__Realtime__GuardianSecretFile /run/secrets/realtime_guardian_secret",
         "add_env Services__Realtime__MembershipTicketSigningKeyFile /run/secrets/realtime_membership_ticket_key",
         "add_env Services__Realtime__PublicSocketUrl wss://app.jeeb.fds-1.com/socket/websocket",
@@ -137,6 +142,17 @@ exact_join = authenticated_probe.index(
 )
 if not single_connection < cross_topic_denial < forged_ticket_denial < exact_join:
     raise SystemExit("FAIL: authenticated probe join sequence drifted")
+
+require(
+    "untrusted XFF probe",
+    (
+        "X-Forwarded-For: $spoofed_remote_ip",
+        "x-jeeb-staging-observed-remote-ip",
+        "ipaddress.ip_address(sys.argv[1])",
+        "if observed == spoofed:",
+    ),
+)
+
 require(
     "candidate contract",
     (
@@ -148,6 +164,10 @@ require(
         '$environment["auth__otp__phone__enforceregion"] == "false"',
         '$environment["featureflags__useupstream__voice"] == "false"',
         '$environment["features__realtimewebsocketproxy__enabled"] == "false"',
+        'def canonical_configuration_key: ascii_downcase | gsub("__"; ":")',
+        'or startswith("forwardedheaders:knownproxies:")',
+        'or startswith("forwardedheaders:knownnetworks:")',
+        'and ($pairs | all((.key | forwarded_trust_key) | not))',
         '$environment["features__devendpoints__enabled"] == "true"',
         '$environment["features__swagger__enabled"] == "true"',
         '.UpdateConfig.Order == "start-first"',
@@ -252,8 +272,9 @@ def validate_bootstrap_workflow(text):
         "verify_bootstrap_flags",
         "probe_staging_authenticated_realtime",
         "python3 scripts/probe-staging-authenticated-realtime.py",
-        "probe_staging_proxy_source_contract",
-        "x-jeeb-staging-observed-remote-ip",
+        "probe_staging_untrusted_xff_contract",
+        "staging phase=untrusted-xff-contract result=passed (redacted)",
+        "staging phase=authenticated-realtime result=passed (redacted)",
         "verify_staging_overlay_and_dns",
         "jeeb-staging-one-time-password",
         "jeeb-staging-realtime-comunication-service",
@@ -406,7 +427,7 @@ def validate_bootstrap_workflow(text):
         "bash scripts/staging-gateway-public-edge-backoff.sh", verifier
     )
     network = text.index("verify_staging_overlay_and_dns", public_probe)
-    proxy_probe = text.index("probe_staging_proxy_source_contract", public_probe)
+    proxy_probe = text.index("probe_staging_untrusted_xff_contract", public_probe)
     descriptor_probe = text.index("probe_staging_authenticated_realtime", proxy_probe)
     final_candidate = text.index(
         "verify_exact_candidate_after_checks", descriptor_probe
@@ -538,8 +559,12 @@ negative_controls = (
         workflow.replace("python3 scripts/probe-staging-authenticated-realtime.py", ":", 1),
     ),
     (
-        "proxy source evidence probe removed",
-        workflow.replace("x-jeeb-staging-observed-remote-ip", "x-removed-evidence", 1),
+        "untrusted XFF evidence probe removed",
+        workflow.replace(
+            "            probe_staging_untrusted_xff_contract\n",
+            "            :\n",
+            1,
+        ),
     ),
     (
         "canonical ingress preflight weakened to host mode",
@@ -729,5 +754,6 @@ bash scripts/test-staging-public-gateway-probe-diagnostics.sh
 bash scripts/test-staging-gateway-transaction-summary.sh
 bash scripts/test-super-login-redaction-contract.sh
 bash scripts/test-verify-staging-otp-verify-freeze.sh
+bash scripts/test-probe-staging-untrusted-xff.sh
 bash scripts/check-staging-gateway-phase-contracts.sh
 bash scripts/test-assert-distinct-staging-signing-keys.sh

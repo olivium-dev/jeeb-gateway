@@ -475,10 +475,7 @@ jobs:
               STAGING_REALTIME_PROBE_KEY_FILE="$probe_key_file" \
                 python3 scripts/probe-staging-authenticated-realtime.py
             }
-            probe_staging_proxy_source_contract() {
-              local probe_source_ip=198.51.100.42
-              local -a probe_auth
-              mapfile -t probe_auth < <(
+            staging_probe_auth() {
                 python3 - "$probe_key_file" <<'PY'
           import hashlib
           import hmac
@@ -503,39 +500,19 @@ jobs:
           print(nonce)
           print(hmac.new(key, canonical, hashlib.sha256).hexdigest())
           PY
-              )
+            }
+            probe_staging_untrusted_xff_contract() {
+              local spoofed_source_ip=198.51.100.42
+              local -a probe_auth
+              mapfile -t probe_auth < <(staging_probe_auth)
               [ "${#probe_auth[@]}" -eq 3 ]
               [[ "${probe_auth[0]}" =~ ^[0-9]+$ ]]
               [[ "${probe_auth[1]}" =~ ^[0-9a-f-]{36}$ ]]
               [[ "${probe_auth[2]}" =~ ^[0-9a-f]{64}$ ]]
               ssh jeeb-staging bash -s -- \
                 "${probe_auth[0]}" "${probe_auth[1]}" "${probe_auth[2]}" \
-                "$probe_source_ip" <<'PROXY_SOURCE'
-                set -euo pipefail
-                timestamp=$1
-                nonce=$2
-                signature=$3
-                expected_remote_ip=$4
-                response_headers=$(mktemp)
-                trap 'rm -f -- "$response_headers"' EXIT
-                status=$(curl --silent --show-error --max-time 20 \
-                  --output /dev/null --dump-header "$response_headers" \
-                  --write-out '%{http_code}' --request POST \
-                  --header "X-Forwarded-For: $expected_remote_ip" \
-                  --header "X-Jeeb-Staging-Probe-Timestamp: $timestamp" \
-                  --header "X-Jeeb-Staging-Probe-Nonce: $nonce" \
-                  --header "X-Jeeb-Staging-Probe-Signature: $signature" \
-                  http://127.0.0.1:10000/internal/ops/staging/realtime-probe-descriptor)
-                [ "$status" = 200 ]
-                awk -F': *' -v expected="$expected_remote_ip" '
-                  tolower($1) == "x-jeeb-staging-observed-remote-ip" {
-                    gsub(/\r$/, "", $2)
-                    matches++
-                    if ($2 == expected) exact++
-                  }
-                  END { exit !(matches == 1 && exact == 1) }
-                ' "$response_headers"
-          PROXY_SOURCE
+                "$spoofed_source_ip" \
+                < scripts/probe-staging-untrusted-xff.sh
             }
             verify_staging_overlay_and_dns() {
               ssh jeeb-staging bash -s -- \
@@ -842,6 +819,7 @@ jobs:
             Whisper__ApiKey
             OPENAI_API_KEY
             OLIVIUM_OPEN_AI_KEY
+            ForwardedHeaders__KnownProxies__0
           )
           desired_env=()
           env_remove_keys=()
@@ -863,16 +841,6 @@ jobs:
             echo 'Approved staging overlay is absent, inexact, or not encrypted' >&2
             exit 1
           }
-          published_port_proxy_ip=$(docker network inspect \
-            --format '{{(index .IPAM.Config 0).Gateway}}' docker_gwbridge)
-          printf '%s\n' "$published_port_proxy_ip" | awk -F. '
-            NF == 4 {
-              for (i = 1; i <= 4; i++)
-                if ($i !~ /^[0-9]+$/ || $i < 0 || $i > 255) exit 1
-              exit 0
-            }
-            { exit 1 }
-          ' || { echo 'Invalid docker_gwbridge gateway address' >&2; exit 1; }
           case "$REPOSITORY" in
             jeeb-gateway)
               service=jeeb-staging-jeeb-gateway; published=10000; target=8080; health=/health/ready
@@ -905,10 +873,8 @@ jobs:
                 add_env Features__Swagger__Enabled true
               fi
               add_env Security__TokenMint__Enabled true
-              # Canonical publication is ingress mode. docker_gwbridge is only a
-              # prepared proxy candidate: independent live request-source evidence
-              # must confirm this exact IP before the owner unblocks the workflow.
-              add_env ForwardedHeaders__KnownProxies__0 "$published_port_proxy_ip"
+              # Swarm ingress is an L4/NAT peer, not a header-sanitizing HTTP proxy.
+              # Staging therefore removes the stale trust row and rejects spoofed XFF.
               add_env AdminPortal__AllowedOrigins__0 https://app.jeeb.fds-1.com
               add_env AdminPortal__AllowedOrigins__1 https://cms.jeeb.fds-1.com
               add_env Settlements__CodOwnerVerified true
@@ -1286,8 +1252,12 @@ jobs:
             # contract; it must never execute during the security-cutover readiness gate.
               bash scripts/probe-staging-public-gateway-contract.sh invariant
             fi
-            probe_staging_proxy_source_contract
+            echo 'staging phase=untrusted-xff-contract result=started (redacted)'
+            probe_staging_untrusted_xff_contract
+            echo 'staging phase=untrusted-xff-contract result=passed (redacted)'
+            echo 'staging phase=authenticated-realtime result=started (redacted)'
             probe_staging_authenticated_realtime
+            echo 'staging phase=authenticated-realtime result=passed (redacted)'
           fi
           verify_exact_candidate_after_checks
 

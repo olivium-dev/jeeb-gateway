@@ -35,7 +35,6 @@ cat > "$candidate" <<JSON
         "DemoUsers__Enabled=true",
         "Features__DevEndpoints__Enabled=true",
         "Features__Swagger__Enabled=true",
-        "ForwardedHeaders__KnownProxies__0=172.18.0.1",
         "Jwt__SigningKeyFile=/run/secrets/jeeb_gateway_jwt",
         "ServiceNotificationClient__ServiceTokenFile=/run/secrets/notification_service_token",
         "Features__RealtimeWebSocketProxy__Enabled=false"
@@ -176,7 +175,7 @@ reject_mutant 'Chat activated in A1' \
 reject_mutant 'Realtime activated in A1' \
   '(.TaskTemplate.ContainerSpec.Env[4]) = "FeatureFlags__UseUpstream__Realtime=true"'
 reject_mutant 'WebSocket proxy activated in A1' \
-  '(.TaskTemplate.ContainerSpec.Env[17]) = "Features__RealtimeWebSocketProxy__Enabled=true"'
+  '(.TaskTemplate.ContainerSpec.Env[16]) = "Features__RealtimeWebSocketProxy__Enabled=true"'
 reject_mutant 'wrong b05 application ID' \
   '(.TaskTemplate.ContainerSpec.Env[5]) = "Auth__Otp__ApplicationId=wrong"'
 reject_mutant 'international eligibility disabled' \
@@ -187,10 +186,14 @@ reject_mutant 'case-insensitive duplicate environment key' \
   '.TaskTemplate.ContainerSpec.Env += ["DEMousers__enabled=false"]'
 reject_mutant 'extra task network' \
   '.TaskTemplate.Networks += [{"Target":"othernetwork"}]'
-reject_mutant 'invalid forwarded proxy value' \
-  '(.TaskTemplate.ContainerSpec.Env[14]) = "ForwardedHeaders__KnownProxies__0=not-an-ip"'
-reject_mutant 'out-of-range forwarded proxy octet' \
-  '(.TaskTemplate.ContainerSpec.Env[14]) = "ForwardedHeaders__KnownProxies__0=999.18.0.1"'
+reject_mutant 'staging trusts a forwarded proxy' \
+  '.TaskTemplate.ContainerSpec.Env += ["ForwardedHeaders__KnownProxies__0=10.0.0.2"]'
+reject_mutant 'staging trusts a forwarded network' \
+  '.TaskTemplate.ContainerSpec.Env += ["forwardedheaders__KNOWNNETWORKS__0=10.0.0.0/24"]'
+reject_mutant 'staging trusts a colon-delimited forwarded proxy' \
+  '.TaskTemplate.ContainerSpec.Env += ["ForwardedHeaders:KnownProxies:0=10.0.0.2"]'
+reject_mutant 'staging trusts a colon-delimited forwarded network' \
+  '.TaskTemplate.ContainerSpec.Env += ["ForwardedHeaders:KnownNetworks:0=10.0.0.0/24"]'
 # Owner ruling 2026-08-27: Super Login IS open on staging. The mutant keeps
 # its MECHANISM — any drift from the pinned Spec must be rejected — and only
 # flips polarity to match the new pinned value. Deleting it would have removed
@@ -232,7 +235,7 @@ jq '
   .TaskTemplate.ContainerSpec.Image = "repo@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
   | (.TaskTemplate.ContainerSpec.Env[3]) = "FeatureFlags__UseUpstream__Chat=true"
   | (.TaskTemplate.ContainerSpec.Env[4]) = "FeatureFlags__UseUpstream__Realtime=true"
-  | (.TaskTemplate.ContainerSpec.Env[17]) = "Features__RealtimeWebSocketProxy__Enabled=true"
+  | (.TaskTemplate.ContainerSpec.Env[16]) = "Features__RealtimeWebSocketProxy__Enabled=true"
   | (.TaskTemplate.ContainerSpec.Env[10]) = "SuperLogin__OpenMode=false"
   | (.TaskTemplate.ContainerSpec.Env[11]) = "DemoUsers__Enabled=false"
   | (.TaskTemplate.ContainerSpec.Env[12]) = "Features__DevEndpoints__Enabled=false"
@@ -271,6 +274,15 @@ validate "$devtool_candidate" devtool-reassert "$devtool_incumbent"
 jq -e --arg image "$image" --slurpfile incumbent "$devtool_incumbent" \
   -f "$repository_root/scripts/staging-gateway-devtool-reassert-candidate.jq" \
   "$devtool_candidate" >/dev/null
+
+jq '.TaskTemplate.ContainerSpec.Env += ["ForwardedHeaders__KnownProxies__0=10.0.0.2"]' \
+  "$devtool_incumbent" > "$test_root/devtool-unsafe-incumbent.json"
+jq '.TaskTemplate.ContainerSpec.Env += ["ForwardedHeaders__KnownProxies__0=10.0.0.2"]' \
+  "$devtool_candidate" > "$mutant"
+if validate "$mutant" devtool-reassert "$test_root/devtool-unsafe-incumbent.json"; then
+  echo 'devtool-reassert accepted preserved forwarded-proxy trust' >&2
+  exit 1
+fi
 
 for unsafe_filter in \
   '.TaskTemplate.ContainerSpec.Env += ["Unrelated__Drift=true"]' \

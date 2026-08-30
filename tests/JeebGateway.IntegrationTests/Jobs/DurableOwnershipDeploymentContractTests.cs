@@ -573,7 +573,10 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().NotContain(
             "add_env Services__Realtime__BaseUrl http://192.168.2.20:10069");
         workflow.Should().Contain("python3 scripts/probe-staging-authenticated-realtime.py");
-        workflow.Should().Contain("probe_staging_proxy_source_contract");
+        workflow.Should().Contain("probe_staging_untrusted_xff_contract");
+        workflow.Should().Contain("scripts/probe-staging-untrusted-xff.sh");
+        workflow.Should().Contain("ForwardedHeaders__KnownProxies__0");
+        workflow.Should().NotContain("add_env ForwardedHeaders__KnownProxies");
         CountOccurrences(workflow, "bash scripts/verify-staging-otp-verify-freeze.sh")
             .Should().Be(3);
         workflow.Should().Contain("staging_gateway_security_cutover_forward_apply");
@@ -634,7 +637,7 @@ public sealed class DurableOwnershipDeploymentContractTests
             network,
             StringComparison.Ordinal);
         var proxyProbe = workflow.IndexOf(
-            "probe_staging_proxy_source_contract",
+            "probe_staging_untrusted_xff_contract",
             publicProbe,
             StringComparison.Ordinal);
         var descriptor = workflow.IndexOf(
