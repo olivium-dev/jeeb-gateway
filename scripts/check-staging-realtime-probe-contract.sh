@@ -22,6 +22,9 @@ contract_path = Path(
 )
 transaction_path = Path("scripts/staging-gateway-spec-recovery.sh")
 authenticated_probe_path = Path("scripts/probe-staging-authenticated-realtime.py")
+ingress_proxy_discovery_path = Path(
+    "scripts/staging-gateway-ingress-proxy-discovery.sh"
+)
 candidate_contract_path = Path("scripts/staging-gateway-candidate-contract.jq")
 
 documents = {
@@ -36,6 +39,7 @@ documents = {
     "API-key middleware": middleware_path.read_text(),
     "Spec transaction": transaction_path.read_text(),
     "authenticated probe": authenticated_probe_path.read_text(),
+    "ingress proxy discovery": ingress_proxy_discovery_path.read_text(),
     "candidate contract": candidate_contract_path.read_text(),
 }
 
@@ -72,6 +76,9 @@ require(
         "bash scripts/assert-distinct-staging-signing-keys.sh",
         'stream_secret "$probe_secret_name" "$JEEB_STAGING_WSS_PROBE_MINT_KEY"',
         "add_env Operations__RealtimeProbe__MintKeyFile /run/secrets/staging_wss_probe_mint_key",
+        "scripts/staging-gateway-ingress-proxy-discovery.sh",
+        "ingress_proxy_ip=$(discover_staging_ingress_proxy)",
+        'add_env ForwardedHeaders__KnownProxies__0 "$ingress_proxy_ip"',
         "add_env Services__Realtime__GuardianSecretFile /run/secrets/realtime_guardian_secret",
         "add_env Services__Realtime__MembershipTicketSigningKeyFile /run/secrets/realtime_membership_ticket_key",
         "add_env Services__Realtime__PublicSocketUrl wss://app.jeeb.fds-1.com/socket/websocket",
@@ -137,6 +144,22 @@ exact_join = authenticated_probe.index(
 )
 if not single_connection < cross_topic_denial < forged_ticket_denial < exact_join:
     raise SystemExit("FAIL: authenticated probe join sequence drifted")
+require(
+    "ingress proxy discovery",
+    (
+        "http://127.0.0.1:10000/internal/ops/staging/realtime-probe-descriptor",
+        "x-jeeb-staging-observed-remote-ip",
+        "docker network inspect ingress",
+        'network.get("Driver") != "overlay"',
+        'network.get("Scope") != "swarm"',
+        'network.get("Ingress") is not True',
+        "ipaddress.ip_network(value, strict=False)",
+        "if len(matches) != 1:",
+    ),
+)
+if "X-Forwarded-For" in documents["ingress proxy discovery"]:
+    raise SystemExit("FAIL: ingress proxy discovery may not accept a claimed client address")
+
 require(
     "candidate contract",
     (
@@ -254,6 +277,9 @@ def validate_bootstrap_workflow(text):
         "python3 scripts/probe-staging-authenticated-realtime.py",
         "probe_staging_proxy_source_contract",
         "x-jeeb-staging-observed-remote-ip",
+        "staging phase=ingress-proxy-discovery result=passed (redacted)",
+        "staging phase=proxy-source-contract result=passed (redacted)",
+        "staging phase=authenticated-realtime result=passed (redacted)",
         "verify_staging_overlay_and_dns",
         "jeeb-staging-one-time-password",
         "jeeb-staging-realtime-comunication-service",
@@ -379,6 +405,9 @@ def validate_bootstrap_workflow(text):
     pre_update = text.index(
         'capture_remote_spec "$pre_update_spec" "$pre_update_version" "$pre_update_id"'
     )
+    ingress_discovery = text.index(
+        "ingress_proxy_ip=$(discover_staging_ingress_proxy)", pre_update
+    )
     candidate = text.index(
         'staging_gateway_canonicalize_spec_file "$candidate_raw_spec" "$candidate_spec"'
     )
@@ -417,7 +446,7 @@ def validate_bootstrap_workflow(text):
     )
     final_confirm = text.index("verify_exact_candidate_after_checks", post_freeze)
     disarm = text.index("recovery_armed=false", final_confirm)
-    if not pre_update < candidate < candidate_validation < task_capture < pre_cas_freeze < cutover_forward < arm < forward < manifest < verifier < readiness < false_flags < public_probe < network < proxy_probe < descriptor_probe < final_candidate < old_task_proof < post_freeze < final_confirm < disarm:
+    if not pre_update < ingress_discovery < candidate < candidate_validation < task_capture < pre_cas_freeze < cutover_forward < arm < forward < manifest < verifier < readiness < false_flags < public_probe < network < proxy_probe < descriptor_probe < final_candidate < old_task_proof < post_freeze < final_confirm < disarm:
         raise ValueError("candidate verification order drifted")
 
 
@@ -729,5 +758,6 @@ bash scripts/test-staging-public-gateway-probe-diagnostics.sh
 bash scripts/test-staging-gateway-transaction-summary.sh
 bash scripts/test-super-login-redaction-contract.sh
 bash scripts/test-verify-staging-otp-verify-freeze.sh
+bash scripts/test-staging-gateway-ingress-proxy-discovery.sh
 bash scripts/check-staging-gateway-phase-contracts.sh
 bash scripts/test-assert-distinct-staging-signing-keys.sh
