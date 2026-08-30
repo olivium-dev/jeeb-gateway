@@ -41,15 +41,10 @@ public sealed class PartnerWalletEndpointsTests
 
     private static WebApplicationFactory<Program> FactoryWithFakeWallet(
         FakeWalletClient fake,
-        double? otpThreshold = null,
-        bool applyConfiguredTopupFees = false)
+        double? otpThreshold = null)
         => new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
         {
-            var settings = new Dictionary<string, string?>
-            {
-                ["PartnerWallet:ApplyConfiguredTopupFees"] =
-                    applyConfiguredTopupFees.ToString(),
-            };
+            var settings = new Dictionary<string, string?>();
             if (otpThreshold is not null)
             {
                 settings["PartnerWallet:OtpStepUpThreshold"] = otpThreshold.Value.ToString(
@@ -113,12 +108,10 @@ public sealed class PartnerWalletEndpointsTests
     }
 
     [Fact]
-    public async Task Partner_Predict_Returns_Fees_Preview()
+    public async Task Partner_Predict_RejectsProviderFeesWhenFeeLegsAreDisabled()
     {
-        var fake = new FakeWalletClient { PredictFees = 2.5 };
-        await using var factory = FactoryWithFakeWallet(
-            fake,
-            applyConfiguredTopupFees: true);
+        var fake = new FakeWalletClient { PredictFees = 2.5, IgnoreFeePolicy = true };
+        await using var factory = FactoryWithFakeWallet(fake);
         using var client = AsPartner(factory);
 
         var resp = await client.PostAsJsonAsync("/v1/partner/wallet/transfers/predict", new
@@ -127,13 +120,8 @@ public sealed class PartnerWalletEndpointsTests
             amount = 50.0,
         });
 
-        resp.StatusCode.Should().Be(HttpStatusCode.OK);
-        var body = await resp.Content.ReadFromJsonAsync<PreviewDto>();
-        body!.Fees.Should().Be(2.5);
-        body.GrossAmount.Should().Be(52.5);
-        body.NetToJeeber.Should().Be(50.0);
-        body.OtpRequired.Should().BeFalse();
-        fake.LastPredicted!.ApplyConfiguredFees.Should().BeTrue();
+        resp.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        fake.LastPredicted!.ApplyConfiguredFees.Should().BeFalse();
     }
 
     [Fact]
@@ -1317,6 +1305,7 @@ public sealed class PartnerWalletEndpointsTests
     {
         public double Balance { get; init; } = 0;
         public double PredictFees { get; init; } = 0;
+        public bool IgnoreFeePolicy { get; init; }
         public TransactionRequest? LastPredicted { get; private set; }
         public TransactionRequest? LastInitiated { get; private set; }
 
@@ -1380,7 +1369,7 @@ public sealed class PartnerWalletEndpointsTests
         {
             LastPredicted = body;
             var net = body.Transactions is { Count: > 0 } ? FirstAmount(body) : 0;
-            var fees = body.ApplyConfiguredFees ? PredictFees : 0;
+            var fees = body.ApplyConfiguredFees || IgnoreFeePolicy ? PredictFees : 0;
             return Task.FromResult(new ExpectedTransaction
             {
                 GrossAmount = net + fees,

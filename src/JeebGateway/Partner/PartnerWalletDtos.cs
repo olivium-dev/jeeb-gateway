@@ -15,7 +15,7 @@ public sealed class PartnerTopupPredictRequest
     [Required]
     public Guid JeeberId { get; init; }
 
-    /// <summary>The gross amount the partner intends to move into the jeeber wallet.</summary>
+    /// <summary>The net amount the partner intends to credit into the jeeber wallet.</summary>
     [Range(typeof(decimal), "0.01", "79228162514264337593543950335"), MoneyAmount]
     public decimal Amount { get; init; }
 }
@@ -27,7 +27,7 @@ public sealed class PartnerTopupExecuteRequest
     [Required]
     public Guid JeeberId { get; init; }
 
-    /// <summary>The gross amount to move from the partner wallet into the jeeber wallet.</summary>
+    /// <summary>The net amount to move from the partner wallet into the jeeber wallet.</summary>
     [Range(typeof(decimal), "0.01", "79228162514264337593543950335"), MoneyAmount]
     public decimal Amount { get; init; }
 
@@ -43,7 +43,7 @@ public sealed class PartnerTopupExecuteRequest
     public string? Note { get; init; }
 
     /// <summary>
-    /// PP-7 OTP step-up. OPTIONAL: consulted only when the gross <see cref="Amount"/> is ABOVE
+    /// PP-7 OTP step-up. OPTIONAL: consulted only when the net <see cref="Amount"/> is ABOVE
     /// <see cref="PartnerWalletOptions.OtpStepUpThreshold"/>. The challenge id returned by
     /// POST v1/partner/wallet/transfers/otp/challenge. Ignored for at-or-below-threshold transfers
     /// (backward compatible — no <c>[Required]</c>, so an existing client that never sends it is
@@ -60,7 +60,7 @@ public sealed class PartnerTopupExecuteRequest
 
 /// <summary>
 /// PP-7 step 1: request a one-time step-up code for a partner→jeeber top-up above the OTP threshold
-/// (POST v1/partner/wallet/transfers/otp/challenge). The gross <see cref="Amount"/> and
+/// (POST v1/partner/wallet/transfers/otp/challenge). The net <see cref="Amount"/> and
 /// <see cref="JeeberId"/> must match the subsequent transfer EXACTLY, or verification fails
 /// (403 otp-invalid). An amount at or below the threshold is refused here (400 otp-not-required) so
 /// the portal never shows an OTP step it does not need.
@@ -71,7 +71,7 @@ public sealed class PartnerOtpChallengeRequest
     [Required]
     public Guid JeeberId { get; init; }
 
-    /// <summary>The gross amount the code will authorize (must match the confirm's Amount exactly).</summary>
+    /// <summary>The net amount the code will authorize (must match the confirm's Amount exactly).</summary>
     [Range(typeof(decimal), "0.01", "79228162514264337593543950335"), MoneyAmount]
     public decimal Amount { get; init; }
 }
@@ -124,7 +124,7 @@ public sealed class PartnerTopupPreviewResponse
     public decimal Fees { get; init; }
     public decimal NetToJeeber { get; init; }
     /// <summary>
-    /// Whether this exact gross amount requires the configured OTP step-up. This is gateway-authored
+    /// Whether this exact net credit amount requires the configured OTP step-up. This is gateway-authored
     /// because <c>PartnerWallet:OtpStepUpThreshold</c> is an environment policy, not a client constant.
     /// </summary>
     [Required]

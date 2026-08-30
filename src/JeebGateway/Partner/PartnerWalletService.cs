@@ -93,7 +93,7 @@ public sealed class PartnerWalletService : IPartnerWalletService
 
         var request = BuildRequest(sourceWalletId, destWalletId, amount, _options.TopupTag,
             notes: $"predict:{partnerId}->{jeeberId}",
-            applyConfiguredFees: _options.ApplyConfiguredTopupFees);
+            applyConfiguredFees: false);
 
         var expected = await _wallet.PredictAsync(request);
         var breakdown = ReadBreakdown(expected, amount);
@@ -124,7 +124,7 @@ public sealed class PartnerWalletService : IPartnerWalletService
             amount,
             _options.TopupTag,
             notes,
-            applyConfiguredFees: _options.ApplyConfiguredTopupFees);
+            applyConfiguredFees: false);
 
         // Fees preview captured for the receipt (wallet-service authoritative; the gateway never
         // computes them). Best-effort — a Predict blip must not block the confirmed move.
@@ -351,7 +351,7 @@ public sealed class PartnerWalletService : IPartnerWalletService
             var expected = await _wallet.PredictAsync(request);
             return ReadBreakdown(expected, requestedNet);
         }
-        catch (WalletApiException ex) when (!_options.ApplyConfiguredTopupFees)
+        catch (WalletApiException ex)
         {
             _log.LogDebug(ex, "Partner top-up preview failed; continuing with the fee-disabled identity breakdown.");
             return new PartnerMoneyBreakdown(requestedNet, 0m, requestedNet);
@@ -368,10 +368,10 @@ public sealed class PartnerWalletService : IPartnerWalletService
         var gross = MoneyFromProvider(expected.GrossAmount, "predicted gross amount");
         var fees = MoneyFromProvider(expected.Fees, "predicted fees");
         var net = MoneyFromProvider(expected.NetAmount, "predicted net amount");
-        if (net != requestedNet || gross != net + fees)
+        if (fees != 0m || net != requestedNet || gross != net)
         {
             throw new PartnerWalletException(
-                "wallet-service returned an inconsistent gross/fees/net top-up preview.");
+                "wallet-service returned fee legs for a fee-disabled partner top-up.");
         }
         return new PartnerMoneyBreakdown(gross, fees, net);
     }
@@ -384,7 +384,7 @@ public sealed class PartnerWalletService : IPartnerWalletService
         decimal amount,
         string tag,
         string notes,
-        bool applyConfiguredFees = true)
+        bool applyConfiguredFees)
         => new()
         {
             ServiceName = _options.ServiceName,

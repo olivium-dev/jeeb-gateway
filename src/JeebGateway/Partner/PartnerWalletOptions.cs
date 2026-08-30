@@ -34,13 +34,6 @@ public sealed class PartnerWalletOptions
     public string CreditTag { get; init; } = "partner-cash-credit";
 
     /// <summary>
-    /// Whether wallet-service may add configured fee legs to partner top-ups. This stays false
-    /// until the partner cash-in flow also funds the separate base-currency fee-source wallet;
-    /// enabling fees before then would make an otherwise funded demo top-up fail at execution.
-    /// </summary>
-    public bool ApplyConfiguredTopupFees { get; init; } = false;
-
-    /// <summary>
     /// The wallet-service currency id the partner wallet operates in. Used only to pick the
     /// holder's matching wallet among (possibly) several; NOT a money computation.
     /// </summary>
@@ -57,11 +50,11 @@ public sealed class PartnerWalletOptions
 
     /// <summary>
     /// PP-7 OTP step-up threshold (config key <c>PartnerWallet__OtpStepUpThreshold</c>). A
-    /// partner→jeeber top-up whose gross Amount is STRICTLY ABOVE this value requires a one-time
+    /// partner→jeeber top-up whose net Amount is STRICTLY ABOVE this value requires a one-time
     /// step-up code (challenge → verify) before it executes; an amount AT OR BELOW it flows unchanged
     /// (backward compatible — an existing client that never sends the OTP fields is unaffected).
     /// Default 50 is an owner-gated assumption (surfaced, not decided). Amounts compared here are the
-    /// transfer's gross Amount in the partner wallet currency. Same <see cref="RangeAttribute"/>
+    /// transfer's net Amount in the partner wallet currency. Same <see cref="RangeAttribute"/>
     /// fail-fast style as <see cref="MaxTransferAmount"/> so a mis-configured threshold fails the host
     /// loudly at startup rather than at first high-value move (dotnet-options-pattern skill).
     /// </summary>

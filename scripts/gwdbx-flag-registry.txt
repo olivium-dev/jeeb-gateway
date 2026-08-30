@@ -327,7 +327,6 @@ Notifications:NewRequestFanout:RetainPayloadTtl      setting - # W1-11 RetainPay
 Notifications:NewRequestFanout:RadiusKm              setting -
 Notifications:NewRequestFanout:TotalBudget           setting -
 PartnerAuth:Credentials                              setting - # SECRET: partner API credentials
-PartnerWallet:ApplyConfiguredTopupFees               setting - # MONEY: keep false until partner base-currency fee-source funding is implemented
 PartnerWallet:CreditTag                              setting -
 PartnerWallet:CurrencyId                             setting -
 PartnerWallet:EnforceHolderType                      setting - # false drops the holder-type check on partner transfers
