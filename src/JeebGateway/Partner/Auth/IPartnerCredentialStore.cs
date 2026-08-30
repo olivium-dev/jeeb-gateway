@@ -33,12 +33,29 @@ public interface IPartnerCredentialStore
     Task ActivateRuntimeSeedAsync(string login, Guid holderId, CancellationToken ct);
 
     /// <summary>
+    /// Links the exact bounded refresh family minted by a successful one-shot runtime login. The
+    /// link is immutable and is the only token family Dev Tool cleanup is allowed to revoke.
+    /// </summary>
+    Task BindRuntimeSessionAsync(
+        string login,
+        Guid holderId,
+        string sessionFamilyId,
+        CancellationToken ct);
+
+    /// <summary>
     /// Removes a runtime dev credential. The expected holder lets a fresh replica durably revoke
     /// the bounded session even when it has no process-local login mapping. Configured credentials
     /// are never exposed through the dev endpoint, whose generated login namespace is distinct.
     /// </summary>
-    Task<Guid> RemoveAsync(
+    Task<RuntimeCredentialSession> RemoveAsync(
         string login,
         Guid expectedHolderId,
         CancellationToken ct);
+}
+
+public sealed record RuntimeCredentialSession(Guid HolderId, string SessionFamilyId);
+
+public sealed class RuntimeCredentialNotFoundException : Exception
+{
+    public RuntimeCredentialNotFoundException(string message) : base(message) { }
 }

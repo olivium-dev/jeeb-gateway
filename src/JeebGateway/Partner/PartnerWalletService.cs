@@ -59,7 +59,7 @@ public sealed class PartnerWalletService : IPartnerWalletService
         {
             PartnerId = partnerId,
             PartnerName = holder?.WalletHolder?.HolderName,
-            Balance = wallet?.Amount ?? 0d,
+            Balance = wallet is null ? 0m : MoneyFromProvider(wallet.Amount, "wallet balance"),
             CurrencyId = wallet?.CurrencyID ?? _options.CurrencyId,
             IsActive = holder?.WalletHolder?.IsActive ?? false,
         };
@@ -86,7 +86,7 @@ public sealed class PartnerWalletService : IPartnerWalletService
     }
 
     public async Task<PartnerTopupPreviewResponse> PredictTopupAsync(
-        Guid partnerId, Guid jeeberId, double amount, CancellationToken ct)
+        Guid partnerId, Guid jeeberId, decimal amount, CancellationToken ct)
     {
         var (sourceWalletId, _) = await RequireWalletAsync(partnerId, "partner", _partnerHolderTypes, ct);
         var (destWalletId, _) = await RequireWalletAsync(jeeberId, "jeeber", _jeeberHolderTypes, ct);
@@ -95,8 +95,10 @@ public sealed class PartnerWalletService : IPartnerWalletService
             notes: $"predict:{partnerId}->{jeeberId}");
 
         var expected = await _wallet.PredictAsync(request);
-        var fees = expected?.Fees ?? 0d;
-        var gross = expected?.GrossAmount ?? amount;
+        var fees = expected is null ? 0m : MoneyFromProvider(expected.Fees, "predicted fees");
+        var gross = expected is null
+            ? amount
+            : MoneyFromProvider(expected.GrossAmount, "predicted gross amount");
         return new PartnerTopupPreviewResponse
         {
             JeeberId = jeeberId,
@@ -109,7 +111,7 @@ public sealed class PartnerWalletService : IPartnerWalletService
     }
 
     public async Task<PartnerWalletMoveResponse> ExecuteTopupAsync(
-        Guid partnerId, Guid jeeberId, double amount, string idempotencyKey, string? note,
+        Guid partnerId, Guid jeeberId, decimal amount, string idempotencyKey, string? note,
         CancellationToken ct)
     {
         // Resolve wallets (+ BOPLA target-type guard) BEFORE claiming so a transient read failure
@@ -143,7 +145,7 @@ public sealed class PartnerWalletService : IPartnerWalletService
     }
 
     public async Task<PartnerWalletMoveResponse> CreditPartnerFromCashAsync(
-        Guid partnerId, Guid operatorId, double amount, string idempotencyKey, string evidenceNote,
+        Guid partnerId, Guid operatorId, decimal amount, string idempotencyKey, string evidenceNote,
         CancellationToken ct)
     {
         var (destWalletId, _) = await RequireWalletAsync(partnerId, "partner", _partnerHolderTypes, ct);
@@ -160,7 +162,7 @@ public sealed class PartnerWalletService : IPartnerWalletService
             key, intent, request,
             txId => new PartnerWalletMoveResponse
             {
-                TransactionId = txId, Amount = amount, Fees = 0d, Status = "executed",
+                TransactionId = txId, Amount = amount, Fees = 0m, Status = "executed",
             },
             ct);
 
@@ -236,7 +238,7 @@ public sealed class PartnerWalletService : IPartnerWalletService
         Guid headerId;
         try
         {
-            headerId = await RunSagaAsync(request, ct);
+            headerId = await RunSagaAsync(request, key.IdempotencyKey, ct);
         }
         catch (PartnerWalletSagaException sx) when (sx.Kind == SagaFailureKind.PreCommit)
         {
@@ -270,12 +272,15 @@ public sealed class PartnerWalletService : IPartnerWalletService
     ///   double-move bug) and the key is locked for reconciliation.</item>
     /// </list>
     /// </summary>
-    private async Task<Guid> RunSagaAsync(SwTransactionRequest request, CancellationToken ct)
+    private async Task<Guid> RunSagaAsync(
+        SwTransactionRequest request,
+        string providerIdempotencyKey,
+        CancellationToken ct)
     {
         Transaction initiated;
         try
         {
-            initiated = await _wallet.InitiateAsync(request);
+            initiated = await _wallet.InitiateAsync(providerIdempotencyKey, request, ct);
         }
         catch (Exception ex)
         {
@@ -330,27 +335,27 @@ public sealed class PartnerWalletService : IPartnerWalletService
         }
     }
 
-    private async Task<double> SafePredictFeesAsync(SwTransactionRequest request)
+    private async Task<decimal> SafePredictFeesAsync(SwTransactionRequest request)
     {
         try
         {
             var expected = await _wallet.PredictAsync(request);
-            return expected?.Fees ?? 0d;
+            return expected is null ? 0m : MoneyFromProvider(expected.Fees, "predicted fees");
         }
         catch (WalletApiException ex)
         {
             _log.LogDebug(ex, "Partner top-up fee preview failed; continuing with fees=0 on the receipt.");
-            return 0d;
+            return 0m;
         }
     }
 
     private SwTransactionRequest BuildRequest(
         Guid sourceWalletId,
         Guid destWalletId,
-        double amount,
+        decimal amount,
         string tag,
         string notes,
-        bool? applyConfiguredFees = null)
+        bool applyConfiguredFees = true)
         => new()
         {
             ServiceName = _options.ServiceName,
@@ -363,11 +368,32 @@ public sealed class PartnerWalletService : IPartnerWalletService
                 {
                     SourceWalletId = sourceWalletId,
                     DestinationWalletId = destWalletId,
-                    Amount = amount,
+                    Amount = MoneyToProvider(amount),
                     IsAdditionalFees = false,
                 },
             },
         };
+
+    private static double MoneyToProvider(decimal amount)
+    {
+        var providerAmount = (double)amount;
+        if (!double.IsFinite(providerAmount) || (decimal)providerAmount != amount)
+        {
+            throw new PartnerWalletException(
+                "The amount cannot be represented exactly by the authoritative wallet contract.");
+        }
+        return providerAmount;
+    }
+
+    private static decimal MoneyFromProvider(double amount, string field)
+    {
+        if (!double.IsFinite(amount))
+            throw new PartnerWalletException($"wallet-service returned a non-finite {field}.");
+        var value = (decimal)amount;
+        if (decimal.Round(value, 2, MidpointRounding.ToEven) != value)
+            throw new PartnerWalletException($"wallet-service returned {field} below the minor unit.");
+        return value;
+    }
 
     /// <summary>
     /// Resolve the holder's wallet id AND enforce the BOPLA target-type guard (OWASP API3): when
@@ -402,7 +428,7 @@ public sealed class PartnerWalletService : IPartnerWalletService
             {
                 _log.LogWarning(
                     "Partner wallet target-type guard REJECT: {Label} holder {HolderId} HolderType='{Actual}' "
-                    + "is not an eligible {Label} target (expected one of: {Expected}).",
+                    + "is not an eligible target (expected one of: {Expected}).",
                     label, holderId, actual, string.Join(",", expectedTypes));
                 throw new PartnerWalletException(
                     $"The specified holder is not an eligible {label} target for this operation.");

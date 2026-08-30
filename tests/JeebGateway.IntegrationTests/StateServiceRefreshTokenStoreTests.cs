@@ -30,7 +30,12 @@ public sealed class StateServiceRefreshTokenStoreTests
     private static StateServiceRefreshTokenStore NewStore(IIdempotencyStore kv)
         => new(kv, NullLogger<StateServiceRefreshTokenStore>.Instance);
 
-    private static RefreshToken Token(string id, string user, string hash, DateTimeOffset? expiresAt = null)
+    private static RefreshToken Token(
+        string id,
+        string user,
+        string hash,
+        DateTimeOffset? expiresAt = null,
+        string? boundedFamily = null)
         => new()
         {
             TokenId = id,
@@ -38,6 +43,10 @@ public sealed class StateServiceRefreshTokenStoreTests
             TokenHash = hash,
             IssuedAt = DateTimeOffset.UtcNow,
             ExpiresAt = expiresAt ?? DateTimeOffset.UtcNow.AddDays(30),
+            AbsoluteSessionExpiresAt = boundedFamily is null
+                ? null
+                : DateTimeOffset.UtcNow.AddMinutes(5),
+            BoundedSessionFamilyId = boundedFamily,
         };
 
     [Fact]
@@ -402,6 +411,31 @@ public sealed class StateServiceRefreshTokenStoreTests
 
         (await instanceB.IsBoundedSessionRevokedAsync("runtime-holder", CancellationToken.None))
             .Should().BeTrue("the shared tombstone must reject a bounded session on every gateway replica");
+    }
+
+    [Fact]
+    public async Task RevokeBoundedFamily_IsolatesOrdinaryAndSiblingFamiliesForSameUser()
+    {
+        var kv = new FakeIdempotencyStore();
+        var store = NewStore(kv);
+        await store.AddAsync(Token("ordinary", "same-user", "hash-ordinary"), CancellationToken.None);
+        await store.AddAsync(
+            Token("bounded-a", "same-user", "hash-a", boundedFamily: "bounded-a"),
+            CancellationToken.None);
+        await store.AddAsync(
+            Token("bounded-b", "same-user", "hash-b", boundedFamily: "bounded-b"),
+            CancellationToken.None);
+
+        (await store.RevokeBoundedFamilyAsync(
+            "bounded-a", RevocationReason.DevCredentialRemoved, CancellationToken.None))
+            .Should().Be(1);
+
+        (await store.FindByHashAsync("hash-a", CancellationToken.None))!.RevokedAt
+            .Should().NotBeNull();
+        (await store.FindByHashAsync("hash-b", CancellationToken.None))!.RevokedAt
+            .Should().BeNull("cleanup must not burn a sibling Dev Tool session");
+        (await store.FindByHashAsync("hash-ordinary", CancellationToken.None))!.RevokedAt
+            .Should().BeNull("cleanup must not log the holder out of ordinary app sessions");
     }
 
     [Fact]

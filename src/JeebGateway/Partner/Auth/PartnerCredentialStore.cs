@@ -27,11 +27,17 @@ public sealed class PartnerCredentialStore : IPartnerCredentialStore
         string SecretHash,
         DateTimeOffset ExpiresAt);
 
+    private sealed record RuntimeSessionRecord(
+        Guid HolderId,
+        string Login,
+        string SessionFamilyId);
+
     internal static readonly TimeSpan RuntimeCredentialLifetime = TimeSpan.FromMinutes(5);
     internal const string RuntimeIdentifierPrefix = "devtool-partner-";
     private const string ReservationPrefix = "dev-partner-credential:";
     private const string ActiveSuffix = ":active";
     private const string UsedSuffix = ":used";
+    private const string SessionSuffix = ":session";
     private const string RevokedSuffix = ":revoked";
     private static readonly byte[] DummyHash = new byte[32];
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
@@ -151,24 +157,91 @@ public sealed class PartnerCredentialStore : IPartnerCredentialStore
         await _runtime.PutOrGetAsync(key + ActiveSuffix, 200, "{}", RemainingSeconds(record.ExpiresAt), ct);
     }
 
-    public async Task<Guid> RemoveAsync(string login, Guid expectedHolderId, CancellationToken ct)
+    public async Task BindRuntimeSessionAsync(
+        string login,
+        Guid holderId,
+        string sessionFamilyId,
+        CancellationToken ct)
+    {
+        ValidateRuntimeIdentity(login, holderId);
+        if (string.IsNullOrWhiteSpace(sessionFamilyId))
+            throw new ArgumentException("sessionFamilyId is required.", nameof(sessionFamilyId));
+
+        var key = ReservationKey(holderId);
+        var record = Deserialize((await _runtime.GetAsync(key, ct))?.ResponseBodyJson);
+        if (record is null
+            || record.ExpiresAt <= _clock.GetUtcNow()
+            || await _runtime.GetAsync(key + ActiveSuffix, ct) is null
+            || await _runtime.GetAsync(key + RevokedSuffix, ct) is not null)
+        {
+            throw new InvalidOperationException("Runtime credential cannot bind a session.");
+        }
+
+        var session = new RuntimeSessionRecord(holderId, login.Trim(), sessionFamilyId.Trim());
+        var outcome = await _runtime.PutOrGetAsync(
+            key + SessionSuffix,
+            200,
+            JsonSerializer.Serialize(session, Json),
+            RemainingSeconds(record.ExpiresAt),
+            ct);
+        var winner = DeserializeSession(outcome.ResponseBodyJson)
+            ?? throw new InvalidOperationException("Runtime session binding is unreadable.");
+        if (winner != session)
+            throw new InvalidOperationException("Runtime session binding conflicts.");
+    }
+
+    public async Task<RuntimeCredentialSession> RemoveAsync(
+        string login,
+        Guid expectedHolderId,
+        CancellationToken ct)
     {
         ValidateRuntimeIdentity(login, expectedHolderId);
         if (_configuredHolderIds.Contains(expectedHolderId))
             throw new InvalidOperationException("Configured credentials cannot be removed by DevOnly cleanup.");
 
         var key = ReservationKey(expectedHolderId);
+        var priorTombstone = DeserializeSession(
+            (await _runtime.GetAsync(key + RevokedSuffix, ct))?.ResponseBodyJson);
+        if (priorTombstone is not null)
+        {
+            ValidateCleanupSession(priorTombstone, login, expectedHolderId);
+            return new RuntimeCredentialSession(
+                priorTombstone.HolderId,
+                priorTombstone.SessionFamilyId);
+        }
+
         var record = Deserialize((await _runtime.GetAsync(key, ct))?.ResponseBodyJson);
-        if (record is not null
-            && (!string.Equals(record.Login, login.Trim(), StringComparison.Ordinal)
-                || record.HolderId != expectedHolderId))
+        if (record is null)
+            throw new RuntimeCredentialNotFoundException(
+                "Runtime credential reservation was not found.");
+        if (!string.Equals(record.Login, login.Trim(), StringComparison.Ordinal)
+            || record.HolderId != expectedHolderId)
         {
             throw new InvalidOperationException("Cleanup identity does not match the runtime reservation.");
         }
 
-        await _runtime.PutOrGetAsync(
-            key + RevokedSuffix, 200, "{}", (int)RuntimeCredentialLifetime.TotalSeconds, ct);
-        return expectedHolderId;
+        if (record.ExpiresAt <= _clock.GetUtcNow()
+            || await _runtime.GetAsync(key + ActiveSuffix, ct) is null)
+        {
+            throw new InvalidOperationException("Only an active runtime credential can be cleaned up.");
+        }
+
+        var session = DeserializeSession(
+            (await _runtime.GetAsync(key + SessionSuffix, ct))?.ResponseBodyJson)
+            ?? throw new InvalidOperationException(
+                "The runtime credential has no linked Dev Tool session.");
+        ValidateCleanupSession(session, login, expectedHolderId);
+
+        var tombstone = await _runtime.PutOrGetAsync(
+            key + RevokedSuffix,
+            200,
+            JsonSerializer.Serialize(session, Json),
+            (int)RuntimeCredentialLifetime.TotalSeconds,
+            ct);
+        var committed = DeserializeSession(tombstone.ResponseBodyJson)
+            ?? throw new InvalidOperationException("Runtime cleanup tombstone is unreadable.");
+        ValidateCleanupSession(committed, login, expectedHolderId);
+        return new RuntimeCredentialSession(committed.HolderId, committed.SessionFamilyId);
     }
 
     private void ValidateRuntimeIdentity(string login, Guid holderId)
@@ -206,6 +279,27 @@ public sealed class PartnerCredentialStore : IPartnerCredentialStore
         if (string.IsNullOrWhiteSpace(value)) return null;
         try { return JsonSerializer.Deserialize<RuntimeRecord>(value, Json); }
         catch (JsonException) { return null; }
+    }
+
+    private static RuntimeSessionRecord? DeserializeSession(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value)) return null;
+        try { return JsonSerializer.Deserialize<RuntimeSessionRecord>(value, Json); }
+        catch (JsonException) { return null; }
+    }
+
+    private static void ValidateCleanupSession(
+        RuntimeSessionRecord session,
+        string login,
+        Guid expectedHolderId)
+    {
+        if (session.HolderId != expectedHolderId
+            || !string.Equals(session.Login, login.Trim(), StringComparison.Ordinal)
+            || string.IsNullOrWhiteSpace(session.SessionFamilyId))
+        {
+            throw new InvalidOperationException(
+                "Cleanup identity does not match the linked runtime session.");
+        }
     }
 
     private static byte[] Sha256(string value) => SHA256.HashData(Encoding.UTF8.GetBytes(value));

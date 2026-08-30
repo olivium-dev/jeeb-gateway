@@ -21,7 +21,7 @@ public interface IPartnerWalletService
 
     /// <summary>Preview wallet-service fees for a partner→jeeber top-up (no money moves).</summary>
     Task<PartnerTopupPreviewResponse> PredictTopupAsync(
-        Guid partnerId, Guid jeeberId, double amount, CancellationToken ct);
+        Guid partnerId, Guid jeeberId, decimal amount, CancellationToken ct);
 
     /// <summary>
     /// Execute a partner→jeeber top-up via the wallet-service saga (initiate → execute; abort on
@@ -29,7 +29,7 @@ public interface IPartnerWalletService
     /// flow to the system wallet — the gateway does not compute or route them.
     /// </summary>
     Task<PartnerWalletMoveResponse> ExecuteTopupAsync(
-        Guid partnerId, Guid jeeberId, double amount, string idempotencyKey, string? note,
+        Guid partnerId, Guid jeeberId, decimal amount, string idempotencyKey, string? note,
         CancellationToken ct);
 
     /// <summary>
@@ -40,6 +40,6 @@ public interface IPartnerWalletService
     /// un-attributed, so <paramref name="operatorId"/> is a hard precondition resolved by the caller.
     /// </summary>
     Task<PartnerWalletMoveResponse> CreditPartnerFromCashAsync(
-        Guid partnerId, Guid operatorId, double amount, string idempotencyKey, string evidenceNote,
+        Guid partnerId, Guid operatorId, decimal amount, string idempotencyKey, string evidenceNote,
         CancellationToken ct);
 }

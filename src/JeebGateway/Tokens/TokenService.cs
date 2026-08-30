@@ -4,6 +4,8 @@ using System.Security.Cryptography;
 using System.Text;
 using JeebGateway.Auth.Oidc;
 using JeebGateway.Observability;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 
@@ -19,22 +21,26 @@ public class TokenService : ITokenService
 {
     internal const string RuntimeSessionExpiryClaim = "jeeb_runtime_exp";
     internal const string RuntimeRefreshHashClaim = "jeeb_runtime_refresh_hash";
+    internal const string RuntimeSessionFamilyClaim = "jeeb_runtime_family";
     private readonly IRefreshTokenStore _store;
     private readonly IUsersStoreAdapter _users;
     private readonly TimeProvider _clock;
     private readonly JwtOptions _options;
     private readonly SigningCredentials _signingCredentials;
+    private readonly ILogger<TokenService> _log;
 
     public TokenService(
         IRefreshTokenStore store,
         IUsersStoreAdapter users,
         IOptions<JwtOptions> options,
-        TimeProvider clock)
+        TimeProvider clock,
+        ILogger<TokenService>? log = null)
     {
         _store = store;
         _users = users;
         _clock = clock;
         _options = options.Value;
+        _log = log ?? NullLogger<TokenService>.Instance;
 
         var keyBytes = Encoding.UTF8.GetBytes(_options.SigningKey);
         if (keyBytes.Length < 32)
@@ -99,10 +105,6 @@ public class TokenService : ITokenService
             now.AddDays(_options.RefreshTokenDays), sessionDeadline);
         if (accessExpires <= now || refreshExpires <= now)
             throw new InvalidOperationException("The verified authentication session has expired.");
-        if (absoluteSessionExpiresAt is not null
-            && await _store.IsBoundedSessionRevokedAsync(userId, ct))
-            throw new InvalidOperationException("The bounded runtime session has been revoked.");
-
         var (refreshRaw, refreshRecord) = NewRefreshToken(
             userId,
             now,
@@ -111,10 +113,14 @@ public class TokenService : ITokenService
             normalizedRoles,
             activeRole,
             absoluteSessionExpiresAt);
+        if (refreshRecord.BoundedSessionFamilyId is { } newFamily
+            && await _store.IsBoundedSessionRevokedAsync(newFamily, ct))
+            throw new InvalidOperationException("The bounded runtime session has been revoked.");
         var access = BuildAccessToken(
             userId, normalizedRoles, activeRole, authentication,
             absoluteSessionExpiresAt,
             absoluteSessionExpiresAt is null ? null : refreshRecord.TokenHash,
+            refreshRecord.BoundedSessionFamilyId,
             now, accessExpires);
         await _store.AddAsync(refreshRecord, ct);
 
@@ -123,7 +129,8 @@ public class TokenService : ITokenService
             AccessToken = access,
             RefreshToken = refreshRaw,
             AccessTokenExpiresAt = accessExpires,
-            RefreshTokenExpiresAt = refreshExpires
+            RefreshTokenExpiresAt = refreshExpires,
+            BoundedSessionFamilyId = refreshRecord.BoundedSessionFamilyId,
         };
     }
 
@@ -167,9 +174,13 @@ public class TokenService : ITokenService
 
         var now = _clock.GetUtcNow();
 
-        if (existing.AbsoluteSessionExpiresAt is not null
-            && await _store.IsBoundedSessionRevokedAsync(existing.UserId, ct))
-            return new RefreshResult { Outcome = RefreshOutcome.Revoked };
+        if (existing.AbsoluteSessionExpiresAt is not null)
+        {
+            if (string.IsNullOrWhiteSpace(existing.BoundedSessionFamilyId)
+                || await _store.IsBoundedSessionRevokedAsync(
+                    existing.BoundedSessionFamilyId, ct))
+                return new RefreshResult { Outcome = RefreshOutcome.Revoked };
+        }
 
         // Reuse of an already-rotated token signals theft → burn the chain.
         if (existing.RevokedAt is not null)
@@ -239,11 +250,13 @@ public class TokenService : ITokenService
         var (refreshRaw, replacement) = NewRefreshToken(
             existing.UserId, now, refreshExpires, persistedAuthentication,
             roleContext.Roles, roleContext.ActiveRole,
-            existing.AbsoluteSessionExpiresAt);
+            existing.AbsoluteSessionExpiresAt,
+            existing.BoundedSessionFamilyId);
         var access = BuildAccessToken(
             existing.UserId, roleContext.Roles, roleContext.ActiveRole,
             persistedAuthentication, existing.AbsoluteSessionExpiresAt,
             existing.AbsoluteSessionExpiresAt is null ? null : replacement.TokenHash,
+            replacement.BoundedSessionFamilyId,
             now, accessExpires);
 
         var rotated = await _store.RotateAsync(existing.TokenId, replacement, ct);
@@ -318,13 +331,27 @@ public class TokenService : ITokenService
     public Task<int> RevokeAllForUserAsync(string userId, RevocationReason reason, CancellationToken ct) =>
         _store.RevokeAllForUserAsync(userId, reason, ct);
 
-    public async Task<int> RevokeBoundedSessionForUserAsync(
-        string userId,
+    public async Task<int> RevokeBoundedSessionAsync(
+        string sessionFamilyId,
         RevocationReason reason,
         CancellationToken ct)
     {
-        await _store.MarkBoundedSessionRevokedAsync(userId, ct);
-        return await _store.RevokeAllForUserAsync(userId, reason, ct);
+        await _store.MarkBoundedSessionRevokedAsync(sessionFamilyId, ct);
+        try
+        {
+            return await _store.RevokeBoundedFamilyAsync(sessionFamilyId, reason, ct);
+        }
+        catch (Exception ex)
+        {
+            // The durable family tombstone is the security boundary checked by both access-token
+            // validation and refresh. Physical row sweeping is defense-in-depth and retryable; it
+            // must not turn a successful cleanup into a false 502 that blocks the Dev Tool receipt.
+            _log.LogError(
+                ex,
+                "Bounded runtime family {SessionFamilyId} was tombstoned but row sweeping failed.",
+                sessionFamilyId);
+            return 0;
+        }
     }
 
     private string BuildAccessToken(
@@ -334,6 +361,7 @@ public class TokenService : ITokenService
         VerifiedAuthenticationContext? authentication,
         DateTimeOffset? absoluteSessionExpiresAt,
         string? runtimeRefreshHash,
+        string? runtimeSessionFamilyId,
         DateTimeOffset now,
         DateTimeOffset expires)
     {
@@ -355,10 +383,12 @@ public class TokenService : ITokenService
                 RuntimeSessionExpiryClaim,
                 runtimeDeadline.ToUnixTimeSeconds().ToString(),
                 ClaimValueTypes.Integer64));
-            if (string.IsNullOrWhiteSpace(runtimeRefreshHash))
+            if (string.IsNullOrWhiteSpace(runtimeRefreshHash)
+                || string.IsNullOrWhiteSpace(runtimeSessionFamilyId))
                 throw new InvalidOperationException(
                     "A bounded runtime access token requires a refresh-record binding.");
             claims.Add(new Claim(RuntimeRefreshHashClaim, runtimeRefreshHash));
+            claims.Add(new Claim(RuntimeSessionFamilyClaim, runtimeSessionFamilyId));
         }
         if (authentication is not null)
         {
@@ -397,14 +427,16 @@ public class TokenService : ITokenService
         VerifiedAuthenticationContext? authentication,
         IReadOnlyList<string> roles,
         string activeRole,
-        DateTimeOffset? absoluteSessionExpiresAt = null)
+        DateTimeOffset? absoluteSessionExpiresAt = null,
+        string? boundedSessionFamilyId = null)
     {
         Span<byte> buffer = stackalloc byte[32];
         RandomNumberGenerator.Fill(buffer);
         var raw = Base64UrlEncode(buffer);
+        var tokenId = Guid.NewGuid().ToString();
         var record = new RefreshToken
         {
-            TokenId = Guid.NewGuid().ToString(),
+            TokenId = tokenId,
             UserId = userId,
             TokenHash = HashToken(raw),
             IssuedAt = now,
@@ -418,6 +450,9 @@ public class TokenService : ITokenService
             IdentityProvider = authentication?.Provider,
             AuthenticationSessionExpiresAt = authentication?.SessionExpiresAt,
             AbsoluteSessionExpiresAt = absoluteSessionExpiresAt,
+            BoundedSessionFamilyId = absoluteSessionExpiresAt is null
+                ? null
+                : boundedSessionFamilyId ?? tokenId,
             DisplayName = authentication?.DisplayName,
             Email = authentication?.Email,
             RoleSnapshot = authentication?.PersistRoleContext == true

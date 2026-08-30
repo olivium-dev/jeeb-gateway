@@ -96,16 +96,40 @@ public class InMemoryRefreshTokenStore : IRefreshTokenStore
         return Task.FromResult(count);
     }
 
-    public Task MarkBoundedSessionRevokedAsync(string userId, CancellationToken ct)
+    public Task MarkBoundedSessionRevokedAsync(string sessionFamilyId, CancellationToken ct)
     {
-        _boundedRevocations[userId] = DateTimeOffset.UtcNow.AddMinutes(5);
+        _boundedRevocations[sessionFamilyId] = DateTimeOffset.UtcNow.AddMinutes(5);
         return Task.CompletedTask;
     }
 
-    public Task<bool> IsBoundedSessionRevokedAsync(string userId, CancellationToken ct) =>
+    public Task<bool> IsBoundedSessionRevokedAsync(string sessionFamilyId, CancellationToken ct) =>
         Task.FromResult(
-            _boundedRevocations.TryGetValue(userId, out var until)
+            _boundedRevocations.TryGetValue(sessionFamilyId, out var until)
             && until > DateTimeOffset.UtcNow);
+
+    public Task<int> RevokeBoundedFamilyAsync(
+        string sessionFamilyId,
+        RevocationReason reason,
+        CancellationToken ct)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var count = 0;
+        lock (_writeLock)
+        {
+            foreach (var token in _byId.Values.Where(token =>
+                         string.Equals(
+                             token.BoundedSessionFamilyId,
+                             sessionFamilyId,
+                             StringComparison.Ordinal)
+                         && token.RevokedAt is null))
+            {
+                token.RevokedAt = now;
+                token.RevokedReason = reason.ToString();
+                count++;
+            }
+        }
+        return Task.FromResult(count);
+    }
 
     public Task<int> RevokeChainAsync(string startTokenId, RevocationReason reason, CancellationToken ct)
     {

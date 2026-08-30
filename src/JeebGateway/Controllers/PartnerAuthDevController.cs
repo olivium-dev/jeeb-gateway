@@ -131,12 +131,20 @@ public sealed class PartnerAuthDevController : ControllerBase
                 statusCode: StatusCodes.Status400BadRequest,
                 type: "https://jeeb.dev/errors/dev-partner-cleanup-holder-required");
         }
-        Guid removedHolderId;
+        RuntimeCredentialSession removedSession;
         try
         {
-            removedHolderId = await _credentials.RemoveAsync(identifier, holderId, ct);
+            removedSession = await _credentials.RemoveAsync(identifier, holderId, ct);
         }
-        catch (InvalidOperationException ex)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (RuntimeCredentialNotFoundException)
+        {
+            return NotFound();
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
         {
             _log.LogWarning(ex, "partner.auth.dev rejected mismatched cleanup identity.");
             return Problem(
@@ -145,22 +153,35 @@ public sealed class PartnerAuthDevController : ControllerBase
                 statusCode: StatusCodes.Status409Conflict,
                 type: "https://jeeb.dev/errors/dev-partner-cleanup-conflict");
         }
+        catch (Exception ex)
+        {
+            _log.LogWarning(ex, "partner.auth.dev cleanup state dependency is unavailable.");
+            return CleanupUnavailableProblem();
+        }
         try
         {
-            await _tokens.RevokeBoundedSessionForUserAsync(
-                removedHolderId.ToString(), RevocationReason.DevCredentialRemoved, ct);
+            await _tokens.RevokeBoundedSessionAsync(
+                removedSession.SessionFamilyId,
+                RevocationReason.DevCredentialRemoved,
+                ct);
             return NoContent();
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch (Exception ex)
         {
             // The credential tombstone already rejects its access JWTs. Keep the holder mapping
             // so this idempotent DELETE can retry durable refresh-family revocation.
             _log.LogWarning(ex, "partner.auth.dev could not revoke a removed credential session.");
-            return Problem(
-                title: "Partner session cleanup unavailable.",
-                detail: "The credential is disabled, but refresh-session cleanup must be retried.",
-                statusCode: StatusCodes.Status502BadGateway,
-                type: "https://jeeb.dev/errors/dev-partner-session-cleanup");
+            return CleanupUnavailableProblem();
         }
     }
+
+    private ObjectResult CleanupUnavailableProblem() => Problem(
+        title: "Partner session cleanup unavailable.",
+        detail: "The credential is disabled only when the cleanup tombstone committed; retry cleanup.",
+        statusCode: StatusCodes.Status502BadGateway,
+        type: "https://jeeb.dev/errors/dev-partner-session-cleanup");
 }

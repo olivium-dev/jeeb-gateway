@@ -29,7 +29,7 @@ public sealed class PartnerOtpChallengeService : IPartnerOtpChallengeService
     }
 
     public async Task<PartnerOtpIssued> IssueAsync(
-        Guid partnerId, Guid jeeberId, double amount, CancellationToken ct)
+        Guid partnerId, Guid jeeberId, decimal amount, CancellationToken ct)
     {
         // Cryptographically-random, zero-padded to the full digit width (leading zeros preserved).
         var code = RandomNumberGenerator.GetInt32(0, CodeExclusiveMax)
@@ -41,7 +41,7 @@ public sealed class PartnerOtpChallengeService : IPartnerOtpChallengeService
     }
 
     public Task<PartnerOtpValidation> VerifyAsync(
-        Guid challengeId, Guid partnerId, Guid jeeberId, double amount, string code, CancellationToken ct)
+        Guid challengeId, Guid partnerId, Guid jeeberId, decimal amount, string code, CancellationToken ct)
         => _store.ValidateAndConsumeAsync(challengeId, partnerId, jeeberId, amount, HashCode(code ?? string.Empty), ct);
 
     /// <summary>SHA-256 hex of the code (uppercase). The raw code is never persisted or logged.</summary>

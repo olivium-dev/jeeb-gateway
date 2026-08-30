@@ -336,6 +336,79 @@ public sealed class PartnerWalletEndpointsTests
         resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
     }
 
+    [Theory]
+    [InlineData(-1.0)]
+    [InlineData(0.0)]
+    [InlineData(0.001)]
+    public async Task Partner_Topup_Invalid_Money_IsRejectedBeforeAnyWalletCall(double amount)
+    {
+        var fake = new FakeWalletClient();
+        await using var factory = FactoryWithFakeWallet(fake);
+        using var client = AsPartner(factory);
+
+        var resp = await client.PostAsJsonAsync("/v1/partner/wallet/transfers", new
+        {
+            jeeberId = JeeberId,
+            amount,
+            idempotencyKey = "invalid-money-abcdef01",
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        fake.ExecuteCount.Should().Be(0);
+        fake.WalletReadCount.Should().Be(0,
+            "invalid major-unit amounts must fail before the provider boundary");
+    }
+
+    [Fact]
+    public async Task Partner_Topup_MinimumCent_IsAcceptedExactly()
+    {
+        var fake = new FakeWalletClient();
+        await using var factory = FactoryWithFakeWallet(fake);
+        using var client = AsPartner(factory);
+
+        var resp = await client.PostAsJsonAsync("/v1/partner/wallet/transfers", new
+        {
+            jeeberId = JeeberId,
+            amount = 0.01m,
+            idempotencyKey = "minimum-cent-abcdef01",
+        });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await resp.Content.ReadFromJsonAsync<MoveDto>())!.Amount.Should().Be(0.01);
+        fake.ExecuteCount.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Admin_CashCredit_ExactMaximumIsAccepted_AndOneCentAboveIsRejected()
+    {
+        var fake = new FakeWalletClient();
+        await using var factory = FactoryWithFakeWallet(fake);
+        using var client = AsAdmin(factory);
+
+        var atMaximum = await client.PostAsJsonAsync(
+            $"/v1/admin/partners/{PartnerId}/wallet/credits",
+            new
+            {
+                amount = 100_000.00m,
+                evidenceNote = "cash handover receipt max boundary",
+                idempotencyKey = "maximum-credit-abcdef01",
+            });
+        atMaximum.StatusCode.Should().Be(HttpStatusCode.OK);
+        fake.ExecuteCount.Should().Be(1);
+
+        var aboveMaximum = await client.PostAsJsonAsync(
+            $"/v1/admin/partners/{PartnerId}/wallet/credits",
+            new
+            {
+                amount = 100_000.01m,
+                evidenceNote = "cash handover receipt above boundary",
+                idempotencyKey = "above-maximum-abcdef01",
+            });
+        aboveMaximum.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        fake.ExecuteCount.Should().Be(1,
+            "the rejected amount must not start a second provider saga");
+    }
+
     [Fact]
     public async Task Admin_CashCredit_Without_EvidenceNote_Is_400()
     {
@@ -865,6 +938,38 @@ public sealed class PartnerWalletEndpointsTests
     }
 
     [Fact]
+    public async Task OtpAndIdempotencyBindTheSameNormalizedDecimalAmount()
+    {
+        var fake = new FakeWalletClient();
+        await using var factory = FactoryWithFakeWalletDevOtp(fake);
+        using var client = AsPartner(factory);
+
+        var challenge = await IssueChallengeAsync(client, 75.10);
+        var first = await TransferWithOtpAsync(
+            client, 75.1, "otp-decimal-normalized-abcdef01", challenge.ChallengeId, challenge.DevCode!);
+        first.StatusCode.Should().Be(HttpStatusCode.OK,
+            "75.10 and 75.1 are the same exact decimal amount");
+
+        var belowThreshold = await client.PostAsJsonAsync("/v1/partner/wallet/transfers", new
+        {
+            jeeberId = JeeberId,
+            amount = 25.10m,
+            idempotencyKey = "idem-decimal-normalized-abcdef01",
+        });
+        belowThreshold.StatusCode.Should().Be(HttpStatusCode.OK);
+        var replay = await client.PostAsJsonAsync("/v1/partner/wallet/transfers", new
+        {
+            jeeberId = JeeberId,
+            amount = 25.1m,
+            idempotencyKey = "idem-decimal-normalized-abcdef01",
+        });
+        replay.StatusCode.Should().Be(HttpStatusCode.OK,
+            "25.10 and 25.1 must resolve to the same idempotency intent");
+        fake.ExecuteCount.Should().Be(2,
+            "one OTP-authorized move plus one idempotent below-threshold move must execute");
+    }
+
+    [Fact]
     public async Task Partner_Topup_Above_Threshold_Another_Partners_Challenge_Is_403_OtpInvalid()
     {
         var fake = new FakeWalletClient();
@@ -1177,6 +1282,8 @@ public sealed class PartnerWalletEndpointsTests
         /// <summary>How many times the saga's Execute ran — proves idempotency dedup (exactly once).</summary>
         public int ExecuteCount => _executeCount;
         private int _executeCount;
+        public int WalletReadCount => _walletReadCount;
+        private int _walletReadCount;
 
         private static readonly Guid HeaderId = Guid.Parse("99999999-9999-9999-9999-999999999999");
 
@@ -1198,10 +1305,13 @@ public sealed class PartnerWalletEndpointsTests
         };
 
         public override Task<GetHolderWallets> WalletsAsync(Guid holderId)
-            => Task.FromResult(HolderWith(holderId));
+        {
+            System.Threading.Interlocked.Increment(ref _walletReadCount);
+            return Task.FromResult(HolderWith(holderId));
+        }
 
         public override Task<GetHolderWallets> WalletsAsync(Guid holderId, CancellationToken ct)
-            => Task.FromResult(HolderWith(holderId));
+            => WalletsAsync(holderId);
 
         public override Task<AddWalletHolderResponse> SystemWalletAsync()
             => Task.FromResult(new AddWalletHolderResponse
@@ -1230,14 +1340,19 @@ public sealed class PartnerWalletEndpointsTests
         public override Task<ExpectedTransaction> PredictAsync(TransactionRequest body, CancellationToken ct)
             => PredictAsync(body);
 
-        public override Task<Transaction> InitiateAsync(TransactionRequest body)
+        public override Task<Transaction> InitiateAsync(
+            string idempotencyKey,
+            TransactionRequest body)
             => Task.FromResult(new Transaction
             {
                 TransactionHeader = new TransactionHeader { TxId = HeaderId, Status = 0 },
             });
 
-        public override Task<Transaction> InitiateAsync(TransactionRequest body, CancellationToken ct)
-            => InitiateAsync(body);
+        public override Task<Transaction> InitiateAsync(
+            string idempotencyKey,
+            TransactionRequest body,
+            CancellationToken ct)
+            => InitiateAsync(idempotencyKey, body);
 
         public override Task ExecuteAsync(Guid transactionHeaderId)
         {

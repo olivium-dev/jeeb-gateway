@@ -84,7 +84,7 @@ public sealed class PartnerWalletController : PartnerControllerBase
             return Ok(new PartnerWalletBalanceResponse
             {
                 PartnerId = partnerId,
-                Balance = 0d,
+                Balance = 0m,
                 CurrencyId = _options.CurrencyId,
                 IsActive = false,
             });
@@ -286,6 +286,6 @@ public sealed class PartnerWalletController : PartnerControllerBase
     }
 
     /// <summary>Reject an amount above the configured ceiling BEFORE any wallet-service call.</summary>
-    private bool TryValidateAmount(double amount, out IActionResult problem)
+    private bool TryValidateAmount(decimal amount, out IActionResult problem)
         => TryEnforceAmountCeiling(amount, _options.MaxTransferAmount, out problem);
 }

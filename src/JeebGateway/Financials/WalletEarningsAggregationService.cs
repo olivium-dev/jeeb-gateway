@@ -112,7 +112,8 @@ public sealed class WalletEarningsAggregationService : IEarningsAggregationServi
         var (period, startDate) = MapPeriod(from, to);
         try
         {
-            var raw = await _wallet.CreditRevenueAsync(jeeberId, period, startDate, ct);
+            var raw = await _wallet.CreditRevenueAsync(
+                jeeberId, period, startDate, null!, null!, null!, ct);
             return (decimal)raw;
         }
         catch (ApiException)

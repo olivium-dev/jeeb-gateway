@@ -482,15 +482,97 @@ public class DevEndpointsTests
         await storeA.ActivateRuntimeSeedAsync(login, holderId, CancellationToken.None);
         (await storeB.VerifyAsync(login, "same-secret", CancellationToken.None))
             .Should().NotBeNull();
+        await storeB.BindRuntimeSessionAsync(
+            login, holderId, "bounded-family-ab", CancellationToken.None);
 
         await storeB.ReserveRuntimeSeedAsync(
             login, holderId, "Lease Demo", "same-secret", CancellationToken.None);
         (await storeA.VerifyAsync(login, "same-secret", CancellationToken.None))
             .Should().BeNull("an exact retry on another replica must not reset one-shot consumption");
 
-        (await storeB.RemoveAsync(login, holderId, CancellationToken.None)).Should().Be(holderId);
+        (await storeB.RemoveAsync(login, holderId, CancellationToken.None)).HolderId
+            .Should().Be(holderId);
         (await storeA.VerifyAsync(login, "same-secret", CancellationToken.None))
             .Should().BeNull("the shared revocation marker is visible to a cold replica");
+    }
+
+    [Fact]
+    public async Task PartnerCredential_AbsentCleanupCannotRevokeAnySession()
+    {
+        var tokens = new RecordingCleanupTokenService();
+        using var factory = NewFactory(
+            enabled: true,
+            upstreamHandler: ThrowingHandler(),
+            tokens: tokens);
+        var holderId = Guid.Parse("10101010-1010-1010-1010-101010101010");
+
+        var response = await factory.CreateClient().DeleteAsync(
+            $"/dev/partner/credentials/{PartnerCredentialStore.RuntimeIdentifier(holderId)}"
+            + $"?holderId={holderId:D}");
+
+        response.StatusCode.Should().Be(HttpStatusCode.NotFound);
+        tokens.RevokedFamilies.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task PartnerCredential_InactiveOrCrossHolderCleanupCannotRevokeAnySession()
+    {
+        var shared = new JeebGateway.StateService.Idempotency.InMemoryIdempotencyStore(TimeProvider.System);
+        var credentials = new PartnerCredentialStore(
+            Options.Create(new PartnerAuthOptions()),
+            shared,
+            TimeProvider.System,
+            NullLogger<PartnerCredentialStore>.Instance);
+        var tokens = new RecordingCleanupTokenService();
+        var holderA = Guid.Parse("20202020-2020-2020-2020-202020202020");
+        var holderB = Guid.Parse("30303030-3030-3030-3030-303030303030");
+        var loginA = PartnerCredentialStore.RuntimeIdentifier(holderA);
+        await credentials.ReserveRuntimeSeedAsync(
+            loginA, holderA, "Inactive", "runtime-only", CancellationToken.None);
+        using var factory = NewFactory(
+            enabled: true,
+            upstreamHandler: ThrowingHandler(),
+            credentials: credentials,
+            tokens: tokens);
+        var client = factory.CreateClient();
+
+        (await client.DeleteAsync(
+            $"/dev/partner/credentials/{loginA}?holderId={holderA:D}"))
+            .StatusCode.Should().Be(HttpStatusCode.Conflict);
+        (await client.DeleteAsync(
+            $"/dev/partner/credentials/{loginA}?holderId={holderB:D}"))
+            .StatusCode.Should().Be(HttpStatusCode.Conflict);
+        tokens.RevokedFamilies.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task PartnerCredential_CleanupOutageRetriesTheExactLinkedFamilyIdempotently()
+    {
+        var tokens = new RecordingCleanupTokenService { FailuresRemaining = 1 };
+        using var factory = NewFactory(
+            enabled: true,
+            upstreamHandler: ThrowingHandler(),
+            wallets: new RecordingWalletProvisioner(),
+            tokens: tokens);
+        var client = factory.CreateClient();
+        var holderId = Guid.Parse("40404040-4040-4040-4040-404040404040");
+        var login = PartnerCredentialStore.RuntimeIdentifier(holderId);
+        (await client.PostAsync("/dev/partner/credentials", JsonBody($$"""
+            {
+              "identifier": "{{login}}",
+              "holderId": "{{holderId:D}}",
+              "displayName": "Retry Demo",
+              "password": "runtime-only"
+            }
+            """))).StatusCode.Should().Be(HttpStatusCode.NoContent);
+        (await client.PostAsync("/v1/partner/auth/login", JsonBody($$"""
+            { "identifier": "{{login}}", "password": "runtime-only" }
+            """))).StatusCode.Should().Be(HttpStatusCode.OK);
+
+        var cleanup = $"/dev/partner/credentials/{login}?holderId={holderId:D}";
+        (await client.DeleteAsync(cleanup)).StatusCode.Should().Be(HttpStatusCode.BadGateway);
+        (await client.DeleteAsync(cleanup)).StatusCode.Should().Be(HttpStatusCode.NoContent);
+        tokens.RevokedFamilies.Should().Equal("exact-runtime-family", "exact-runtime-family");
     }
 
     [Fact]
@@ -546,14 +628,20 @@ public class DevEndpointsTests
             .Claims.Single(claim =>
                 claim.Type == JeebGateway.Tokens.TokenService.RuntimeRefreshHashClaim)
             .Value;
+        var runtimeSessionFamily = new JwtSecurityTokenHandler()
+            .ReadJwtToken(accessToken)
+            .Claims.Single(claim =>
+                claim.Type == JeebGateway.Tokens.TokenService.RuntimeSessionFamilyClaim)
+            .Value;
 
         client.DefaultRequestHeaders.Authorization =
             new System.Net.Http.Headers.AuthenticationHeaderValue(
                 "Bearer",
                 RuntimeBearer(
                     Guid.Parse("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"),
-                    DateTimeOffset.UtcNow.AddMinutes(1),
-                    runtimeRefreshHash));
+                    refreshExpiry,
+                    runtimeRefreshHash,
+                    runtimeSessionFamily));
         var futureDeadline = await client.GetAsync("/v1/partner/wallet");
         futureDeadline.StatusCode.Should().NotBe(HttpStatusCode.Unauthorized,
             "the probe token must otherwise be accepted by the gateway JWT scheme");
@@ -562,9 +650,34 @@ public class DevEndpointsTests
             new System.Net.Http.Headers.AuthenticationHeaderValue(
                 "Bearer",
                 RuntimeBearer(
+                    Guid.Parse("ffffffff-ffff-ffff-ffff-ffffffffffff"),
+                    refreshExpiry,
+                    runtimeRefreshHash,
+                    runtimeSessionFamily));
+        (await client.GetAsync("/v1/partner/wallet")).StatusCode.Should()
+            .Be(HttpStatusCode.Unauthorized,
+                "a bounded access token cannot borrow another subject's refresh row");
+
+        client.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue(
+                "Bearer",
+                RuntimeBearer(
+                    Guid.Parse("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"),
+                    refreshExpiry,
+                    runtimeRefreshHash,
+                    "different-bounded-family"));
+        (await client.GetAsync("/v1/partner/wallet")).StatusCode.Should()
+            .Be(HttpStatusCode.Unauthorized,
+                "a bounded access token cannot borrow another session family's refresh row");
+
+        client.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue(
+                "Bearer",
+                RuntimeBearer(
                     Guid.Parse("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"),
                     DateTimeOffset.UtcNow.AddSeconds(-1),
-                    runtimeRefreshHash));
+                    runtimeRefreshHash,
+                    runtimeSessionFamily));
         var expiredDeadline = await client.GetAsync("/v1/partner/wallet");
         expiredDeadline.StatusCode.Should().Be(HttpStatusCode.Unauthorized,
             "the signed runtime deadline must remain strict even if in-memory state is absent");
@@ -759,7 +872,8 @@ public class DevEndpointsTests
     private static string RuntimeBearer(
         Guid holderId,
         DateTimeOffset runtimeDeadline,
-        string runtimeRefreshHash)
+        string runtimeRefreshHash,
+        string runtimeSessionFamily)
     {
         var now = DateTimeOffset.UtcNow;
         var credentials = new SigningCredentials(
@@ -780,6 +894,9 @@ public class DevEndpointsTests
                 new Claim(
                     JeebGateway.Tokens.TokenService.RuntimeRefreshHashClaim,
                     runtimeRefreshHash),
+                new Claim(
+                    JeebGateway.Tokens.TokenService.RuntimeSessionFamilyClaim,
+                    runtimeSessionFamily),
             ],
             notBefore: now.AddSeconds(-5).UtcDateTime,
             expires: now.AddMinutes(5).UtcDateTime,
@@ -857,6 +974,8 @@ public class DevEndpointsTests
         private readonly HashSet<string> _consumed = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, (Guid HolderId, string DisplayName, string Secret)> _pending =
             new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, string> _sessionFamilies =
+            new(StringComparer.OrdinalIgnoreCase);
         public int SeedCalls { get; private set; }
         public Exception? PreflightFailure { get; init; }
 
@@ -897,16 +1016,30 @@ public class DevEndpointsTests
             return Task.CompletedTask;
         }
 
-        public Task<Guid> RemoveAsync(string login, Guid expectedHolderId, CancellationToken ct)
+        public Task BindRuntimeSessionAsync(
+            string login,
+            Guid holderId,
+            string sessionFamilyId,
+            CancellationToken ct)
+        {
+            _sessionFamilies[login] = sessionFamilyId;
+            return Task.CompletedTask;
+        }
+
+        public Task<RuntimeCredentialSession> RemoveAsync(
+            string login,
+            Guid expectedHolderId,
+            CancellationToken ct)
         {
             _secrets.Remove(login);
             if (_accounts.Remove(login, out var account))
             {
                 _revokedHolders.Add(account.HolderId);
-                return Task.FromResult(account.HolderId);
+                return Task.FromResult(new RuntimeCredentialSession(
+                    account.HolderId,
+                    _sessionFamilies[login]));
             }
-            _revokedHolders.Add(expectedHolderId);
-            return Task.FromResult(expectedHolderId);
+            throw new RuntimeCredentialNotFoundException("not found");
         }
 
         private readonly HashSet<Guid> _revokedHolders = new();
@@ -937,6 +1070,54 @@ public class DevEndpointsTests
             RevocationReason reason,
             CancellationToken ct) => throw new NotSupportedException();
 
+        public Task<int> RevokeAllForUserAsync(
+            string userId,
+            RevocationReason reason,
+            CancellationToken ct) => throw new NotSupportedException();
+    }
+
+    private sealed class RecordingCleanupTokenService : ITokenService
+    {
+        public int FailuresRemaining { get; set; }
+        public List<string> RevokedFamilies { get; } = [];
+
+        public Task<TokenPair> IssueAsync(
+            string userId,
+            IEnumerable<string> roles,
+            CancellationToken ct) => throw new NotSupportedException();
+
+        public Task<TokenPair> IssueBoundedAsync(
+            string userId,
+            IEnumerable<string> roles,
+            string activeRole,
+            DateTimeOffset absoluteSessionExpiresAt,
+            CancellationToken ct) => Task.FromResult(new TokenPair
+        {
+            AccessToken = "test-access-token",
+            RefreshToken = "test-refresh-token",
+            AccessTokenExpiresAt = absoluteSessionExpiresAt,
+            RefreshTokenExpiresAt = absoluteSessionExpiresAt,
+            BoundedSessionFamilyId = "exact-runtime-family",
+        });
+
+        public Task<int> RevokeBoundedSessionAsync(
+            string sessionFamilyId,
+            RevocationReason reason,
+            CancellationToken ct)
+        {
+            RevokedFamilies.Add(sessionFamilyId);
+            if (FailuresRemaining-- > 0)
+                throw new InvalidOperationException("simulated state dependency outage");
+            return Task.FromResult(1);
+        }
+
+        public Task<RefreshResult> RefreshAsync(
+            string refreshToken,
+            CancellationToken ct) => throw new NotSupportedException();
+        public Task RevokeAsync(
+            string refreshToken,
+            RevocationReason reason,
+            CancellationToken ct) => throw new NotSupportedException();
         public Task<int> RevokeAllForUserAsync(
             string userId,
             RevocationReason reason,

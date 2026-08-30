@@ -225,10 +225,13 @@ builder.Services
                 {
                     var runtimeRefreshHash = context.Principal?.FindFirst(
                         JeebGateway.Tokens.TokenService.RuntimeRefreshHashClaim)?.Value;
+                    var runtimeSessionFamily = context.Principal?.FindFirst(
+                        JeebGateway.Tokens.TokenService.RuntimeSessionFamilyClaim)?.Value;
                     if (!long.TryParse(runtimeExpiry, out var runtimeExpirySeconds)
                         || DateTimeOffset.FromUnixTimeSeconds(runtimeExpirySeconds)
                             <= DateTimeOffset.UtcNow
-                        || string.IsNullOrWhiteSpace(runtimeRefreshHash))
+                        || string.IsNullOrWhiteSpace(runtimeRefreshHash)
+                        || string.IsNullOrWhiteSpace(runtimeSessionFamily))
                     {
                         context.Fail("Bearer token validation failed.");
                         return;
@@ -240,7 +243,7 @@ builder.Services
                             .GetRequiredService<IRefreshTokenStore>();
                         if (string.IsNullOrWhiteSpace(subject)
                             || await refreshStore.IsBoundedSessionRevokedAsync(
-                                subject,
+                                runtimeSessionFamily,
                                 context.HttpContext.RequestAborted))
                         {
                             context.Fail("Bearer token validation failed.");
@@ -253,7 +256,11 @@ builder.Services
                             || runtimeRefresh.RevokedAt is not null
                             || runtimeRefresh.ExpiresAt <= DateTimeOffset.UtcNow
                             || runtimeRefresh.AbsoluteSessionExpiresAt is null
-                            || runtimeRefresh.AbsoluteSessionExpiresAt <= DateTimeOffset.UtcNow)
+                            || runtimeRefresh.AbsoluteSessionExpiresAt <= DateTimeOffset.UtcNow
+                            || runtimeRefresh.UserId != subject
+                            || runtimeRefresh.BoundedSessionFamilyId != runtimeSessionFamily
+                            || runtimeRefresh.AbsoluteSessionExpiresAt.Value.ToUnixTimeSeconds()
+                                != runtimeExpirySeconds)
                         {
                             context.Fail("Bearer token validation failed.");
                             return;

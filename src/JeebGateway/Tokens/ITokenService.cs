@@ -36,8 +36,8 @@ public interface ITokenService
 
     Task<int> RevokeAllForUserAsync(string userId, RevocationReason reason, CancellationToken ct);
 
-    Task<int> RevokeBoundedSessionForUserAsync(
-        string userId,
+    Task<int> RevokeBoundedSessionAsync(
+        string sessionFamilyId,
         RevocationReason reason,
         CancellationToken ct) =>
         throw new NotSupportedException(
@@ -89,6 +89,7 @@ public class TokenPair
     public required string RefreshToken { get; init; }
     public required DateTimeOffset AccessTokenExpiresAt { get; init; }
     public required DateTimeOffset RefreshTokenExpiresAt { get; init; }
+    internal string? BoundedSessionFamilyId { get; init; }
 }
 
 public enum RefreshOutcome

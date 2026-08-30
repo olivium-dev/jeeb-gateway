@@ -1,6 +1,4 @@
-using System.Net.Http.Json;
-using System.Text.Json;
-using System.Text.Json.Serialization;
+using WalletApi = JeebGateway.service.ServiceWallet;
 
 namespace JeebGateway.JeebWallet;
 
@@ -42,8 +40,6 @@ public sealed class WalletServiceJeeberWalletProvisioner :
     private const string DefaultWalletType = "jeeb";
     private const string JeeberProvisioningNote = "gateway-jeeber-role-activation";
     private const string PartnerProvisioningNote = "devtool-partner-wallet-bootstrap";
-    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
-
     private readonly IHttpClientFactory _clients;
 
     public WalletServiceJeeberWalletProvisioner(IHttpClientFactory clients) => _clients = clients;
@@ -78,11 +74,15 @@ public sealed class WalletServiceJeeberWalletProvisioner :
         if (holderId == Guid.Empty)
             throw new ArgumentException("The system holder cannot receive a user wallet.", nameof(holderId));
 
-        var client = _clients.CreateClient(HttpClientName);
+        var http = _clients.CreateClient(HttpClientName);
+        var baseAddress = http.BaseAddress?.ToString()
+            ?? throw new WalletProvisioningUnavailableException(
+                "Wallet-service holder provisioning has no configured base address.");
+        var client = new WalletApi.ServiceWalletClient(baseAddress, http);
         try
         {
             var currencies = await ReadCurrenciesAsync(client, ct);
-            var current = await ReadHolderAsync(client, holderId, ct);
+            var current = await client.WalletsAsync(holderId, ct);
             var request = BuildEnsureRequest(
                 holderId,
                 holderName,
@@ -92,12 +92,7 @@ public sealed class WalletServiceJeeberWalletProvisioner :
                 currencies,
                 current);
 
-            using var response = await client.PutAsJsonAsync("Wallet/holder/ensure", request, Json, ct);
-            await EnsureSuccessAsync(response, "ensure holder wallets", ct);
-            await using var body = await response.Content.ReadAsStreamAsync(ct);
-            var ensured = await JsonSerializer.DeserializeAsync<WalletHolderResponse>(body, Json, ct)
-                ?? throw new WalletProvisioningUnavailableException(
-                    "Wallet-service returned an invalid holder provisioning response.");
+            var ensured = await client.EnsureAsync(request, ct);
 
             VerifyReady(holderId, holderType, enforceHolderType, currencies, ensured);
         }
@@ -114,25 +109,19 @@ public sealed class WalletServiceJeeberWalletProvisioner :
             throw new WalletProvisioningUnavailableException(
                 "Wallet-service holder provisioning timed out.", ex);
         }
-        catch (Exception ex) when (ex is HttpRequestException or JsonException or NotSupportedException)
+        catch (Exception ex) when (ex is HttpRequestException or WalletApi.ApiException)
         {
             throw new WalletProvisioningUnavailableException(
                 "Wallet-service holder provisioning failed.", ex);
         }
     }
 
-    private static async Task<IReadOnlyList<WalletCurrency>> ReadCurrenciesAsync(
-        HttpClient client,
+    private static async Task<IReadOnlyList<WalletApi.Currency>> ReadCurrenciesAsync(
+        WalletApi.ServiceWalletClient client,
         CancellationToken ct)
     {
-        using var response = await client.GetAsync(
-            "Fees/currencies", HttpCompletionOption.ResponseHeadersRead, ct);
-        await EnsureSuccessAsync(response, "read configured currencies", ct);
-        await using var body = await response.Content.ReadAsStreamAsync(ct);
-        var currencies = await JsonSerializer.DeserializeAsync<List<WalletCurrency>>(body, Json, ct)
-            ?? throw new WalletProvisioningUnavailableException(
-                "Wallet-service returned an invalid currency response.");
-        if (currencies.Count == 0
+        var currencies = (await client.CurrenciesAsync(ct)).ToArray();
+        if (currencies.Length == 0
             || currencies.Any(currency => currency.Id <= 0)
             || currencies.Any(currency => string.IsNullOrWhiteSpace(currency.Code))
             || currencies.GroupBy(currency => currency.Id).Any(group => group.Count() != 1)
@@ -146,36 +135,22 @@ public sealed class WalletServiceJeeberWalletProvisioner :
         return currencies;
     }
 
-    private static async Task<WalletHolderResponse> ReadHolderAsync(
-        HttpClient client,
-        Guid holderId,
-        CancellationToken ct)
-    {
-        using var response = await client.GetAsync(
-            $"Wallet/holder/{holderId:D}/wallets", HttpCompletionOption.ResponseHeadersRead, ct);
-        await EnsureSuccessAsync(response, "read holder wallets", ct);
-        await using var body = await response.Content.ReadAsStreamAsync(ct);
-        return await JsonSerializer.DeserializeAsync<WalletHolderResponse>(body, Json, ct)
-            ?? throw new WalletProvisioningUnavailableException(
-                "Wallet-service returned an invalid holder response.");
-    }
-
-    private static EnsureHolderRequest BuildEnsureRequest(
+    private static WalletApi.CreateWalletOwnerDto BuildEnsureRequest(
         Guid holderId,
         string holderName,
         string holderType,
         string provisioningNote,
         bool enforceHolderType,
-        IReadOnlyList<WalletCurrency> currencies,
-        WalletHolderResponse current)
+        IReadOnlyList<WalletApi.Currency> currencies,
+        WalletApi.GetHolderWallets current)
     {
-        var active = (current.Wallets ?? Array.Empty<WalletAccount>())
+        var active = (current.Wallets ?? Array.Empty<WalletApi.Wallet>())
             .Where(wallet => wallet.IsActive)
             .ToArray();
-        var requestedWallets = new List<EnsureWallet>(currencies.Count);
+        var requestedWallets = new List<WalletApi.AddWalletRequest>(currencies.Count);
         foreach (var currency in currencies)
         {
-            var matches = active.Where(wallet => wallet.CurrencyId == currency.Id).ToArray();
+            var matches = active.Where(wallet => wallet.CurrencyID == currency.Id).ToArray();
             if (matches.Length > 1)
             {
                 throw new WalletProvisioningUnavailableException(
@@ -190,7 +165,12 @@ public sealed class WalletServiceJeeberWalletProvisioner :
             var walletType = matches.Length == 1 && !string.IsNullOrWhiteSpace(matches[0].Type)
                 ? matches[0].Type
                 : DefaultWalletType;
-            requestedWallets.Add(new EnsureWallet(currency.Id, walletType, provisioningNote));
+            requestedWallets.Add(new WalletApi.AddWalletRequest
+            {
+                CurrencyID = currency.Id,
+                Type = walletType,
+                Note = provisioningNote,
+            });
         }
 
         var holder = current.WalletHolder;
@@ -212,20 +192,26 @@ public sealed class WalletServiceJeeberWalletProvisioner :
                 $"Holder is already provisioned as '{holder.HolderType}', not '{holderType}'.");
         }
 
-        return new EnsureHolderRequest(
-            new WalletHolderPayload(
-                holderId,
-                string.IsNullOrWhiteSpace(holder?.HolderName) ? holderName : holder.HolderName,
-                holder is null ? holderType : holder.HolderType),
-            requestedWallets);
+        return new WalletApi.CreateWalletOwnerDto
+        {
+            WalletHolder = new WalletApi.AddWalletHolderRequest
+            {
+                HolderId = holderId,
+                HolderName = string.IsNullOrWhiteSpace(holder?.HolderName)
+                    ? holderName
+                    : holder.HolderName,
+                HolderType = holder is null ? holderType : holder.HolderType,
+            },
+            Wallets = requestedWallets,
+        };
     }
 
     private static void VerifyReady(
         Guid holderId,
         string expectedHolderType,
         bool enforceHolderType,
-        IReadOnlyList<WalletCurrency> currencies,
-        WalletHolderResponse response)
+        IReadOnlyList<WalletApi.Currency> currencies,
+        WalletApi.AddWalletHolderResponse response)
     {
         if (response.WalletHolder is null
             || response.WalletHolder.HolderId != holderId
@@ -244,12 +230,12 @@ public sealed class WalletServiceJeeberWalletProvisioner :
                 "Wallet-service returned a holder with the wrong actor type.");
         }
 
-        var active = (response.Wallets ?? Array.Empty<WalletAccount>())
+        var active = (response.Wallets ?? Array.Empty<WalletApi.Wallet>())
             .Where(wallet => wallet.IsActive)
             .ToArray();
         if (currencies.Any(currency =>
             {
-                var matches = active.Where(wallet => wallet.CurrencyId == currency.Id).ToArray();
+                var matches = active.Where(wallet => wallet.CurrencyID == currency.Id).ToArray();
                 return matches.Length != 1 || matches[0].WalletId == Guid.Empty;
             }))
         {
@@ -258,61 +244,4 @@ public sealed class WalletServiceJeeberWalletProvisioner :
         }
     }
 
-    private static async Task EnsureSuccessAsync(
-        HttpResponseMessage response,
-        string operation,
-        CancellationToken ct)
-    {
-        if (response.IsSuccessStatusCode) return;
-        _ = await response.Content.ReadAsByteArrayAsync(ct);
-        throw new WalletProvisioningUnavailableException(
-            $"Wallet-service could not {operation} (status {(int)response.StatusCode}).");
-    }
-
-    private sealed class WalletCurrency
-    {
-        [JsonPropertyName("id")]
-        public int Id { get; set; }
-
-        public string Code { get; set; } = string.Empty;
-    }
-
-    private sealed class WalletHolderResponse
-    {
-        public WalletHolder? WalletHolder { get; set; }
-        public IReadOnlyList<WalletAccount>? Wallets { get; set; }
-    }
-
-    private sealed class WalletHolder
-    {
-        public Guid HolderId { get; set; }
-        public string HolderName { get; set; } = string.Empty;
-        public string HolderType { get; set; } = string.Empty;
-        public bool IsActive { get; set; }
-    }
-
-    private sealed class WalletAccount
-    {
-        public Guid WalletId { get; set; }
-
-        [JsonPropertyName("currencyID")]
-        public int CurrencyId { get; set; }
-
-        public string Type { get; set; } = string.Empty;
-        public bool IsActive { get; set; }
-    }
-
-    private sealed record EnsureHolderRequest(
-        WalletHolderPayload WalletHolder,
-        IReadOnlyList<EnsureWallet> Wallets);
-
-    private sealed record WalletHolderPayload(
-        Guid HolderId,
-        string HolderName,
-        string HolderType);
-
-    private sealed record EnsureWallet(
-        [property: JsonPropertyName("currencyID")] int CurrencyId,
-        string Type,
-        string Note);
 }

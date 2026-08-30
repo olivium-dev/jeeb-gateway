@@ -148,7 +148,13 @@ public class CommissionAgreementTests
         }
 
         public override Task<double> CreditRevenueAsync(
-            string holderId, string period, DateTimeOffset? startDate, CancellationToken cancellationToken)
+            string holderId,
+            string period,
+            DateTimeOffset? startDate,
+            string type,
+            IEnumerable<string> excludeType,
+            string walletType,
+            CancellationToken cancellationToken)
             => Task.FromResult(_gross);
     }
 }
