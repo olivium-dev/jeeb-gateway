@@ -15,11 +15,21 @@ set -euo pipefail
 output=''
 headers=''
 url=''
+accept_seen=false
+user_agent_seen=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --output) output=$2; shift 2 ;;
     --dump-header) headers=$2; shift 2 ;;
-    --write-out|--connect-timeout|--max-time|--proto|--request|--header)
+    --header)
+      case "$2" in
+        'Accept: application/problem+json') accept_seen=true ;;
+        'User-Agent: Jeeb-Staging-Deploy/1.0') user_agent_seen=true ;;
+        *) exit 96 ;;
+      esac
+      shift 2
+      ;;
+    --write-out|--connect-timeout|--max-time|--proto|--request)
       shift 2
       ;;
     --silent|--tlsv1.2) shift ;;
@@ -29,27 +39,32 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ -n "$output" ] && [ -n "$headers" ] && [ -n "$url" ]
+[ "$accept_seen" = true ] && [ "$user_agent_seen" = true ]
 printf '%s\n' "$url" >> "$FREEZE_TEST_CALLS"
 case "${FREEZE_TEST_SCENARIO:-success}" in
   transport) exit 28 ;;
-  wrong-status) status=502 ;;
-  *) status=503 ;;
+  wrong-status) status=503 ;;
+  cloudflare-block) status=403 ;;
+  *) status=401 ;;
 esac
 
-content_type=application/problem+json
-cache_control=no-store
+content_type='application/problem+json; charset=utf-8'
 extra_header=''
-body='{"type":"about:blank","title":"Service Unavailable","status":503,"detail":"The service is temporarily unavailable. Please try again."}'
+request_path=${url#https://app.jeeb.fds-1.com}
+request_path=${request_path%%\?*}
+body=$(printf '{"type":"https://problems.jeeb.lb/auth/invalid_otp","title":"Invalid code","status":401,"detail":"The OTP code is missing or empty.","instance":"%s"}' "$request_path")
 case "${FREEZE_TEST_SCENARIO:-success}" in
   wrong-content-type) content_type=application/json ;;
-  missing-cache) cache_control='' ;;
   retry-after) extra_header=$'Retry-After: 30\r\n' ;;
-  extra-field) body='{"type":"about:blank","title":"Service Unavailable","status":503,"detail":"The service is temporarily unavailable. Please try again.","code":"frozen"}' ;;
+  set-cookie) extra_header=$'Set-Cookie: session=forbidden\r\n' ;;
+  authorization) extra_header=$'Authorization: Bearer forbidden\r\n' ;;
+  wrong-instance) body='{"type":"https://problems.jeeb.lb/auth/invalid_otp","title":"Invalid code","status":401,"detail":"The OTP code is missing or empty.","instance":"/wrong"}' ;;
+  extra-field) body=$(printf '{"type":"https://problems.jeeb.lb/auth/invalid_otp","title":"Invalid code","status":401,"detail":"The OTP code is missing or empty.","instance":"%s","code":"unexpected"}' "$request_path") ;;
+  cloudflare-block) body='{"type":"https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-1xxx-errors/error-1010/","title":"Error 1010: Access denied","status":403,"error_code":1010}' ;;
 esac
 {
   printf 'HTTP/2 %s\r\n' "$status"
   printf 'Content-Type: %s\r\n' "$content_type"
-  [ -z "$cache_control" ] || printf 'Cache-Control: %s\r\n' "$cache_control"
   printf '%s' "$extra_header"
   printf '\r\n'
 } > "$headers"
@@ -100,8 +115,8 @@ if grep -Fq '/otp/request' "$success_calls"; then
   exit 1
 fi
 
-for rejected in wrong-status wrong-content-type missing-cache retry-after \
-  extra-field newline-body transport; do
+for rejected in wrong-status wrong-content-type retry-after set-cookie authorization \
+  wrong-instance extra-field newline-body cloudflare-block transport; do
   run_case "$rejected" reject
 done
 
@@ -113,4 +128,4 @@ invalid_nonce_status=$?
 set -e
 [ "$invalid_nonce_status" -ne 0 ]
 
-echo 'staging OTP verify freeze tests: PASS (1 exact positive, 8 adversarial negatives)'
+echo 'staging OTP verify fail-closed tests: PASS (1 exact positive, 10 adversarial negatives)'

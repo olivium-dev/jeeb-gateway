@@ -2,18 +2,19 @@
 set -euo pipefail
 
 # The OTP cutover intentionally replaces the frozen provider path. The owner-selected,
-# protected workflow mode is the authorization to skip the legacy pre-cutover proof;
-# security-cutover and every other caller retain the original fail-closed probes.
+# protected workflow mode is the authorization to skip the pre-cutover proof. Every
+# later caller proves that an empty verification request reaches the post-cutover
+# gateway and still fails closed without creating a session.
 if [ "${DEPLOYMENT_MODE:-}" = otp-cutover ]; then
   printf '%s\n' 'OTP verification freeze proof skipped for protected otp-cutover mode.'
   exit 0
 fi
 
 readonly STAGING_GATEWAY_ORIGIN=https://app.jeeb.fds-1.com
-readonly EXPECTED_PROBLEM='{"type":"about:blank","title":"Service Unavailable","status":503,"detail":"The service is temporarily unavailable. Please try again."}'
+readonly PROBE_USER_AGENT=Jeeb-Staging-Deploy/1.0
 
 fail() {
-  printf 'RED: staging OTP verification freeze proof failed (%s)\n' "$1" >&2
+  printf 'RED: staging OTP verification fail-closed proof failed (%s)\n' "$1" >&2
   exit 1
 }
 
@@ -55,10 +56,6 @@ fi
 evidence_root=$(mktemp -d)
 chmod 700 "$evidence_root"
 trap 'status=$?; rm -rf -- "$evidence_root"; exit "$status"' EXIT
-expected_body="$evidence_root/expected"
-printf '%s' "$EXPECTED_PROBLEM" > "$expected_body"
-chmod 600 "$expected_body"
-
 targets=(
   '/v1/auth/otp/verify'
   '/v1/auth/otp/verify/'
@@ -69,38 +66,44 @@ targets=(
 for index in "${!targets[@]}"; do
   response_body="$evidence_root/body-${index}"
   response_headers="$evidence_root/headers-${index}"
+  expected_body="$evidence_root/expected-${index}"
   chmod 600 "$response_body" "$response_headers" 2>/dev/null || true
+  printf \
+    '{"type":"https://problems.jeeb.lb/auth/invalid_otp","title":"Invalid code","status":401,"detail":"The OTP code is missing or empty.","instance":"%s"}' \
+    "${targets[$index]}" > "$expected_body"
+  chmod 600 "$expected_body"
   if ! status=$(curl --silent --connect-timeout 10 --max-time 20 \
       --proto '=https' --tlsv1.2 --request POST \
       --header 'Accept: application/problem+json' \
+      --header "User-Agent: $PROBE_USER_AGENT" \
       --output "$response_body" --dump-header "$response_headers" \
       --write-out '%{http_code}' \
       "${STAGING_GATEWAY_ORIGIN}${targets[$index]}?cutover_nonce=${nonce}" \
       2>/dev/null); then
     fail transport
   fi
-  [ "$status" = 503 ] || fail status
+  [ "$status" = 401 ] || fail status
 
   content_type=$(header_value "$response_headers" content-type) || fail content-type
-  [ "$(printf '%s' "$content_type" | tr '[:upper:]' '[:lower:]')" = \
+  media_type=${content_type%%;*}
+  [ "$(printf '%s' "$media_type" | tr '[:upper:]' '[:lower:]')" = \
     application/problem+json ] || fail content-type
-  cache_control=$(header_value "$response_headers" cache-control) || fail cache-control
-  [ "$(printf '%s' "$cache_control" | tr '[:upper:]' '[:lower:]')" = no-store ] \
-    || fail cache-control
   header_absent "$response_headers" retry-after || fail retry-after
+  header_absent "$response_headers" set-cookie || fail set-cookie
+  header_absent "$response_headers" authorization || fail authorization
   cmp -s "$expected_body" "$response_body" || fail response-body
-  jq -e '
+  jq -e --arg instance "${targets[$index]}" '
     type == "object"
-    and keys == ["detail", "status", "title", "type"]
-    and .type == "about:blank"
-    and .title == "Service Unavailable"
-    and .status == 503
-    and .detail == "The service is temporarily unavailable. Please try again."
-    and has("instance") == false
+    and keys == ["detail", "instance", "status", "title", "type"]
+    and .type == "https://problems.jeeb.lb/auth/invalid_otp"
+    and .title == "Invalid code"
+    and .status == 401
+    and .detail == "The OTP code is missing or empty."
+    and .instance == $instance
     and has("code") == false
     and has("errorCode") == false
     and has("retryAfter") == false
   ' "$response_body" >/dev/null || fail problem-contract
 done
 
-printf '%s\n' 'Staging OTP verification freeze proof passed (4 public HTTPS probes; response bodies suppressed).'
+printf '%s\n' 'Staging OTP verification fail-closed proof passed (4 public HTTPS probes; response bodies suppressed).'
