@@ -34,6 +34,13 @@ public sealed class PartnerWalletOptions
     public string CreditTag { get; init; } = "partner-cash-credit";
 
     /// <summary>
+    /// Whether wallet-service may add configured fee legs to partner top-ups. This stays false
+    /// until the partner cash-in flow also funds the separate base-currency fee-source wallet;
+    /// enabling fees before then would make an otherwise funded demo top-up fail at execution.
+    /// </summary>
+    public bool ApplyConfiguredTopupFees { get; init; } = false;
+
+    /// <summary>
     /// The wallet-service currency id the partner wallet operates in. Used only to pick the
     /// holder's matching wallet among (possibly) several; NOT a money computation.
     /// </summary>

@@ -25,8 +25,9 @@ public interface IPartnerWalletService
 
     /// <summary>
     /// Execute a partner→jeeber top-up via the wallet-service saga (initiate → execute; abort on
-    /// any post-initiate failure). Commission/fees are realized by wallet-service Fees config and
-    /// flow to the system wallet — the gateway does not compute or route them.
+    /// any post-initiate failure). When explicitly enabled, commission/fees are realized by
+    /// wallet-service configuration and flow to the system wallet; they remain disabled until the
+    /// separate partner base-currency fee source has a funded policy. The gateway invents no fee math.
     /// </summary>
     Task<PartnerWalletMoveResponse> ExecuteTopupAsync(
         Guid partnerId, Guid jeeberId, decimal amount, string idempotencyKey, string? note,

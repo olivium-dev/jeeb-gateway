@@ -515,6 +515,37 @@ public class DevEndpointsTests
     }
 
     [Fact]
+    public async Task PartnerCredential_ActivatedButUnboundCleanupTombstonesWithoutRevokingAFamily()
+    {
+        var shared = new JeebGateway.StateService.Idempotency.InMemoryIdempotencyStore(TimeProvider.System);
+        var credentials = new PartnerCredentialStore(
+            Options.Create(new PartnerAuthOptions()),
+            shared,
+            TimeProvider.System,
+            NullLogger<PartnerCredentialStore>.Instance);
+        var tokens = new RecordingCleanupTokenService();
+        var holderId = Guid.Parse("12121212-1212-1212-1212-121212121212");
+        var login = PartnerCredentialStore.RuntimeIdentifier(holderId);
+        await credentials.ReserveRuntimeSeedAsync(
+            login, holderId, "Lost Response", "runtime-only", CancellationToken.None);
+        await credentials.ActivateRuntimeSeedAsync(login, holderId, CancellationToken.None);
+        using var factory = NewFactory(
+            enabled: true,
+            upstreamHandler: ThrowingHandler(),
+            credentials: credentials,
+            tokens: tokens);
+        var cleanup = $"/dev/partner/credentials/{login}?holderId={holderId:D}";
+
+        (await factory.CreateClient().DeleteAsync(cleanup))
+            .StatusCode.Should().Be(HttpStatusCode.NoContent);
+        (await factory.CreateClient().DeleteAsync(cleanup))
+            .StatusCode.Should().Be(HttpStatusCode.NoContent);
+        tokens.RevokedFamilies.Should().BeEmpty();
+        (await credentials.VerifyAsync(login, "runtime-only", CancellationToken.None))
+            .Should().BeNull("the holder-bound tombstone disables the active credential");
+    }
+
+    [Fact]
     public async Task PartnerCredential_InactiveOrCrossHolderCleanupCannotRevokeAnySession()
     {
         var shared = new JeebGateway.StateService.Idempotency.InMemoryIdempotencyStore(TimeProvider.System);
@@ -1037,7 +1068,7 @@ public class DevEndpointsTests
                 _revokedHolders.Add(account.HolderId);
                 return Task.FromResult(new RuntimeCredentialSession(
                     account.HolderId,
-                    _sessionFamilies[login]));
+                    _sessionFamilies.GetValueOrDefault(login)));
             }
             throw new RuntimeCredentialNotFoundException("not found");
         }

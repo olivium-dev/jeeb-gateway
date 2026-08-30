@@ -30,7 +30,7 @@ public sealed class PartnerCredentialStore : IPartnerCredentialStore
     private sealed record RuntimeSessionRecord(
         Guid HolderId,
         string Login,
-        string SessionFamilyId);
+        string? SessionFamilyId);
 
     internal static readonly TimeSpan RuntimeCredentialLifetime = TimeSpan.FromMinutes(5);
     internal const string RuntimeIdentifierPrefix = "devtool-partner-";
@@ -204,7 +204,8 @@ public sealed class PartnerCredentialStore : IPartnerCredentialStore
             (await _runtime.GetAsync(key + RevokedSuffix, ct))?.ResponseBodyJson);
         if (priorTombstone is not null)
         {
-            ValidateCleanupSession(priorTombstone, login, expectedHolderId);
+            ValidateCleanupSession(
+                priorTombstone, login, expectedHolderId, requireSessionFamily: false);
             return new RuntimeCredentialSession(
                 priorTombstone.HolderId,
                 priorTombstone.SessionFamilyId);
@@ -228,9 +229,8 @@ public sealed class PartnerCredentialStore : IPartnerCredentialStore
 
         var session = DeserializeSession(
             (await _runtime.GetAsync(key + SessionSuffix, ct))?.ResponseBodyJson)
-            ?? throw new InvalidOperationException(
-                "The runtime credential has no linked Dev Tool session.");
-        ValidateCleanupSession(session, login, expectedHolderId);
+            ?? new RuntimeSessionRecord(record.HolderId, record.Login, null);
+        ValidateCleanupSession(session, login, expectedHolderId, requireSessionFamily: false);
 
         var tombstone = await _runtime.PutOrGetAsync(
             key + RevokedSuffix,
@@ -240,7 +240,7 @@ public sealed class PartnerCredentialStore : IPartnerCredentialStore
             ct);
         var committed = DeserializeSession(tombstone.ResponseBodyJson)
             ?? throw new InvalidOperationException("Runtime cleanup tombstone is unreadable.");
-        ValidateCleanupSession(committed, login, expectedHolderId);
+        ValidateCleanupSession(committed, login, expectedHolderId, requireSessionFamily: false);
         return new RuntimeCredentialSession(committed.HolderId, committed.SessionFamilyId);
     }
 
@@ -291,11 +291,12 @@ public sealed class PartnerCredentialStore : IPartnerCredentialStore
     private static void ValidateCleanupSession(
         RuntimeSessionRecord session,
         string login,
-        Guid expectedHolderId)
+        Guid expectedHolderId,
+        bool requireSessionFamily = true)
     {
         if (session.HolderId != expectedHolderId
             || !string.Equals(session.Login, login.Trim(), StringComparison.Ordinal)
-            || string.IsNullOrWhiteSpace(session.SessionFamilyId))
+            || (requireSessionFamily && string.IsNullOrWhiteSpace(session.SessionFamilyId)))
         {
             throw new InvalidOperationException(
                 "Cleanup identity does not match the linked runtime session.");

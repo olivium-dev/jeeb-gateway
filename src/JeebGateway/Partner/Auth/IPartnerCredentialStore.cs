@@ -44,8 +44,9 @@ public interface IPartnerCredentialStore
 
     /// <summary>
     /// Removes a runtime dev credential. The expected holder lets a fresh replica durably revoke
-    /// the bounded session even when it has no process-local login mapping. Configured credentials
-    /// are never exposed through the dev endpoint, whose generated login namespace is distinct.
+    /// the credential even when activation's response was lost before login. When login succeeded,
+    /// the returned bounded session family is also revoked. Configured credentials are never exposed
+    /// through the dev endpoint, whose generated login namespace is distinct.
     /// </summary>
     Task<RuntimeCredentialSession> RemoveAsync(
         string login,
@@ -53,7 +54,7 @@ public interface IPartnerCredentialStore
         CancellationToken ct);
 }
 
-public sealed record RuntimeCredentialSession(Guid HolderId, string SessionFamilyId);
+public sealed record RuntimeCredentialSession(Guid HolderId, string? SessionFamilyId);
 
 public sealed class RuntimeCredentialNotFoundException : Exception
 {

@@ -120,7 +120,7 @@ public sealed class PartnerTopupPreviewResponse
 {
     public Guid JeeberId { get; init; }
     public decimal GrossAmount { get; init; }
-    /// <summary>Fees as computed by wallet-service (NOT the gateway). Flows to the system wallet.</summary>
+    /// <summary>Fees as computed by wallet-service (NOT the gateway); zero while fee legs are disabled.</summary>
     public decimal Fees { get; init; }
     public decimal NetToJeeber { get; init; }
     /// <summary>
@@ -154,7 +154,12 @@ public sealed class PartnerOtpChallengeResponse
 public sealed class PartnerWalletMoveResponse
 {
     public Guid TransactionId { get; init; }
+    /// <summary>
+    /// Net amount credited to the destination. Configured fees, when enabled, are separate wallet
+    /// legs and are reported by <see cref="Fees"/>; they are never subtracted from this amount.
+    /// </summary>
     public decimal Amount { get; init; }
+    /// <summary>Separate provider-authored fee legs; gross debit is <c>Amount + Fees</c>.</summary>
     public decimal Fees { get; init; }
     public string Status { get; init; } = "executed";
 }

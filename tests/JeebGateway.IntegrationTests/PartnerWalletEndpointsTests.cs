@@ -40,18 +40,22 @@ public sealed class PartnerWalletEndpointsTests
     private const string OtherJeeberId = "44444444-4444-4444-4444-444444444444";
 
     private static WebApplicationFactory<Program> FactoryWithFakeWallet(
-        FakeWalletClient fake, double? otpThreshold = null)
+        FakeWalletClient fake,
+        double? otpThreshold = null,
+        bool applyConfiguredTopupFees = false)
         => new WebApplicationFactory<Program>().WithWebHostBuilder(b =>
         {
+            var settings = new Dictionary<string, string?>
+            {
+                ["PartnerWallet:ApplyConfiguredTopupFees"] =
+                    applyConfiguredTopupFees.ToString(),
+            };
             if (otpThreshold is not null)
             {
-                b.ConfigureAppConfiguration((_, cfg) => cfg.AddInMemoryCollection(
-                    new Dictionary<string, string?>
-                    {
-                        ["PartnerWallet:OtpStepUpThreshold"] = otpThreshold.Value.ToString(
-                            CultureInfo.InvariantCulture),
-                    }));
+                settings["PartnerWallet:OtpStepUpThreshold"] = otpThreshold.Value.ToString(
+                    CultureInfo.InvariantCulture);
             }
+            b.ConfigureAppConfiguration((_, cfg) => cfg.AddInMemoryCollection(settings));
             b.ConfigureTestServices(s => s.AddScoped<SwServiceWalletClient>(_ => fake));
         });
 
@@ -111,7 +115,10 @@ public sealed class PartnerWalletEndpointsTests
     [Fact]
     public async Task Partner_Predict_Returns_Fees_Preview()
     {
-        await using var factory = FactoryWithFakeWallet(new FakeWalletClient { PredictFees = 2.5 });
+        var fake = new FakeWalletClient { PredictFees = 2.5 };
+        await using var factory = FactoryWithFakeWallet(
+            fake,
+            applyConfiguredTopupFees: true);
         using var client = AsPartner(factory);
 
         var resp = await client.PostAsJsonAsync("/v1/partner/wallet/transfers/predict", new
@@ -123,8 +130,40 @@ public sealed class PartnerWalletEndpointsTests
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         var body = await resp.Content.ReadFromJsonAsync<PreviewDto>();
         body!.Fees.Should().Be(2.5);
-        body.NetToJeeber.Should().Be(47.5);
+        body.GrossAmount.Should().Be(52.5);
+        body.NetToJeeber.Should().Be(50.0);
         body.OtpRequired.Should().BeFalse();
+        fake.LastPredicted!.ApplyConfiguredFees.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Partner_Topup_DisablesConfiguredFeesUntilTheFeeSourceWalletIsFunded()
+    {
+        var fake = new FakeWalletClient { PredictFees = 2.5 };
+        await using var factory = FactoryWithFakeWallet(fake);
+        using var client = AsPartner(factory);
+
+        var preview = await client.PostAsJsonAsync(
+            "/v1/partner/wallet/transfers/predict",
+            new { jeeberId = JeeberId, amount = 50.0 });
+        var execute = await client.PostAsJsonAsync(
+            "/v1/partner/wallet/transfers",
+            new
+            {
+                jeeberId = JeeberId,
+                amount = 50.0,
+                idempotencyKey = "fee-disabled-abcdef01",
+            });
+
+        preview.StatusCode.Should().Be(HttpStatusCode.OK);
+        execute.StatusCode.Should().Be(HttpStatusCode.OK);
+        (await preview.Content.ReadFromJsonAsync<PreviewDto>())!
+            .Should().Match<PreviewDto>(value =>
+                value.GrossAmount == 50.0
+                && value.Fees == 0.0
+                && value.NetToJeeber == 50.0);
+        fake.LastPredicted!.ApplyConfiguredFees.Should().BeFalse();
+        fake.LastInitiated!.ApplyConfiguredFees.Should().BeFalse();
     }
 
     [Fact]
@@ -1278,6 +1317,8 @@ public sealed class PartnerWalletEndpointsTests
     {
         public double Balance { get; init; } = 0;
         public double PredictFees { get; init; } = 0;
+        public TransactionRequest? LastPredicted { get; private set; }
+        public TransactionRequest? LastInitiated { get; private set; }
 
         /// <summary>How many times the saga's Execute ran — proves idempotency dedup (exactly once).</summary>
         public int ExecuteCount => _executeCount;
@@ -1336,12 +1377,18 @@ public sealed class PartnerWalletEndpointsTests
             => SystemWalletAsync();
 
         public override Task<ExpectedTransaction> PredictAsync(TransactionRequest body)
-            => Task.FromResult(new ExpectedTransaction
+        {
+            LastPredicted = body;
+            var net = body.Transactions is { Count: > 0 } ? FirstAmount(body) : 0;
+            var fees = body.ApplyConfiguredFees ? PredictFees : 0;
+            return Task.FromResult(new ExpectedTransaction
             {
-                GrossAmount = body.Transactions is { Count: > 0 } ? FirstAmount(body) : 0,
-                Fees = PredictFees,
+                GrossAmount = net + fees,
+                Fees = fees,
+                NetAmount = net,
                 Summary = "fake-preview",
             });
+        }
 
         public override Task<ExpectedTransaction> PredictAsync(TransactionRequest body, CancellationToken ct)
             => PredictAsync(body);
@@ -1349,10 +1396,13 @@ public sealed class PartnerWalletEndpointsTests
         public override Task<Transaction> InitiateAsync(
             string idempotencyKey,
             TransactionRequest body)
-            => Task.FromResult(new Transaction
+        {
+            LastInitiated = body;
+            return Task.FromResult(new Transaction
             {
                 TransactionHeader = new TransactionHeader { TxId = HeaderId, Status = 0 },
             });
+        }
 
         public override Task<Transaction> InitiateAsync(
             string idempotencyKey,

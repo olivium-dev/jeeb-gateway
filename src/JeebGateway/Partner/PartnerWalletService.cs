@@ -92,19 +92,17 @@ public sealed class PartnerWalletService : IPartnerWalletService
         var (destWalletId, _) = await RequireWalletAsync(jeeberId, "jeeber", _jeeberHolderTypes, ct);
 
         var request = BuildRequest(sourceWalletId, destWalletId, amount, _options.TopupTag,
-            notes: $"predict:{partnerId}->{jeeberId}");
+            notes: $"predict:{partnerId}->{jeeberId}",
+            applyConfiguredFees: _options.ApplyConfiguredTopupFees);
 
         var expected = await _wallet.PredictAsync(request);
-        var fees = expected is null ? 0m : MoneyFromProvider(expected.Fees, "predicted fees");
-        var gross = expected is null
-            ? amount
-            : MoneyFromProvider(expected.GrossAmount, "predicted gross amount");
+        var breakdown = ReadBreakdown(expected, amount);
         return new PartnerTopupPreviewResponse
         {
             JeeberId = jeeberId,
-            GrossAmount = gross,
-            Fees = fees,
-            NetToJeeber = gross - fees,
+            GrossAmount = breakdown.Gross,
+            Fees = breakdown.Fees,
+            NetToJeeber = breakdown.Net,
             OtpRequired = amount > _options.OtpStepUpThreshold,
             Summary = expected?.Summary,
         };
@@ -120,11 +118,17 @@ public sealed class PartnerWalletService : IPartnerWalletService
         var (destWalletId, _) = await RequireWalletAsync(jeeberId, "jeeber", _jeeberHolderTypes, ct);
 
         var notes = $"idem:{idempotencyKey}" + (string.IsNullOrWhiteSpace(note) ? "" : $";note:{note}");
-        var request = BuildRequest(sourceWalletId, destWalletId, amount, _options.TopupTag, notes);
+        var request = BuildRequest(
+            sourceWalletId,
+            destWalletId,
+            amount,
+            _options.TopupTag,
+            notes,
+            applyConfiguredFees: _options.ApplyConfiguredTopupFees);
 
         // Fees preview captured for the receipt (wallet-service authoritative; the gateway never
         // computes them). Best-effort — a Predict blip must not block the confirmed move.
-        var fees = await SafePredictFeesAsync(request);
+        var breakdown = await SafePredictBreakdownAsync(request, amount);
 
         var key = new PartnerOperationKey(PartnerOperationType.Topup, partnerId, idempotencyKey);
         var intent = new PartnerOperationIntent(partnerId, jeeberId, amount, note);
@@ -138,7 +142,10 @@ public sealed class PartnerWalletService : IPartnerWalletService
                     partnerId, jeeberId, amount, txId, idempotencyKey);
                 return new PartnerWalletMoveResponse
                 {
-                    TransactionId = txId, Amount = amount, Fees = fees, Status = "executed",
+                    TransactionId = txId,
+                    Amount = breakdown.Net,
+                    Fees = breakdown.Fees,
+                    Status = "executed",
                 };
             },
             ct);
@@ -335,19 +342,41 @@ public sealed class PartnerWalletService : IPartnerWalletService
         }
     }
 
-    private async Task<decimal> SafePredictFeesAsync(SwTransactionRequest request)
+    private async Task<PartnerMoneyBreakdown> SafePredictBreakdownAsync(
+        SwTransactionRequest request,
+        decimal requestedNet)
     {
         try
         {
             var expected = await _wallet.PredictAsync(request);
-            return expected is null ? 0m : MoneyFromProvider(expected.Fees, "predicted fees");
+            return ReadBreakdown(expected, requestedNet);
         }
-        catch (WalletApiException ex)
+        catch (WalletApiException ex) when (!_options.ApplyConfiguredTopupFees)
         {
-            _log.LogDebug(ex, "Partner top-up fee preview failed; continuing with fees=0 on the receipt.");
-            return 0m;
+            _log.LogDebug(ex, "Partner top-up preview failed; continuing with the fee-disabled identity breakdown.");
+            return new PartnerMoneyBreakdown(requestedNet, 0m, requestedNet);
         }
     }
+
+    private static PartnerMoneyBreakdown ReadBreakdown(
+        JeebGateway.service.ServiceWallet.ExpectedTransaction? expected,
+        decimal requestedNet)
+    {
+        if (expected is null)
+            return new PartnerMoneyBreakdown(requestedNet, 0m, requestedNet);
+
+        var gross = MoneyFromProvider(expected.GrossAmount, "predicted gross amount");
+        var fees = MoneyFromProvider(expected.Fees, "predicted fees");
+        var net = MoneyFromProvider(expected.NetAmount, "predicted net amount");
+        if (net != requestedNet || gross != net + fees)
+        {
+            throw new PartnerWalletException(
+                "wallet-service returned an inconsistent gross/fees/net top-up preview.");
+        }
+        return new PartnerMoneyBreakdown(gross, fees, net);
+    }
+
+    private sealed record PartnerMoneyBreakdown(decimal Gross, decimal Fees, decimal Net);
 
     private SwTransactionRequest BuildRequest(
         Guid sourceWalletId,

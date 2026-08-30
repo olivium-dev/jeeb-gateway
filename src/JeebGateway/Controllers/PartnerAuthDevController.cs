@@ -158,6 +158,9 @@ public sealed class PartnerAuthDevController : ControllerBase
             _log.LogWarning(ex, "partner.auth.dev cleanup state dependency is unavailable.");
             return CleanupUnavailableProblem();
         }
+        if (string.IsNullOrWhiteSpace(removedSession.SessionFamilyId))
+            return NoContent();
+
         try
         {
             await _tokens.RevokeBoundedSessionAsync(
