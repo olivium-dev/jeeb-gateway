@@ -41864,7 +41864,8 @@
             "maximum": 79228162514264337593543950335,
             "minimum": 0.01,
             "type": "number",
-            "format": "double"
+            "format": "double",
+            "multipleOf": 0.01
           },
           "evidenceNote": {
             "maxLength": 280,
@@ -41985,7 +41986,8 @@
             "maximum": 79228162514264337593543950335,
             "minimum": 0.01,
             "type": "number",
-            "format": "double"
+            "format": "double",
+            "multipleOf": 0.01
           }
         },
         "additionalProperties": false
@@ -42045,7 +42047,8 @@
             "maximum": 79228162514264337593543950335,
             "minimum": 0.01,
             "type": "number",
-            "format": "double"
+            "format": "double",
+            "multipleOf": 0.01
           },
           "idempotencyKey": {
             "maxLength": 128,
@@ -42082,7 +42085,8 @@
             "maximum": 79228162514264337593543950335,
             "minimum": 0.01,
             "type": "number",
-            "format": "double"
+            "format": "double",
+            "multipleOf": 0.01
           }
         },
         "additionalProperties": false

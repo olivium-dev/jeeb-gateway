@@ -270,6 +270,40 @@ public sealed class PartnerWalletPickWalletTests
         await act.Should().ThrowAsync<PartnerWalletException>();
     }
 
+    [Fact]
+    public async Task Missing_Holder_Type_Is_Rejected_Fail_Closed()
+    {
+        var wallet = new StubWalletClient
+        {
+            HolderTypeOverride = string.Empty,
+            HolderWallets = { Wallet(Currency, "main", isActive: true) },
+        };
+
+        var act = async () => await Service(wallet)
+            .ExecuteTopupAsync(PartnerId, TargetHolderId, 10m, "idem-type-missing", null, default);
+
+        await act.Should().ThrowAsync<PartnerWalletException>()
+            .WithMessage("*not an eligible partner target*");
+        wallet.InitiateCount.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Cross_Type_Jeeber_Destination_Is_Rejected_Before_Money_Move()
+    {
+        var wallet = new StubWalletClient
+        {
+            TargetHolderTypeOverride = "partner",
+            HolderWallets = { Wallet(Currency, "main", isActive: true) },
+        };
+
+        var act = async () => await Service(wallet)
+            .ExecuteTopupAsync(PartnerId, TargetHolderId, 10m, "idem-type-cross", null, default);
+
+        await act.Should().ThrowAsync<PartnerWalletException>()
+            .WithMessage("*not an eligible jeeber target*");
+        wallet.InitiateCount.Should().Be(0);
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────────────────────────
 
     private static Wallet Wallet(int currency, string? type, bool isActive, decimal amount = 100m)
@@ -299,6 +333,8 @@ public sealed class PartnerWalletPickWalletTests
         public List<Wallet> SystemWallets { get; } = new();
         public TransactionRequest? LastInitiated { get; private set; }
         public int InitiateCount { get; private set; }
+        public string? HolderTypeOverride { get; init; }
+        public string? TargetHolderTypeOverride { get; init; }
 
         public StubWalletClient() : base("http://localhost", new HttpClient())
         {
@@ -307,7 +343,14 @@ public sealed class PartnerWalletPickWalletTests
         public override Task<GetHolderWallets> WalletsAsync(Guid holderId)
             => Task.FromResult(new GetHolderWallets
             {
-                WalletHolder = new WalletHolder { HolderId = holderId, HolderName = "stub", IsActive = true },
+                WalletHolder = new WalletHolder
+                {
+                    HolderId = holderId,
+                    HolderName = "stub",
+                    IsActive = true,
+                    HolderType = HolderTypeOverride
+                        ?? (holderId == TargetHolderId ? TargetHolderTypeOverride ?? "jeeber" : "partner"),
+                },
                 Wallets = HolderWallets,
             });
 

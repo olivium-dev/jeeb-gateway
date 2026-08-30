@@ -1293,7 +1293,13 @@ public sealed class PartnerWalletEndpointsTests
 
         private GetHolderWallets HolderWith(Guid holderId) => new()
         {
-            WalletHolder = new WalletHolder { HolderId = holderId, HolderName = "fake", IsActive = true },
+            WalletHolder = new WalletHolder
+            {
+                HolderId = holderId,
+                HolderName = "fake",
+                IsActive = true,
+                HolderType = holderId.ToString() == PartnerId ? "partner" : "jeeber",
+            },
             Wallets = new List<Wallet>
             {
                 new()

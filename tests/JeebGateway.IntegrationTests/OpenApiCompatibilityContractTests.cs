@@ -69,6 +69,29 @@ public sealed class OpenApiCompatibilityContractTests
         required.Should().Contain("otpRequired");
     }
 
+    [Fact]
+    public void WalletMoneyRequestsPublishTheRuntimeMinorUnitConstraint()
+    {
+        using var artifact = JsonDocument.Parse(File.ReadAllText(Path.Combine(
+            RepositoryRoot(),
+            "artifacts/openapi/jeeb-gateway.v1.json")));
+        var schemas = artifact.RootElement
+            .GetProperty("components").GetProperty("schemas");
+
+        foreach (var schemaName in new[]
+                 {
+                     "PartnerTopupPredictRequest",
+                     "PartnerTopupExecuteRequest",
+                     "PartnerOtpChallengeRequest",
+                     "PartnerCashCreditRequest",
+                 })
+        {
+            schemas.GetProperty(schemaName).GetProperty("properties")
+                .GetProperty("amount").GetProperty("multipleOf").GetDecimal()
+                .Should().Be(0.01m, $"{schemaName} must publish the same two-decimal rule enforced at runtime");
+        }
+    }
+
     private static string RepositoryRoot([CallerFilePath] string source = "") =>
         Path.GetFullPath(Path.Combine(Path.GetDirectoryName(source)!, "..", ".."));
 }

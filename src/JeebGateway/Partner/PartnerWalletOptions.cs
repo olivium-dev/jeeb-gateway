@@ -67,23 +67,15 @@ public sealed class PartnerWalletOptions
     // holder GUID. Without a type check a partner could direct their own money into ANY provisioned
     // wallet (another partner, a customer, an admin), and the route/DTO name "jeeber" would misstate
     // the enforced constraint. When ENABLED, a move is rejected unless the destination/source holder's
-    // wallet-service HolderType is in the configured set for its role.
+    // wallet-service HolderType MUST be in the configured set for its role. This
+    // guard is mandatory and fail-closed; money routes cannot be configured back
+    // to accepting an arbitrary provisioned holder GUID.
 
-    /// <summary>
-    /// When <c>true</c>, enforce that a top-up destination is a jeeber and an admin-credit target is a
-    /// partner (verified against wallet-service <c>WalletHolder.HolderType</c>). DEFAULT <c>false</c>:
-    /// the enforced vocabulary depends on wallet-service's holder-type tokens, which are pending owner
-    /// confirmation (Q5). Until then the "any provisioned wallet" trust boundary is documented and
-    /// accepted; flip this on (and set the token lists below) once Q5 is answered. Enforcement only
-    /// ever REJECTS a confirmed-mismatch holder — an empty/unknown HolderType degrades open with a log.
-    /// </summary>
-    public bool EnforceHolderType { get; init; } = false;
-
-    /// <summary>Comma-separated wallet-service <c>HolderType</c> tokens that count as a jeeber (top-up destination).</summary>
+    /// <summary>Comma-separated authoritative holder types accepted as Jeeber top-up destinations.</summary>
     [Required, MinLength(1), MaxLength(128)]
     public string JeeberHolderTypes { get; init; } = "jeeber";
 
-    /// <summary>Comma-separated wallet-service <c>HolderType</c> tokens that count as a partner (admin-credit target).</summary>
+    /// <summary>Comma-separated authoritative holder types accepted as partner cash-credit targets.</summary>
     [Required, MinLength(1), MaxLength(128)]
     public string PartnerHolderTypes { get; init; } = "partner";
 

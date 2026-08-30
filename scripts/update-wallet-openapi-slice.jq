@@ -39,3 +39,10 @@ def copy_schema_closure($candidate; $pending; $seen):
     | add
     | unique) as $root_schemas
 | copy_schema_closure($candidate; $root_schemas; [])
+| reduce [
+    "PartnerTopupPredictRequest",
+    "PartnerTopupExecuteRequest",
+    "PartnerOtpChallengeRequest",
+    "PartnerCashCreditRequest"
+  ][] as $schema
+    (.; .components.schemas[$schema].properties.amount.multipleOf = 0.01)

@@ -396,12 +396,9 @@ public sealed class PartnerWalletService : IPartnerWalletService
     }
 
     /// <summary>
-    /// Resolve the holder's wallet id AND enforce the BOPLA target-type guard (OWASP API3): when
-    /// <see cref="PartnerWalletOptions.EnforceHolderType"/> is on, reject a holder whose
-    /// wallet-service <c>HolderType</c> is present and NOT in <paramref name="expectedTypes"/>, so a
-    /// partner can't direct money into an arbitrary holder GUID (another partner/customer/admin) and
-    /// the "jeeber"/"partner" route names reflect the enforced constraint. An empty/unknown HolderType
-    /// degrades open (logged), pending owner confirmation of wallet-service's holder-type vocabulary.
+    /// Resolve the holder's wallet id and enforce the mandatory BOPLA target-type guard (OWASP API3).
+    /// Missing, unknown, or mismatched authoritative holder types all fail closed so a caller cannot
+    /// direct money into an arbitrary provisioned holder GUID.
     /// </summary>
     private async Task<(Guid WalletId, SwWalletHolder? Holder)> RequireWalletAsync(
         Guid holderId, string label, IReadOnlyCollection<string> expectedTypes, CancellationToken ct)
@@ -414,25 +411,22 @@ public sealed class PartnerWalletService : IPartnerWalletService
                 $"The {label} has no provisioned wallet for currency {_options.CurrencyId}.");
         }
 
-        if (_options.EnforceHolderType && expectedTypes.Count > 0)
+        var actual = holder?.WalletHolder?.HolderType;
+        if (expectedTypes.Count == 0)
         {
-            var actual = holder?.WalletHolder?.HolderType;
-            if (string.IsNullOrWhiteSpace(actual))
-            {
-                _log.LogWarning(
-                    "Partner wallet target-type guard: {Label} holder {HolderId} has no HolderType; "
-                    + "degrading OPEN (enforcement pending owner Q5 vocabulary confirmation).",
-                    label, holderId);
-            }
-            else if (!expectedTypes.Contains(actual, StringComparer.OrdinalIgnoreCase))
-            {
-                _log.LogWarning(
-                    "Partner wallet target-type guard REJECT: {Label} holder {HolderId} HolderType='{Actual}' "
-                    + "is not an eligible target (expected one of: {Expected}).",
-                    label, holderId, actual, string.Join(",", expectedTypes));
-                throw new PartnerWalletException(
-                    $"The specified holder is not an eligible {label} target for this operation.");
-            }
+            _log.LogError("Partner wallet target-type guard has no configured {Label} holder types.", label);
+            throw new PartnerWalletException("Wallet holder-type policy is unavailable.");
+        }
+
+        if (string.IsNullOrWhiteSpace(actual)
+            || !expectedTypes.Contains(actual, StringComparer.OrdinalIgnoreCase))
+        {
+            _log.LogWarning(
+                "Partner wallet target-type guard REJECT: {Label} holder {HolderId} HolderType='{Actual}' "
+                + "is not an eligible target (expected one of: {Expected}).",
+                label, holderId, actual ?? "<missing>", string.Join(",", expectedTypes));
+            throw new PartnerWalletException(
+                $"The specified holder is not an eligible {label} target for this operation.");
         }
 
         return (wallet.WalletId, holder?.WalletHolder);
