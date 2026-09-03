@@ -418,7 +418,7 @@ PRODUCTION_HEALTH_COMMAND_LINES = (
     "wget --no-verbose --tries=1 --spider http://localhost:8080/health/ready || exit 1",
 )
 PRODUCTION_REMOTE_LOGIN_BODY_SHA256 = "7728bc5eb7225a3c2763109f2920c2d88803278f2772d8d67a0ce623a97e6f26"
-PRODUCTION_UPDATE_BODY_SHA256 = "cad9240bc31e4722252979f1b8145e84e532647189673399fa363d9f40210c12"
+PRODUCTION_UPDATE_BODY_SHA256 = "635bed15afa78e905c1290e702b1cc48bff3d190ba34daacc20792d5bdd05502"
 PRODUCTION_RELAY_HOLD_NAME = "Hold production activation pending scoped relay preflight"
 PRODUCTION_RELAY_HOLD_LINES = (
     "echo '::error::Production activation is held until the scoped relay key mount and authenticated provider-expand preflight are implemented.' >&2",

@@ -365,7 +365,7 @@ def validate_bootstrap_workflow(text):
         text.index('service=jeeb-staging-jeeb-gateway'),
     )
     firebase_name = text.index(
-        'firebase_secret_name="jeeb_staging_gateway_firebase_${firebase_digest}"',
+        'firebase_secret_name=$(bash scripts/firebase-docker-secret-name.sh',
         firebase_validation,
     )
     firebase_stream = text.index(

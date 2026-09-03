@@ -45,4 +45,23 @@ reject missing-key \
   '{"type":"service_account","project_id":"jeeb-5a293","client_email":"x"}'
 reject invalid-json 'not-json'
 
+zero_digest=$(printf '0%.0s' {1..64})
+expected_suffix=$(printf 'A%.0s' {1..43})
+staging_name=$(bash "$repo_root/scripts/firebase-docker-secret-name.sh" \
+  jeeb_staging_fb_ "$zero_digest")
+[ "$staging_name" = "jeeb_staging_fb_${expected_suffix}" ]
+[ "${#staging_name}" -eq 59 ]
+
+prefix_64=$(printf 'x%.0s' {1..21})
+name_64=$(bash "$repo_root/scripts/firebase-docker-secret-name.sh" \
+  "$prefix_64" "$zero_digest")
+[ "${#name_64}" -eq 64 ]
+
+prefix_65=$(printf 'x%.0s' {1..22})
+if bash "$repo_root/scripts/firebase-docker-secret-name.sh" \
+  "$prefix_65" "$zero_digest" >/dev/null 2>&1; then
+  echo 'Firebase Docker secret-name helper accepted 65 characters' >&2
+  exit 1
+fi
+
 echo 'Firebase service-account validator tests: PASS'
