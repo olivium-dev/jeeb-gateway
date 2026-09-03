@@ -38,20 +38,26 @@ jobs:
     runs-on: ubuntu-22.04
     environment: staging
     steps:
-      - name: Owner block - forward-only promotion pending
-        if: ${{ inputs.deployment_mode == 'normal' }}
+      - name: Require supported protected staging mode
+        env:
+          DEPLOYMENT_MODE: ${{ inputs.deployment_mode }}
         run: |
-          echo '::error::Forward-only promotion pending owner-approved failure handling; no image, SSH, provider, secret, or Swarm mutation was attempted.' >&2
-          exit 1
+          set -euo pipefail
+          case "$DEPLOYMENT_MODE" in
+            normal|security-cutover|otp-cutover|devtool-reassert) ;;
+            *)
+              echo '::error::Unsupported protected staging deployment mode.' >&2
+              exit 64
+              ;;
+          esac
 
       - name: Hold caller activation until relay expand is verified
-        if: ${{ inputs.deployment_mode != 'normal' && inputs.provider_expand_verified != true }}
+        if: ${{ inputs.provider_expand_verified != true }}
         run: |
           echo '::error::Deployment HOLD: deploy and verify the protected-main push-notification image in expand mode first.' >&2
           exit 1
 
       - name: Require designated staging owner
-        if: ${{ inputs.deployment_mode != 'normal' }}
         env:
           REQUESTING_ACTOR: ${{ github.actor }}
           TRIGGERING_ACTOR: ${{ github.triggering_actor }}
@@ -85,7 +91,7 @@ jobs:
             exit 1
           }
           [ "$DEPLOY_ENVIRONMENT" = staging ]
-          case "$DEPLOYMENT_MODE" in security-cutover|otp-cutover|devtool-reassert) ;; *) exit 64 ;; esac
+          case "$DEPLOYMENT_MODE" in normal|security-cutover|otp-cutover|devtool-reassert) ;; *) exit 64 ;; esac
           [ "$GITHUB_REF" = "refs/heads/${DEFAULT_BRANCH}" ] || {
             echo '::error::Staging deploys may run only from the repository default branch' >&2
             exit 1
@@ -237,9 +243,9 @@ jobs:
             echo '::error::This vendored workflow deploys only jeeb-gateway' >&2
             exit 1
           }
-          case "$DEPLOYMENT_MODE" in security-cutover|otp-cutover|devtool-reassert) ;; *)
-            echo '::error::Only an explicit protected staging mode may pass the owner block' >&2
-            exit 1
+          case "$DEPLOYMENT_MODE" in normal|security-cutover|otp-cutover|devtool-reassert) ;; *)
+            echo '::error::Only an explicit protected staging mode may deploy.' >&2
+            exit 64
           esac
           state_secret_name=''
           notification_secret_name=''

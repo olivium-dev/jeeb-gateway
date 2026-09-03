@@ -302,13 +302,14 @@ public sealed class DurableOwnershipDeploymentContractTests
     }
 
     [Fact]
-    public void Jeeb_staging_workflow_is_gateway_only_provider_secret_minimal_and_owner_blocked()
+    public void Jeeb_staging_workflow_is_gateway_only_provider_secret_minimal_and_protected()
     {
         var workflow = Workflow("jeeb-staging-deploy.yml");
         var openAiSecret = "secrets.OPENAI" + "_API_KEY";
 
-        workflow.Should().Contain("Owner block - forward-only promotion pending");
-        workflow.Should().Contain("::error::Forward-only promotion pending owner-approved failure handling");
+        workflow.Should().Contain("Require supported protected staging mode");
+        workflow.Should().Contain("if: ${{ inputs.provider_expand_verified != true }}");
+        workflow.Should().Contain("Require designated staging owner");
         workflow.Should().Contain("[ \"$REPOSITORY\" = jeeb-gateway ]");
         workflow.Should().Contain("GITHUB_REF_PROTECTED: ${{ github.ref_protected }}");
         workflow.Should().Contain("[ \"$GITHUB_REF_PROTECTED\" = true ]");
@@ -331,7 +332,7 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().NotContain("secrets.JEEB_RTC_DATABASE_URL");
         workflow.Should().NotContain("secrets.JEEB_DATABASE_URL");
         workflow.Should().NotContain(openAiSecret);
-        workflow.IndexOf("Owner block - forward-only promotion pending", StringComparison.Ordinal)
+        workflow.IndexOf("Require supported protected staging mode", StringComparison.Ordinal)
             .Should().BeLessThan(workflow.IndexOf("docker/login-action@", StringComparison.Ordinal));
     }
 
@@ -474,7 +475,7 @@ public sealed class DurableOwnershipDeploymentContractTests
     [Theory]
     [InlineData("deploy-to-jeeb.yml")]
     [InlineData("jeeb-staging-deploy.yml")]
-    public void Gateway_deploy_templates_are_owner_blocked_and_verify_exact_image(
+    public void Gateway_deploy_templates_require_protected_entry_gates_and_verify_exact_image(
         string workflowName)
     {
         var workflow = Workflow(workflowName);
@@ -485,10 +486,6 @@ public sealed class DurableOwnershipDeploymentContractTests
 
         workflow.Should().Contain("steps.immutable.outputs.image");
         workflow.Should().Contain("scripts/verify-swarm-service-image.sh");
-        workflow.Should().Contain("Owner block - forward-only promotion pending");
-        workflow.Should().Contain("::error::Forward-only promotion pending owner-approved failure handling");
-        workflow.IndexOf("Owner block - forward-only promotion pending", StringComparison.Ordinal)
-            .Should().BeLessThan(workflow.IndexOf("actions/checkout@", StringComparison.Ordinal));
         workflow.Should().NotContain("continue-on-error:");
         workflow.Should().NotContain("if: ${{ always() }}");
         workflow.Should().NotContain("if: ${{ failure() }}");
@@ -511,6 +508,11 @@ public sealed class DurableOwnershipDeploymentContractTests
         verifier.Should().Contain("{{.Image}}");
         if (workflowName == "jeeb-staging-deploy.yml")
         {
+            workflow.Should().Contain("Require supported protected staging mode");
+            workflow.Should().Contain("if: ${{ inputs.provider_expand_verified != true }}");
+            workflow.Should().Contain("Require designated staging owner");
+            workflow.IndexOf("Require designated staging owner", StringComparison.Ordinal)
+                .Should().BeLessThan(workflow.IndexOf("actions/checkout@", StringComparison.Ordinal));
             workflow.Should().Contain("FailureAction:\"pause\",Order:\"start-first\"");
             workflow.Should().NotContain("FailureAction:\"rollback\",Order:\"start-first\"");
             workflow.Should().NotContain("FailureAction:\"pause\",Order:\"stop-first\"");
@@ -532,6 +534,10 @@ public sealed class DurableOwnershipDeploymentContractTests
         }
         else
         {
+            workflow.Should().Contain("Owner block - forward-only promotion pending");
+            workflow.Should().Contain("::error::Forward-only promotion pending owner-approved failure handling");
+            workflow.IndexOf("Owner block - forward-only promotion pending", StringComparison.Ordinal)
+                .Should().BeLessThan(workflow.IndexOf("actions/checkout@", StringComparison.Ordinal));
             workflow.Should().Contain("--update-order start-first");
             workflow.Should().Contain("--update-failure-action pause");
             workflow.Should().Contain("--publish-rm \"\\$INT\"");
@@ -561,10 +567,12 @@ public sealed class DurableOwnershipDeploymentContractTests
     }
 
     [Fact]
-    public void Jeeb_staging_is_an_owner_blocked_non_activating_full_spec_template()
+    public void Jeeb_staging_is_a_protected_non_activating_full_spec_template()
     {
         var workflow = Workflow("jeeb-staging-deploy.yml");
-        workflow.Should().Contain("Owner block - forward-only promotion pending");
+        workflow.Should().Contain("Require supported protected staging mode");
+        workflow.Should().Contain("if: ${{ inputs.provider_expand_verified != true }}");
+        workflow.Should().Contain("Require designated staging owner");
         workflow.Should().Contain("FailureAction:\"pause\",Order:\"start-first\"");
         workflow.Should().NotContain("FailureAction:\"rollback\",Order:\"start-first\"");
         workflow.Should().NotContain("FailureAction:\"pause\",Order:\"stop-first\"");
@@ -591,8 +599,7 @@ public sealed class DurableOwnershipDeploymentContractTests
         dispatch.Should().Contain("- devtool-reassert");
         CountOccurrences(dispatch, "inputs:").Should().Be(1);
         CountOccurrences(dispatch, "deployment_mode:").Should().Be(1);
-        workflow.Should().Contain(
-            "if: ${{ inputs.deployment_mode == 'normal' }}");
+        workflow.Should().NotContain("inputs.deployment_mode == 'normal'");
         workflow.Should().NotContain("${{ inputs.activate_");
 
         workflow.Should().Contain("capture_remote_spec() {");
@@ -672,10 +679,10 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().Contain("[ \"$recovery_armed\" = false ]");
         workflow.Should().Contain("[ \"$DEPLOYMENT_MODE\" != security-cutover ]");
         CountOccurrences(workflow, "scripts/verify-swarm-service-image.sh").Should().Be(2,
-            "the blocked template retains exact candidate and recovered-incumbent verifiers");
+            "the protected template retains exact candidate and recovered-incumbent verifiers");
 
-        var ownerBlock = workflow.IndexOf(
-            "Owner block - forward-only promotion pending", StringComparison.Ordinal);
+        var modeGate = workflow.IndexOf(
+            "Require supported protected staging mode", StringComparison.Ordinal);
         var firstExternalMutation = workflow.IndexOf("docker/login-action@", StringComparison.Ordinal);
         var preUpdate = workflow.IndexOf(
             "capture_remote_spec \"$pre_update_spec\" \"$pre_update_version\" \"$pre_update_id\"",
@@ -746,7 +753,7 @@ public sealed class DurableOwnershipDeploymentContractTests
             postFreeze,
             StringComparison.Ordinal);
 
-        ownerBlock.Should().BeLessThan(firstExternalMutation);
+        modeGate.Should().BeLessThan(firstExternalMutation);
         preUpdate.Should().BeLessThan(candidate);
         candidate.Should().BeLessThan(candidateSemantics);
         candidateSemantics.Should().BeLessThan(taskCapture);

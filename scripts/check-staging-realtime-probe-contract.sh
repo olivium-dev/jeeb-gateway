@@ -191,8 +191,10 @@ require(
 
 def validate_bootstrap_workflow(text):
     required = (
-        "Owner block - forward-only promotion pending",
-        "::error::Forward-only promotion pending owner-approved failure handling",
+        "Require supported protected staging mode",
+        "::error::Unsupported protected staging deployment mode.",
+        "if: ${{ inputs.provider_expand_verified != true }}",
+        "Require designated staging owner",
         '[ "$GITHUB_REF_PROTECTED" = true ]',
         '[ "$(hostname -s)" = "olivium-ephemerals" ]',
         'grep -Fxc "192.168.2.20"',
@@ -383,18 +385,19 @@ def validate_bootstrap_workflow(text):
         if text.count(false_lock) != 1 or true_lock in text:
             raise ValueError(f"staging bootstrap authority drifted: {authority}")
 
-    blocker = text.index("Owner block - forward-only promotion pending")
-    blocker_exit = text.index("exit 1", blocker)
+    mode_gate = text.index("Require supported protected staging mode")
+    provider_gate = text.index("Hold caller activation until relay expand is verified")
+    owner_gate = text.index("Require designated staging owner")
     first_external_mutation = min(
-        text.index("docker/login-action@", blocker),
-        text.index("docker/build-push-action@", blocker),
-        text.index("ssh jeeb-staging", blocker),
-        text.index("/services/$service_id/update?version=$expected_version", blocker),
+        text.index("docker/login-action@", mode_gate),
+        text.index("docker/build-push-action@", mode_gate),
+        text.index("ssh jeeb-staging", mode_gate),
+        text.index("/services/$service_id/update?version=$expected_version", mode_gate),
     )
-    if not blocker < blocker_exit < first_external_mutation:
-        raise ValueError("loud owner block does not precede every external mutation")
+    if not mode_gate < provider_gate < owner_gate < first_external_mutation:
+        raise ValueError("mode, provider, and owner gates do not precede every external mutation")
     if "if: always()" in text:
-        raise ValueError("an always() step can bypass the owner block")
+        raise ValueError("an always() step can bypass the protected staging gates")
     host_assertion = text.index("Assert exact staging host")
     topology_preflight = text.index("Preflight canonical Swarm ingress topology")
     registry_login = text.index("docker/login-action@")
@@ -484,8 +487,8 @@ validate_shared_staging_lock(workflow, documents["state-auth workflow"])
 
 negative_controls = (
     (
-        "owner block removed",
-        workflow.replace("Owner block - forward-only promotion pending", "Promotion gate", 1),
+        "supported-mode gate removed",
+        workflow.replace("Require supported protected staging mode", "Promotion gate", 1),
     ),
     (
         "protected-ref assertion removed",
