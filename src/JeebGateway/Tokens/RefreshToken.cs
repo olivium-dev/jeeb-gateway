@@ -49,6 +49,20 @@ public class RefreshToken
     public IReadOnlyList<string>? RoleSnapshot { get; init; }
     public string? ActiveRoleSnapshot { get; init; }
 
+    /// <summary>
+    /// G5 — the role context the session was MINTED with, on every ordinary (mobile /
+    /// super-login) record, so rotation never re-derives roles from the process-RAM
+    /// <c>IUsersStore</c> the super-login mints do not populate. Without it a rotation
+    /// resolved <c>[]</c> and minted a valid token carrying ZERO roles — L1 accepts it, so
+    /// the client still reads as signed in, while ADR-005 L2 403s every capability route.
+    /// Separate from <see cref="RoleSnapshot"/>, which marks external/bounded sessions
+    /// (<c>HasExternalSessionFields</c>). Null on pre-G5 records: those keep the store lookup.
+    /// </summary>
+    public IReadOnlyList<string>? SessionRoleSnapshot { get; init; }
+
+    /// <summary>The <c>active_role</c> the session was minted with. See <see cref="SessionRoleSnapshot"/>.</summary>
+    public string? SessionActiveRoleSnapshot { get; init; }
+
     public DateTimeOffset? RevokedAt { get; set; }
     public string? RevokedReason { get; set; }
     public string? ReplacedByTokenId { get; set; }
