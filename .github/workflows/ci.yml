@@ -248,3 +248,12 @@ jobs:
           curl -sf http://localhost:18080/health/live || (docker logs gw-smoke && exit 1)
           docker stop gw-smoke
           docker rm gw-smoke
+
+  chat-push-canary-selftest:
+    # The outcome canary is only trustworthy if its own jq/bash logic is. This
+    # runs offline: no network, no secret, no staging mutation.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Canary library + plan-mode contract
+        run: bash scripts/canary/test-canary-lib.sh
