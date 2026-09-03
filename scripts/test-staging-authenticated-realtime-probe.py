@@ -43,3 +43,32 @@ for invalid in (
         raise AssertionError(f"invalid RFC3339 value was accepted: {invalid!r}")
 
 print("Staging authenticated realtime RFC3339 compatibility: PASS")
+
+# The 2026-09-03 staging failure printed a bare "did not return 101" and cost a
+# full investigation; the message must now carry the status and safe headers.
+unmapped_route = probe.describe_upgrade_failure(
+    "HTTP/1.1 401 Unauthorized",
+    [
+        "Content-Type: application/problem+json",
+        "WWW-Authenticate: Bearer",
+        "X-Correlation-Id: 40447510-cd5e-454d-bfa2-ca284d5aada4",
+        "Strict-Transport-Security: max-age=31536000",
+        "malformed-header-without-separator",
+    ],
+)
+assert "authenticated WebSocket upgrade did not return 101" in unmapped_route
+assert "status='HTTP/1.1 401 Unauthorized'" in unmapped_route
+assert "content-type=application/problem+json" in unmapped_route
+assert "www-authenticate=Bearer" in unmapped_route
+for redacted in ("x-correlation-id", "strict-transport-security", "malformed-header"):
+    assert redacted not in unmapped_route, redacted
+
+proxied_rejection = probe.describe_upgrade_failure(
+    "HTTP/1.1 403 Forbidden", ["x-jeeb-realtime-proxy: gateway"]
+)
+assert "x-jeeb-realtime-proxy=gateway" in proxied_rejection
+assert probe.describe_upgrade_failure("HTTP/1.1 502 Bad Gateway", []).endswith(
+    "headers=[])"
+)
+
+print("Staging authenticated realtime upgrade diagnostics: PASS")

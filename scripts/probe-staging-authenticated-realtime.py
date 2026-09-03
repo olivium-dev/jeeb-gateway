@@ -31,6 +31,16 @@ KEY_FILE_ENV = "STAGING_REALTIME_PROBE_KEY_FILE"
 MAX_HTTP_BODY_BYTES = 1024 * 1024
 MAX_WS_MESSAGE_BYTES = 1024 * 1024
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+SAFE_DIAGNOSTIC_HEADERS = frozenset(
+    {
+        "connection",
+        "content-type",
+        "sec-websocket-accept",
+        "upgrade",
+        "www-authenticate",
+        "x-jeeb-realtime-proxy",
+    }
+)
 RFC3339_TIMESTAMP = re.compile(
     r"^(?P<date>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})"
     r"(?:\.(?P<fraction>\d{1,7}))?"
@@ -57,6 +67,20 @@ def parse_rfc3339(value: object) -> datetime:
         raise RuntimeError(
             "descriptor expiry was not a valid RFC3339 timestamp"
         ) from error
+
+
+def describe_upgrade_failure(status_line: str, header_lines: list[str]) -> str:
+    """Status line plus an allowlist of response headers. No credential can appear:
+    probe secrets travel only in the request, never in an upstream response header."""
+    observed = []
+    for line in header_lines:
+        name, separator, value = line.partition(":")
+        if separator and name.strip().lower() in SAFE_DIAGNOSTIC_HEADERS:
+            observed.append(f"{name.strip().lower()}={value.strip()}")
+    return (
+        "authenticated WebSocket upgrade did not return 101"
+        f" (status={status_line!r} headers=[{'; '.join(observed)}])"
+    )
 
 
 def descriptor_request(headers: dict[str, str]) -> tuple[int, dict[str, str], bytes]:
@@ -130,7 +154,7 @@ class PhoenixWebSocket:
         response_head = self._read_until(b"\r\n\r\n", 64 * 1024)
         lines = response_head.decode("iso-8859-1").split("\r\n")
         if lines[0] != "HTTP/1.1 101 Switching Protocols":
-            raise RuntimeError("authenticated WebSocket upgrade did not return 101")
+            raise RuntimeError(describe_upgrade_failure(lines[0], lines[1:]))
         response_headers: dict[str, str] = {}
         for line in lines[1:]:
             if not line:

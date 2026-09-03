@@ -109,11 +109,18 @@ the existing digest-pinned gateway with:
 Required gates, in order: pre-CAS encrypted-overlay membership and in-task DNS,
 complete candidate semantic validation, immutable runtime image, readiness,
 post-CAS overlay/DNS, exact A1 flags, public gateway contract, controlled
-ingress/XFF source proof, authenticated WSS 101 upgrade, exact Phoenix topic
-join, forged-ticket rejection, cross-topic rejection, then a final exact
-candidate Spec check. Credentials stay memory-only and are never logged. Any
-external-gate failure leaves the run failed even when exact-incumbent recovery
-succeeds.
+ingress/XFF source proof, then a final exact candidate Spec check. Credentials
+stay memory-only and are never logged. Any external-gate failure leaves the run
+failed even when exact-incumbent recovery succeeds.
+
+The authenticated WSS gate — 101 upgrade, exact Phoenix topic join,
+forged-ticket rejection, cross-topic rejection — is a **Phase B** gate and must
+not run under A1. A1 pins `Features:RealtimeWebSocketProxy:Enabled=false`, so
+`/socket/websocket` is unmapped and no image can return 101; an earlier revision
+of this list contradicted the A1 flag table above and made the deploy
+unsatisfiable. The deploy workflow now reads the flag from the submitted
+candidate Spec and logs
+`staging phase=authenticated-realtime result=skipped-proxy-inactive` under A1.
 
 ## Phase B — activation contract
 

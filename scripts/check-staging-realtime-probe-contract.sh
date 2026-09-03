@@ -110,6 +110,9 @@ require(
         '"Upgrade: websocket\\r\\n"',
         '"Sec-WebSocket-Version: 13\\r\\n"',
         'response_head.decode("iso-8859-1")',
+        "SAFE_DIAGNOSTIC_HEADERS = frozenset(",
+        "def describe_upgrade_failure(status_line: str, header_lines: list[str]) -> str:",
+        "raise RuntimeError(describe_upgrade_failure(lines[0], lines[1:]))",
         'response_headers.get("x-jeeb-realtime-proxy") != "gateway"',
         'WebSocket upgrade did not traverse the gateway proxy',
         'hashlib.sha1((websocket_key + WS_GUID)',
@@ -274,6 +277,10 @@ def validate_bootstrap_workflow(text):
         "verify_bootstrap_flags",
         "probe_staging_authenticated_realtime",
         "python3 scripts/probe-staging-authenticated-realtime.py",
+        "staging_realtime_ws_proxy_activated() {",
+        "if staging_realtime_ws_proxy_activated; then",
+        'startswith("features__realtimewebsocketproxy__enabled=")',
+        "staging phase=authenticated-realtime result=skipped-proxy-inactive (redacted)",
         "probe_staging_untrusted_xff_contract",
         "staging phase=untrusted-xff-contract result=passed (redacted)",
         "staging phase=authenticated-realtime result=passed (redacted)",
@@ -573,6 +580,24 @@ negative_controls = (
     (
         "authenticated WSS probe removed",
         workflow.replace("python3 scripts/probe-staging-authenticated-realtime.py", ":", 1),
+    ),
+    (
+        "WSS activation gate forced open",
+        workflow.replace("if staging_realtime_ws_proxy_activated; then", "if true; then", 1),
+    ),
+    (
+        "WSS activation gate reads workflow text instead of the deployed Spec",
+        workflow.replace(
+            'startswith("features__realtimewebsocketproxy__enabled=")', "true", 1
+        ),
+    ),
+    (
+        "WSS activation skip made silent",
+        workflow.replace(
+            "staging phase=authenticated-realtime result=skipped-proxy-inactive (redacted)",
+            "",
+            1,
+        ),
     ),
     (
         "untrusted XFF evidence probe removed",

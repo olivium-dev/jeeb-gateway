@@ -489,6 +489,17 @@ jobs:
               STAGING_REALTIME_PROBE_KEY_FILE="$probe_key_file" \
                 python3 scripts/probe-staging-authenticated-realtime.py
             }
+            # Reads the activation flag from the submitted candidate Spec, never
+            # from workflow text, so A1 and B are distinguished by what is deployed.
+            staging_realtime_ws_proxy_activated() {
+              jq -e '
+                [.TaskTemplate.ContainerSpec.Env[]?
+                  | select(ascii_downcase
+                    | startswith("features__realtimewebsocketproxy__enabled="))
+                  | sub("^[^=]*="; "") | ascii_downcase]
+                | length == 1 and .[0] == "true"
+              ' "$candidate_spec" >/dev/null
+            }
             staging_probe_auth() {
                 python3 - "$probe_key_file" <<'PY'
           import hashlib
@@ -1325,9 +1336,15 @@ jobs:
             echo 'staging phase=untrusted-xff-contract result=started (redacted)'
             probe_staging_untrusted_xff_contract
             echo 'staging phase=untrusted-xff-contract result=passed (redacted)'
-            echo 'staging phase=authenticated-realtime result=started (redacted)'
-            probe_staging_authenticated_realtime
-            echo 'staging phase=authenticated-realtime result=passed (redacted)'
+            # A1 pins Features:RealtimeWebSocketProxy:Enabled=false, so /socket/websocket
+            # is unmapped and can never return 101. This gate belongs to the B activation.
+            if staging_realtime_ws_proxy_activated; then
+              echo 'staging phase=authenticated-realtime result=started (redacted)'
+              probe_staging_authenticated_realtime
+              echo 'staging phase=authenticated-realtime result=passed (redacted)'
+            else
+              echo 'staging phase=authenticated-realtime result=skipped-proxy-inactive (redacted)'
+            fi
           fi
           verify_exact_candidate_after_checks
 
