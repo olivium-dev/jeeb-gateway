@@ -44,6 +44,21 @@ for invalid in (
 
 print("Staging authenticated realtime RFC3339 compatibility: PASS")
 
+# Pinned by value, not by behaviour: widening the allowlist must be a visible
+# test change rather than a silent edit to the probe.
+assert probe.SAFE_DIAGNOSTIC_HEADERS == frozenset(
+    {
+        "connection",
+        "content-type",
+        "sec-websocket-accept",
+        "upgrade",
+        "www-authenticate",
+        "x-jeeb-realtime-proxy",
+    }
+), probe.SAFE_DIAGNOSTIC_HEADERS
+for forbidden in ("set-cookie", "cookie", "authorization", "x-correlation-id"):
+    assert forbidden not in probe.SAFE_DIAGNOSTIC_HEADERS, forbidden
+
 # The 2026-09-03 staging failure printed a bare "did not return 101" and cost a
 # full investigation; the message must now carry the status and safe headers.
 unmapped_route = probe.describe_upgrade_failure(

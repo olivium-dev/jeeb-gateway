@@ -138,6 +138,13 @@ Its reviewed configuration delta is limited to:
 | `DemoUsers__Enabled` | `false` |
 | staging realtime descriptor | remains enabled and file-backed |
 
+Until B lands, the activated branch of the WSS gate is **unreachable**, not
+merely unused: `Features__RealtimeWebSocketProxy__Enabled=false` is pinned in
+four places that must be edited together — `add_env` and `verify_bootstrap_flags`
+in `jeeb-staging-deploy.yml`, `scripts/staging-gateway-candidate-contract.jq`, and
+`scripts/check-staging-gateway-phase-contracts.sh` — so today the gate is retired
+rather than conditional, and it lights up automatically once all four move.
+
 B requires real, non-Super-Login SMS, Firebase/chat, scoped WSS, delivery, and
 KYC canaries plus independent approval. Voice remains off throughout this
 campaign and needs its own future activation decision. Store upload remains

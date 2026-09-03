@@ -280,6 +280,10 @@ def validate_bootstrap_workflow(text):
         "staging_realtime_ws_proxy_activated() {",
         "if staging_realtime_ws_proxy_activated; then",
         'startswith("features__realtimewebsocketproxy__enabled=")',
+        # The predicate must read the submitted candidate Spec, and stay
+        # fail-closed on a duplicated or absent activation row.
+        "' \"$candidate_spec\" >/dev/null",
+        '| length == 1 and .[0] == "true"',
         "staging phase=authenticated-realtime result=skipped-proxy-inactive (redacted)",
         "probe_staging_untrusted_xff_contract",
         "staging phase=untrusted-xff-contract result=passed (redacted)",
@@ -589,6 +593,20 @@ negative_controls = (
         "WSS activation gate reads workflow text instead of the deployed Spec",
         workflow.replace(
             'startswith("features__realtimewebsocketproxy__enabled=")', "true", 1
+        ),
+    ),
+    (
+        "WSS activation gate reads the incumbent Spec instead of the candidate",
+        workflow.replace(
+            "' \"$candidate_spec\" >/dev/null", "' \"$incumbent_spec\" >/dev/null", 1
+        ),
+    ),
+    (
+        "WSS activation cardinality loosened away from fail-closed",
+        workflow.replace(
+            '| length == 1 and .[0] == "true"',
+            '| length >= 1 and any(.[]; . == "true")',
+            1,
         ),
     ),
     (
