@@ -1,4 +1,5 @@
 def env_pair: capture("^(?<key>[^=]+)=(?<value>.*)$");
+def normalized_env_key: ascii_downcase | gsub(":"; "__");
 def canonical_configuration_key: ascii_downcase | gsub("__"; ":");
 def forwarded_trust_key:
   canonical_configuration_key
@@ -10,7 +11,7 @@ def setting_rows($document; $key):
   [
     ($document.TaskTemplate.ContainerSpec.Env // [])[]
     | env_pair
-    | select((.key | ascii_downcase) == ($key | ascii_downcase))
+    | select((.key | normalized_env_key) == ($key | normalized_env_key))
     | {key:.key, value:.value}
   ];
 def banned_legacy_host: "192.168.2." + "50";
@@ -45,14 +46,14 @@ def forbidden_payment_gateway_reference:
 
 (.TaskTemplate.ContainerSpec.Env // []) as $rows
 | [$rows[] | env_pair] as $pairs
-| ($pairs | map(.key | ascii_downcase)) as $lower_keys
+| ($pairs | map(.key | normalized_env_key)) as $normalized_keys
 | ($pairs
-    | map({key:(.key | ascii_downcase), value:.value})
+    | map({key:(.key | normalized_env_key), value:.value})
     | from_entries) as $environment
 | .EndpointSpec.Ports as $ports
 | .TaskTemplate.Networks as $networks
 | (tojson | ascii_downcase) as $candidate_text
-| ($lower_keys | length) == ($lower_keys | unique | length)
+| ($normalized_keys | length) == ($normalized_keys | unique | length)
   and .TaskTemplate.ContainerSpec.Image == $image
   and ($networks == [{Target:$network_id}])
   and ($ports | length) == 1
@@ -114,6 +115,31 @@ def forbidden_payment_gateway_reference:
       )
     end
   )
+  and $environment["jeebfirebasecontract__schemaversion"] == "1"
+  and $environment["jeebfirebasecontract__projectid"] == "jeeb-5a293"
+  and $environment["jeebfirebasecontract__projectnumber"] == "1051234312170"
+  and $environment["jeebfirebasecontract__firestoredatabaseid"] == "(default)"
+  and $environment["jeebfirebasecontract__chatenabled"] == "true"
+  and $environment["jeebfirebasecontract__pushproducer"] == "notification-service"
+  and $environment["firebase__chat__projectid"] == "jeeb-5a293"
+  and $environment["firebase__chat__serviceaccountkeypath"] == "/run/secrets/firebase_admin_json"
+  and ([.TaskTemplate.ContainerSpec.Secrets[]?
+    | select(.File.Name == "firebase_admin_json")] | length) == 1
+  and any(
+    .TaskTemplate.ContainerSpec.Secrets[]?;
+    .File.Name == "firebase_admin_json"
+    and .File.UID == "65532"
+    and .File.GID == "65532"
+    and .File.Mode == 256
+    and (.SecretID | test("^[a-z0-9]+$"))
+    and (.SecretName | test("^jeeb_staging_gateway_firebase_[0-9a-f]{64}$"))
+  )
+  and $environment["featureflags__notificationdurablewrite__enabled"] == "true"
+  and $environment["featureflags__notificationoutboxmode"] == "upstream-authority"
+  and $environment["featureflags__pushdispatchmode"] == "local"
+  and ($normalized_keys | index("firestore__databaseid")) == null
+  and ($normalized_keys | index("firebase__firestoredatabaseid")) == null
+  and ($normalized_keys | index("firebase__chat__firestoredatabaseid")) == null
   and ($pairs | all((.key | forwarded_trust_key) | not))
   and (
     if $deployment_mode == "devtool-reassert" then

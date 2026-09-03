@@ -7,9 +7,10 @@ namespace JeebGateway.Chat.Firebase;
 /// <para>The service-account key is referenced by ABSOLUTE PATH ON THE HOST and is
 /// never carried in this repository. There is deliberately no embedded default, no
 /// inline-JSON option, and no fallback: if <see cref="ServiceAccountKeyPath"/> is not
-/// configured the route reports itself unavailable rather than minting anything. See
-/// <see cref="FirebaseCustomTokenMinter"/> for the load-time guards that make it
-/// impossible for this route to work by reading a credential committed to the repo.</para>
+/// configured the local-development route reports itself unavailable rather than
+/// minting anything. Deployment authorities always mount this path, and startup eagerly
+/// validates it before readiness. See <see cref="FirebaseCustomTokenMinter"/> for the
+/// guards that make it impossible to read a credential committed to the repo.</para>
 /// </summary>
 public sealed class FirebaseCustomTokenOptions
 {
@@ -17,8 +18,9 @@ public sealed class FirebaseCustomTokenOptions
 
     /// <summary>
     /// Absolute filesystem path to the Firebase service-account JSON on the host.
-    /// Empty (the default, and the value committed to every appsettings file) means
-    /// the mint route is switched off.
+    /// Empty is allowed only for local development/testing and means the mint route is
+    /// switched off. Every deployment workflow requires the protected credential and
+    /// sets this to <c>/run/secrets/firebase_admin_json</c>.
     /// </summary>
     public string ServiceAccountKeyPath { get; set; } = string.Empty;
 

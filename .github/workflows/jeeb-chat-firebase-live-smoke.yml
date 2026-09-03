@@ -1,0 +1,70 @@
+name: Jeeb Chat Firebase live identity smoke
+
+"on":
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: Protected Jeeb environment to verify
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      expected_uid:
+        description: Existing non-privileged Jeeb user id used only for this smoke
+        required: true
+        type: string
+      confirm_smoke:
+        description: Type verify-jeeb-firebase-identity
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.target_environment }}
+    steps:
+      - name: Require protected source and designated owner
+        env:
+          CONFIRM_SMOKE: ${{ inputs.confirm_smoke }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GITHUB_REF_PROTECTED: ${{ github.ref_protected }}
+          REQUESTING_ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REPOSITORY" = olivium-dev/jeeb-gateway ]
+          [ "$CONFIRM_SMOKE" = verify-jeeb-firebase-identity ]
+          [ "$REQUESTING_ACTOR" = oudaykhaled ]
+          [ "$TRIGGERING_ACTOR" = oudaykhaled ]
+          [ -n "$DEFAULT_BRANCH" ]
+          [ "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH" ]
+          [ "$GITHUB_REF_PROTECTED" = true ]
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Verify exact Firebase contract before live exchange
+        run: |
+          set -euo pipefail
+          python3 scripts/validate-jeeb-firebase-contract.py
+          python3 scripts/test-smoke-jeeb-firebase-token-exchange.py
+
+      - name: Exchange through Firebase Identity Toolkit without logging tokens
+        env:
+          JEEB_TOKEN_MINT_KEY: ${{ secrets.JEEB_TOKEN_MINT_KEY }}
+          JEEB_FIREBASE_WEB_API_KEY: ${{ secrets.JEEB_FIREBASE_WEB_API_KEY }}
+          EXPECTED_UID: ${{ inputs.expected_uid }}
+          TARGET_ENVIRONMENT: ${{ inputs.target_environment }}
+        run: |
+          set -euo pipefail
+          case "$TARGET_ENVIRONMENT" in
+            staging) gateway_origin=https://app.jeeb.fds-1.com ;;
+            production) gateway_origin=https://jeeb.fds-1.com ;;
+            *) exit 64 ;;
+          esac
+          python3 scripts/smoke-jeeb-firebase-token-exchange.py \
+            --gateway-origin "$gateway_origin" \
+            --expected-uid "$EXPECTED_UID"

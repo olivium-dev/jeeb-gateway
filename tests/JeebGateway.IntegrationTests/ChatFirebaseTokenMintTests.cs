@@ -291,15 +291,56 @@ public sealed class ChatFirebaseTokenMintTests
         Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
     }
 
-    [Fact]
-    public async Task Route_refuses_a_relative_key_path_because_it_would_resolve_into_the_app_directory()
+    [Theory]
+    [InlineData("Staging")]
+    [InlineData("Production")]
+    public async Task NonDevelopment_host_refuses_to_boot_when_key_path_is_empty(
+        string environment)
     {
-        using var factory = NewFactory("service-account.json");
-        var client = Authenticated(factory, sub: "relative-path-user");
+        using var host = new HostBuilder()
+            .UseEnvironment(environment)
+            .ConfigureServices(services =>
+            {
+                services.AddLogging();
+                services.Configure<FirebaseCustomTokenOptions>(options =>
+                {
+                    options.ProjectId = ProjectId;
+                    options.ServiceAccountKeyPath = string.Empty;
+                });
+                services.AddSingleton<FirebaseCustomTokenMinter>();
+                services.AddHostedService<FirebaseCustomTokenStartupValidator>();
+            })
+            .Build();
+
+        var error = await Assert.ThrowsAnyAsync<Exception>(() => host.StartAsync());
+
+        Assert.Contains("ServiceAccountKeyPath is required", error.ToString(),
+            StringComparison.Ordinal);
+        Assert.Contains(environment, error.ToString(), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("Development")]
+    [InlineData("Testing")]
+    public async Task Development_and_Testing_may_boot_without_a_key_but_mint_stays_unavailable(
+        string environment)
+    {
+        using var factory = NewFactory(keyPath: string.Empty, environment);
+        var client = Authenticated(factory, sub: "no-key-nonproduction-user");
 
         var response = await client.PostAsync(Route, content: null);
 
         Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Route_refuses_a_relative_key_path_because_it_would_resolve_into_the_app_directory()
+    {
+        using var factory = NewFactory("service-account.json");
+        var error = await Assert.ThrowsAnyAsync<Exception>(
+            () => Task.Run(() => factory.CreateClient()));
+
+        Assert.Contains("absolute host path", error.ToString(), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -315,11 +356,11 @@ public sealed class ChatFirebaseTokenMintTests
         using var key = new TempServiceAccountKey(ProjectId, committed);
 
         using var factory = NewFactory(key.Path);
-        var client = Authenticated(factory, sub: "committed-key-user");
+        var error = await Assert.ThrowsAnyAsync<Exception>(
+            () => Task.Run(() => factory.CreateClient()));
 
-        var response = await client.PostAsync(Route, content: null);
-
-        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Contains("inside the application content root", error.ToString(),
+            StringComparison.Ordinal);
     }
 
     [Fact]
@@ -330,11 +371,11 @@ public sealed class ChatFirebaseTokenMintTests
         using var key = new TempServiceAccountKey("some-other-project");
         using var factory = NewFactory(key.Path);
 
-        var client = Authenticated(factory, sub: "wrong-project-user");
+        var error = await Assert.ThrowsAnyAsync<Exception>(
+            () => Task.Run(() => factory.CreateClient()));
 
-        var response = await client.PostAsync(Route, content: null);
-
-        Assert.Equal(HttpStatusCode.ServiceUnavailable, response.StatusCode);
+        Assert.Contains("different Firebase project", error.ToString(),
+            StringComparison.Ordinal);
     }
 
     // -------------------------------------------------------------------------
@@ -345,7 +386,13 @@ public sealed class ChatFirebaseTokenMintTests
         string keyPath, string? environment = null)
         => new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
-            builder.UseSetting("Firebase:Chat:ServiceAccountKeyPath", keyPath);
+            // The shared test factory supplies an ephemeral signer so unrelated
+            // Production-mode tests can satisfy the real boot invariant. A single
+            // space is an explicit whitespace-only override; ASP.NET host settings
+            // discard an empty string before the later app-configuration layer.
+            builder.UseSetting(
+                "Firebase:Chat:ServiceAccountKeyPath",
+                string.IsNullOrEmpty(keyPath) ? " " : keyPath);
             builder.UseSetting("Firebase:Chat:ProjectId", ProjectId);
 
             if (environment is not null)

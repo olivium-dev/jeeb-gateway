@@ -33,6 +33,17 @@ def read_contract(path):
 
 expected_a1 = {
     "ASPNETCORE_ENVIRONMENT": "Staging",
+    "JeebFirebaseContract__SchemaVersion": "1",
+    "JeebFirebaseContract__ProjectId": "jeeb-5a293",
+    "JeebFirebaseContract__ProjectNumber": "1051234312170",
+    "JeebFirebaseContract__FirestoreDatabaseId": "(default)",
+    "JeebFirebaseContract__ChatEnabled": "true",
+    "JeebFirebaseContract__PushProducer": "notification-service",
+    "Firebase__Chat__ProjectId": "jeeb-5a293",
+    "Firebase__Chat__ServiceAccountKeyPath": "/run/secrets/firebase_admin_json",
+    "FeatureFlags__NotificationDurableWrite__Enabled": "true",
+    "FeatureFlags__NotificationOutboxMode": "upstream-authority",
+    "FeatureFlags__PushDispatchMode": "local",
     "DemoUsers__Enabled": "true",
     "Features__DevEndpoints__Enabled": "true",
     "Features__Swagger__Enabled": "true",
@@ -103,9 +114,16 @@ if input_references != {"deployment_mode", "provider_expand_verified"}:
     )
 
 for key, value in expected_a1.items():
-    marker = f"add_env {key} {value}"
-    if workflow.count(marker) != 1:
-        raise SystemExit(f"FAIL: A1 workflow does not bind exactly one {marker!r}")
+    markers = (
+        f"add_env {key} {value}",
+        f"add_env {key} '{value}'",
+        f'add_env {key} "{value}"',
+    )
+    count = sum(workflow.count(marker) for marker in markers)
+    if count != 1:
+        raise SystemExit(
+            f"FAIL: A1 workflow does not bind exactly one {key}={value!r} row"
+        )
 
 for activated in (
     "FeatureFlags__UseUpstream__Chat",

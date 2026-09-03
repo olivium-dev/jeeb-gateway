@@ -27,10 +27,10 @@ Swarm mutation, nginx change, Cloudflare change, or staging request.
    `Version.Index`, digest, ports, networks, replicas, and secret names.
 5. Start-first is permitted only after preflight proves the canonical
    `10000:8080/ingress` routing-mesh topology. A host-mode port is a hard stop.
-6. Swarm handles task/readiness failures with start-first automatic rollback.
-   Failures in later public/canary gates invoke one exact-incumbent Engine API
-   update bound to the candidate `Service.ID` and `Version.Index`. A third Spec
-   wins: recovery refuses to overwrite it.
+6. Swarm handles task/readiness failures with start-first plus pause. Failures
+   in later public/canary gates invoke the reviewed forward-fix update bound to
+   the candidate `Service.ID` and `Version.Index`. A third Spec wins: recovery
+   refuses to overwrite it.
 7. A1 and B are separate contracts. A1 cannot accept an activation input.
 8. The candidate is a complete desired `Spec`, derived from and hash-bound to
    the captured incumbent. Recovery is armed before that Spec is submitted to

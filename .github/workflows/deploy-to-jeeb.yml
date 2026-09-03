@@ -149,7 +149,7 @@ on:
       # Example: feature_flags='ConversationAutoCreate=true' arms H7 broadcasting auto-create
       # while leaving Kyc/Cdn at their baked-true defaults.
       feature_flags:
-        description: 'Generic FeatureFlags overlay: comma-separated Key=Value. Keys: ConversationAutoCreate, UseUpstreamKyc, UseUpstreamCdn, UseUpstreamOffer, UseUpstreamChat. Empty = preserve running flags. Delivery/Ratings authority and Heartbeat/DurableRequests environment locks are not operator inputs.'
+        description: 'Generic FeatureFlags overlay: comma-separated Key=Value. Keys: ConversationAutoCreate, UseUpstreamKyc, UseUpstreamCdn, UseUpstreamOffer. Empty = preserve running flags. Chat/Delivery/Ratings authority and Heartbeat/DurableRequests environment locks are not operator inputs.'
         required: false
         default: ''
       # DEV-ONLY seed/inspect surface (/dev/*). This input is the ONLY supported way to
@@ -232,6 +232,21 @@ jobs:
           fi
 
       - uses: actions/checkout@v4
+
+      - name: Validate Jeeb Firebase, Chat, and push ownership contract
+        run: python3 scripts/validate-jeeb-firebase-contract.py
+
+      - name: Validate protected Firebase service account before deployment
+        env:
+          JEEB_FIREBASE_JSON: ${{ secrets.JEEB_FIREBASE_JSON }}
+        run: |
+          set -euo pipefail
+          : "${JEEB_FIREBASE_JSON:?JEEB_FIREBASE_JSON protected secret is required}"
+          firebase_stage=$(mktemp -d)
+          trap 'rm -rf -- "$firebase_stage"' EXIT
+          printf '%s' "$JEEB_FIREBASE_JSON" \
+            | python3 scripts/validate-firebase-service-account.py \
+                --materialize "$firebase_stage/firebase-admin.json" >/dev/null
 
       - name: Reject the staging bootstrap target
         env:
@@ -402,8 +417,18 @@ jobs:
           PRIVATE_ARTIFACT_TOKEN: ${{ secrets.PRIVATE_ARTIFACT_STORE_BEARER_TOKEN }}
           DATA_EXPORT_SIGNING_KEY: ${{ secrets.DATA_EXPORT_TOKEN_SIGNING_KEY }}
           GATEWAY_JOB_TOKEN: ${{ secrets.JEEB_GATEWAY_JOB_TOKEN }}
+          JEEB_FIREBASE_JSON: ${{ secrets.JEEB_FIREBASE_JSON }}
         run: |
           set -euo pipefail
+          : "${JEEB_FIREBASE_JSON:?JEEB_FIREBASE_JSON protected secret is required}"
+          firebase_stage=$(mktemp -d)
+          trap 'rm -rf -- "$firebase_stage"' EXIT
+          firebase_file="$firebase_stage/firebase-admin.json"
+          firebase_digest=$(printf '%s' "$JEEB_FIREBASE_JSON" \
+            | python3 scripts/validate-firebase-service-account.py \
+                --materialize "$firebase_file")
+          [[ "$firebase_digest" =~ ^[0-9a-f]{64}$ ]]
+          FIREBASE_SECRET="jeeb_gateway_firebase_${firebase_digest}"
           : "${STATE_SERVICE_TOKEN:?JEEB_STATE_SERVICE_TOKEN secret is required}"
           : "${DELIVERY_OWNER_TOKEN:?DELIVERY_SERVICE_TOKEN secret is required}"
           : "${NOTIFICATION_OWNER_TOKEN:?NOTIFICATION_SERVICE_TOKEN secret is required}"
@@ -427,6 +452,17 @@ jobs:
             # shellcheck disable=SC2029
             printf '%s' "$2" | ssh jeeb "docker secret create '$1' - >/dev/null"
           }
+          stream_content_addressed_secret_file() {
+            local secret_name=$1 secret_file=$2
+            # The content-addressed name is validated locally and intentionally expanded.
+            # shellcheck disable=SC2029
+            if ssh jeeb "docker secret inspect '$secret_name' >/dev/null 2>&1"; then
+              return 0
+            fi
+            # shellcheck disable=SC2029
+            ssh jeeb "docker secret create '$secret_name' - >/dev/null" < "$secret_file"
+          }
+          stream_content_addressed_secret_file "$FIREBASE_SECRET" "$firebase_file"
           stream_secret "$STATE_SECRET" "$STATE_SERVICE_TOKEN"
           stream_secret "$DELIVERY_SECRET" "$DELIVERY_OWNER_TOKEN"
           stream_secret "$NOTIFICATION_SECRET" "$NOTIFICATION_OWNER_TOKEN"
@@ -438,6 +474,7 @@ jobs:
           unset STATE_SERVICE_TOKEN DELIVERY_OWNER_TOKEN NOTIFICATION_OWNER_TOKEN PUSH_RELAY_TOKEN \
             BUNDLER_CMS_TOKEN PRIVATE_ARTIFACT_TOKEN \
             DATA_EXPORT_SIGNING_KEY GATEWAY_JOB_TOKEN
+          unset JEEB_FIREBASE_JSON
           # DEV-only /dev/* flag, controlled EXCLUSIVELY by the dev_endpoints input (3-state).
           # preserve (DEFAULT) => emit NO dev-flag arg. `docker service update --image ...`
           #                       preserves every unlisted env var, so the flag's current value
@@ -513,7 +550,6 @@ jobs:
                 useupstreamkyc)         _envvar="FeatureFlags__UseUpstream__Kyc" ;;
                 useupstreamcdn)         _envvar="FeatureFlags__UseUpstream__Cdn" ;;
                 useupstreamoffer)       _envvar="FeatureFlags__UseUpstream__Offer" ;;
-                useupstreamchat)        _envvar="FeatureFlags__UseUpstream__Chat" ;;
                 *) echo "::warning::feature_flags: ignoring unknown key '$_key'"; continue ;;
               esac
               FEATURE_FLAG_ARGS="$FEATURE_FLAG_ARGS --env-add ${_envvar}=${_val}"
@@ -538,6 +574,7 @@ jobs:
           ARTIFACT_SECRET='$ARTIFACT_SECRET'
           EXPORT_SECRET='$EXPORT_SECRET'
           JOB_SECRET='$JOB_SECRET'
+          FIREBASE_SECRET='$FIREBASE_SECRET'
           REQUESTED_IMAGE='$IMAGE_PATH'
           [ "$HEALTH" = /health/ready ] || {
             echo 'Gateway deployment requires the scoped readiness path.' >&2
@@ -558,11 +595,49 @@ jobs:
             --env-rm Whisper__ApiKey
             --env-rm OPENAI_API_KEY
             --env-rm OLIVIUM_OPEN_AI_KEY
+            --env-rm Firestore__DatabaseId
+            --env-rm Firebase__FirestoreDatabaseId
+            --env-rm Firebase__Chat__FirestoreDatabaseId
           )
           docker service inspect "\$SVC" >/dev/null 2>&1 || {
             echo 'Direct gateway deploy requires an incumbent digest-pinned service' >&2
             exit 1
           }
+          # Linux environment names are case-sensitive while .NET configuration is
+          # not. Remove case-skewed aliases before adding the canonical rows, or a
+          # stale operator value can remain ambiguous after the image update.
+          while IFS= read -r existing_row; do
+            existing_key="\${existing_row%%=*}"
+            normalized_key="\$(printf '%s' "\$existing_key" \
+              | tr '[:upper:]' '[:lower:]' | sed 's/:/__/g')"
+            case "\$normalized_key" in
+              jeebfirebasecontract__schemaversion|jeebfirebasecontract__projectid|\
+              jeebfirebasecontract__projectnumber|jeebfirebasecontract__firestoredatabaseid|\
+              jeebfirebasecontract__chatenabled|jeebfirebasecontract__pushproducer|\
+              firebase__chat__projectid|firebase__chat__serviceaccountkeypath|\
+              featureflags__notificationdurablewrite__enabled|\
+              featureflags__notificationoutboxmode|featureflags__pushdispatchmode|\
+              featureflags__useupstream__chat)
+                case "\$existing_key" in
+                  JeebFirebaseContract__SchemaVersion|JeebFirebaseContract__ProjectId|\
+                  JeebFirebaseContract__ProjectNumber|JeebFirebaseContract__FirestoreDatabaseId|\
+                  JeebFirebaseContract__ChatEnabled|JeebFirebaseContract__PushProducer|\
+                  Firebase__Chat__ProjectId|Firebase__Chat__ServiceAccountKeyPath|\
+                  FeatureFlags__NotificationDurableWrite__Enabled|\
+                  FeatureFlags__NotificationOutboxMode|FeatureFlags__PushDispatchMode|\
+                  FeatureFlags__UseUpstream__Chat) ;;
+                  *) retired_env_args+=(--env-rm "\$existing_key") ;;
+                esac
+                ;;
+              firestore__databaseid|firebase__firestoredatabaseid|firebase__chat__firestoredatabaseid)
+                case "\$existing_key" in
+                  Firestore__DatabaseId|Firebase__FirestoreDatabaseId|Firebase__Chat__FirestoreDatabaseId) ;;
+                  *) retired_env_args+=(--env-rm "\$existing_key") ;;
+                esac
+                ;;
+            esac
+          done < <(docker service inspect "\$SVC" \
+            --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}')
           [ "\$(docker service inspect "\$SVC" --format '{{.Spec.Mode.Replicated.Replicas}}')" = 1 ] || {
             echo 'Direct gateway service must retain exactly one replica' >&2
             exit 1
@@ -597,6 +672,7 @@ jobs:
           add_rotated_secret private_artifact_store_bearer_token "\$ARTIFACT_SECRET"
           add_rotated_secret data_export_token_signing_key "\$EXPORT_SECRET"
           add_rotated_secret jeeb_gateway_job_token "\$JOB_SECRET"
+          add_rotated_secret firebase_admin_json "\$FIREBASE_SECRET"
           [[ "\$REQUESTED_IMAGE" =~ @sha256:[0-9a-f]{64}$ ]]
           docker pull "\$REQUESTED_IMAGE"
           rollout=(
@@ -638,9 +714,18 @@ jobs:
               --env-add PRIVATE_ARTIFACT_STORE_BEARER_TOKEN_FILE='/run/secrets/private_artifact_store_bearer_token' \
               --env-add DATA_EXPORT_TOKEN_SIGNING_KEY_FILE='/run/secrets/data_export_token_signing_key' \
               --env-add InternalJobAuth__TokenFile='/run/secrets/jeeb_gateway_job_token' \
+              --env-add JeebFirebaseContract__SchemaVersion='1' \
+              --env-add JeebFirebaseContract__ProjectId='jeeb-5a293' \
+              --env-add JeebFirebaseContract__ProjectNumber='1051234312170' \
+              --env-add 'JeebFirebaseContract__FirestoreDatabaseId=(default)' \
+              --env-add JeebFirebaseContract__ChatEnabled='true' \
+              --env-add JeebFirebaseContract__PushProducer='notification-service' \
+              --env-add Firebase__Chat__ProjectId='jeeb-5a293' \
+              --env-add Firebase__Chat__ServiceAccountKeyPath='/run/secrets/firebase_admin_json' \
               --env-add FeatureFlags__DurableRequests__Enabled='false' \
               --env-add FeatureFlags__NotificationDurableWrite__Enabled='true' \
               --env-add FeatureFlags__NotificationOutboxMode='upstream-authority' \
+              --env-add FeatureFlags__PushDispatchMode='local' \
               --env-add FeatureFlags__Heartbeat__Enabled='false' \
               --env-add FeatureFlags__Heartbeat__ServiceAuthKey='${{ secrets.HEARTBEAT_SERVICE_AUTH_KEY }}' \
               --env-add FeatureFlags__UseUpstream__Offer='true' \
@@ -658,6 +743,45 @@ jobs:
             echo 'Deployed service spec does not match the requested immutable digest' >&2
             exit 1
           }
+          service_env="\$(docker service inspect "\$SVC" \
+            --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}')"
+          for required in \
+            JeebFirebaseContract__SchemaVersion=1 \
+            JeebFirebaseContract__ProjectId=jeeb-5a293 \
+            JeebFirebaseContract__ProjectNumber=1051234312170 \
+            'JeebFirebaseContract__FirestoreDatabaseId=(default)' \
+            JeebFirebaseContract__ChatEnabled=true \
+            JeebFirebaseContract__PushProducer=notification-service \
+            Firebase__Chat__ProjectId=jeeb-5a293 \
+            Firebase__Chat__ServiceAccountKeyPath=/run/secrets/firebase_admin_json \
+            FeatureFlags__NotificationDurableWrite__Enabled=true \
+            FeatureFlags__NotificationOutboxMode=upstream-authority \
+            FeatureFlags__PushDispatchMode=local \
+            FeatureFlags__UseUpstream__Chat=true; do
+            [ "\$(printf '%s\n' "\$service_env" | grep -Fxc "\$required")" -eq 1 ]
+          done
+          normalized_keys="\$(printf '%s\n' "\$service_env" | cut -d= -f1 \
+            | tr '[:upper:]' '[:lower:]' | sed 's/:/__/g')"
+          for canonical_key in \
+            jeebfirebasecontract__schemaversion jeebfirebasecontract__projectid \
+            jeebfirebasecontract__projectnumber jeebfirebasecontract__firestoredatabaseid \
+            jeebfirebasecontract__chatenabled jeebfirebasecontract__pushproducer \
+            firebase__chat__projectid firebase__chat__serviceaccountkeypath \
+            featureflags__notificationdurablewrite__enabled \
+            featureflags__notificationoutboxmode featureflags__pushdispatchmode \
+            featureflags__useupstream__chat; do
+            [ "\$(printf '%s\n' "\$normalized_keys" | grep -Fxc "\$canonical_key")" -eq 1 ]
+          done
+          service_secret_targets="\$(docker service inspect "\$SVC" \
+            --format '{{range .Spec.TaskTemplate.ContainerSpec.Secrets}}{{.File.Name}}={{.SecretName}}:{{.File.UID}}:{{.File.GID}}:{{.File.Mode}}{{println}}{{end}}')"
+          [ "\$(printf '%s\n' "\$service_secret_targets" \
+            | grep -Fxc "firebase_admin_json=\$FIREBASE_SECRET:65532:65532:256")" -eq 1 ]
+          [ "\$(printf '%s\n' "\$service_secret_targets" \
+            | cut -d= -f1 | grep -Fxc firebase_admin_json)" -eq 1 ]
+          for retired_key in firestore__databaseid firebase__firestoredatabaseid \
+            firebase__chat__firestoredatabaseid; do
+            [ "\$(printf '%s\n' "\$normalized_keys" | grep -Fxc "\$retired_key")" -eq 0 ]
+          done
           current_ports=\$(docker service inspect "\$SVC" \
             --format '{{range .Endpoint.Spec.Ports}}{{.PublishedPort}}:{{.TargetPort}}:{{.PublishMode}}{{end}}')
           [ "\$current_ports" = "\${EXT}:\${INT}:ingress" ] || {

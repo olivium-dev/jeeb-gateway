@@ -18,6 +18,7 @@ hosted-service DataExportProcessor
 hosted-service DefaultLexiconSeeder
 hosted-service DurableWorkSweepWorker
 hosted-service EscalationMirrorDrainer
+hosted-service FirebaseCustomTokenStartupValidator
 hosted-service JeebNotificationCatalogSeeder
 hosted-service NewRequestFanoutProcessor
 hosted-service NotificationDurableWriteStartupAlarm

@@ -16,7 +16,9 @@ jobs:
       - name: Test exact Swarm image verifier
         run: scripts/test-verify-swarm-service-image.sh
       - name: Reject deployment and authority reversion paths
-        run: bash scripts/check-forward-only-authorities.sh
+        run: |
+          bash scripts/check-forward-only-authorities.sh
+          bash scripts/test-validate-firebase-service-account.sh
       - name: Test staging security-cutover boundaries
         run: |
           bash scripts/test-verify-staging-otp-verify-freeze.sh

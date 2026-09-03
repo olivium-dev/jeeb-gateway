@@ -23,6 +23,9 @@ public sealed class StatelessGatewayGuardTests
         "JeebGateway.Realtime.CourierPositionPublisher",
         "JeebGateway.Notifications.NotificationDurableWriteStartupAlarm",
         "JeebGateway.Notifications.NewRequestFanoutProcessor",
+        // Configuration-only startup guard: validates the mounted service account
+        // synchronously and owns no state, timer, queue, or background execution.
+        "JeebGateway.Chat.Firebase.FirebaseCustomTokenStartupValidator",
         "JeebGateway.StateService.Work.WorkItemClaimWorker",
         "JeebGateway.Requests.OtpHandover.OtpHandoverSweeper",
         "JeebGateway.Requests.OtpHandover.EscalationMirrorDrainer",

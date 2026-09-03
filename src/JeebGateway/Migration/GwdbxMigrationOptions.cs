@@ -55,8 +55,9 @@ public sealed class GwdbxMigrationOptions
     // AvailabilityMode). The gateway stays the single presence authority until W3-13 flips it.
     public string AvailabilityMode { get; init; } = "local";
 
-    // push trio -> push-notification, W3-14 (registry token: PushDispatchMode). Only "local" and
-    // "upstream-authority" are used: a dual-write rung would make the gateway a 2nd producer (D1).
+    // ADR-0013: "local" is the durable notification-service hand-over and is permanently pinned
+    // by Program.cs. The historical upstream rung is retained only for configuration parsing and
+    // test evidence; it dials push-notification directly and is rejected at host start.
     public string PushDispatchMode { get; init; } = "local";
 
     // users projection suspension -> user-management, W4-04 (registry token: UserModerationMode).

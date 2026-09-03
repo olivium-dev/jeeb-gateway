@@ -97,6 +97,13 @@ public sealed class FirebaseCustomTokenMinter : IFirebaseCustomTokenMinter
         }
     }
 
+    /// <summary>
+    /// Eagerly validate the configured credential without minting or exposing a token.
+    /// Deployment surfaces always configure the mounted path, so a missing, malformed,
+    /// or cross-project Swarm secret prevents the candidate process becoming ready.
+    /// </summary>
+    public void ValidateConfiguration() => EnsureLoaded();
+
     public FirebaseCustomToken Mint(string uid)
     {
         if (string.IsNullOrWhiteSpace(uid))
@@ -304,4 +311,35 @@ public sealed class FirebaseCustomTokenMinter : IFirebaseCustomTokenMinter
         [JsonPropertyName("private_key")]
         public string PrivateKey { get; set; } = string.Empty;
     }
+}
+
+/// <summary>
+/// Fail startup closed when an operator configured Firebase chat credentials that
+/// cannot mint for the canonical project. Local development may leave the path empty;
+/// every deployment authority is contract-tested to set the mounted path explicitly.
+/// </summary>
+public sealed class FirebaseCustomTokenStartupValidator(
+    IOptions<FirebaseCustomTokenOptions> options,
+    FirebaseCustomTokenMinter minter,
+    IHostEnvironment environment) : IHostedService
+{
+    public Task StartAsync(CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(options.Value.ServiceAccountKeyPath))
+        {
+            if (environment.IsDevelopment() || environment.IsEnvironment("Testing"))
+            {
+                return Task.CompletedTask;
+            }
+
+            throw new FirebaseCustomTokenUnavailableException(
+                $"{FirebaseCustomTokenOptions.SectionName}:ServiceAccountKeyPath is required "
+                + $"when the host environment is {environment.EnvironmentName}.");
+        }
+
+        minter.ValidateConfiguration();
+        return Task.CompletedTask;
+    }
+
+    public Task StopAsync(CancellationToken cancellationToken) => Task.CompletedTask;
 }

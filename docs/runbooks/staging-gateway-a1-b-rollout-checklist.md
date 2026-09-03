@@ -59,7 +59,7 @@ Mode: **PREPARE ONLY — no live authority granted**
 - [ ] Exact incumbent full Spec/ID/version/manifest captured privately.
 - [ ] Incumbent and candidate images are immutable digests.
 - [ ] Existing-service-only and one-replica assertions pass.
-- [ ] Ingress/start-first/automatic-rollback preflight passes.
+- [ ] Ingress/start-first/pause plus forward-fix preflight passes.
 - [ ] Exact encrypted `jeeb-staging-net` ID, gateway/OTP/realtime memberships,
       and reciprocal in-task DNS checks pass before CAS and after rollout.
 - [x] Complete candidate semantics are executable and occur before CAS.
@@ -81,7 +81,7 @@ Mode: **PREPARE ONLY — no live authority granted**
 - [x] Readiness failure recovers and verifies the exact incumbent.
 - [x] Canary failure recovers and verifies the exact incumbent.
 - [x] Lost-response reconciliation is bounded and idempotent.
-- [x] Incorrect rollback state/verification fails closed.
+- [x] Incorrect recovery state/verification fails closed.
 - [x] Step summary persists only sanitized Spec hashes and fixed-enum results;
       no full Spec, secret name, or secret value is persisted.
 

@@ -15,7 +15,8 @@ public sealed class DurableOwnershipDeploymentContractTests
         ("bundler_cms_bearer_token", "add_rotated_secret bundler_cms_bearer_token \"\\$BUNDLER_SECRET\""),
         ("private_artifact_store_bearer_token", "add_rotated_secret private_artifact_store_bearer_token \"\\$ARTIFACT_SECRET\""),
         ("data_export_token_signing_key", "add_rotated_secret data_export_token_signing_key \"\\$EXPORT_SECRET\""),
-        ("jeeb_gateway_job_token", "add_rotated_secret jeeb_gateway_job_token \"\\$JOB_SECRET\"")
+        ("jeeb_gateway_job_token", "add_rotated_secret jeeb_gateway_job_token \"\\$JOB_SECRET\""),
+        ("firebase_admin_json", "add_rotated_secret firebase_admin_json \"\\$FIREBASE_SECRET\"")
     ];
 
     private static readonly (string Target, string Invocation)[] StagingMountedCredentials =
@@ -148,9 +149,93 @@ public sealed class DurableOwnershipDeploymentContractTests
 
         workflow.Should().Contain("FeatureFlags__NotificationDurableWrite__Enabled");
         workflow.Should().Contain("FeatureFlags__NotificationOutboxMode");
+        workflow.Should().Contain("FeatureFlags__PushDispatchMode");
+        (workflow.Contains("FeatureFlags__PushDispatchMode='local'", StringComparison.Ordinal)
+            || workflow.Contains(
+                "add_env FeatureFlags__PushDispatchMode local",
+                StringComparison.Ordinal)).Should().BeTrue();
         workflow.Should().Contain("upstream-authority");
         workflow.Should().Contain("PushNotificationServiceApi__GatewayApiKeyFile");
         workflow.Should().Contain("push_gateway_api_key");
+    }
+
+    [Theory]
+    [InlineData("deploy-to-jeeb.yml")]
+    [InlineData("jeeb-production-deploy.yml")]
+    [InlineData("jeeb-staging-deploy.yml")]
+    public void Gateway_deploys_reconcile_the_canonical_firebase_contract(string workflowName)
+    {
+        var workflow = Workflow(workflowName);
+
+        workflow.Should().Contain("JeebFirebaseContract__SchemaVersion");
+        workflow.Should().Contain("JeebFirebaseContract__ProjectId");
+        workflow.Should().Contain("jeeb-5a293");
+        workflow.Should().Contain("JeebFirebaseContract__ProjectNumber");
+        workflow.Should().Contain("1051234312170");
+        workflow.Should().Contain("JeebFirebaseContract__FirestoreDatabaseId");
+        workflow.Should().Contain("(default)");
+        workflow.Should().Contain("JeebFirebaseContract__ChatEnabled");
+        workflow.Should().Contain("JeebFirebaseContract__PushProducer");
+        workflow.Should().Contain("notification-service");
+        workflow.Should().Contain("Firebase__Chat__ProjectId");
+        workflow.Should().Contain("Firebase__Chat__ServiceAccountKeyPath");
+        workflow.Should().Contain("/run/secrets/firebase_admin_json");
+        workflow.Should().Contain("secrets.JEEB_FIREBASE_JSON");
+        workflow.Should().Contain("scripts/validate-firebase-service-account.py");
+        workflow.Should().Contain("firebase_admin_json");
+        workflow.Should().Contain("[0-9a-f]{64}");
+        workflow.Contains("Firestore__DatabaseId", StringComparison.OrdinalIgnoreCase)
+            .Should().BeTrue();
+        workflow.Contains("Firebase__FirestoreDatabaseId", StringComparison.OrdinalIgnoreCase)
+            .Should().BeTrue();
+        workflow.Contains("Firebase__Chat__FirestoreDatabaseId", StringComparison.OrdinalIgnoreCase)
+            .Should().BeTrue();
+        workflow.Should().Contain("scripts/validate-jeeb-firebase-contract.py");
+    }
+
+    [Theory]
+    [InlineData("deploy-to-jeeb.yml", "jeeb_gateway_firebase_${firebase_digest}")]
+    [InlineData("jeeb-production-deploy.yml", "jeeb_production_gateway_firebase_${firebase_digest}")]
+    [InlineData("jeeb-staging-deploy.yml", "jeeb_staging_gateway_firebase_${firebase_digest}")]
+    public void Every_rollout_rotates_and_post_verifies_one_content_addressed_firebase_mount(
+        string workflowName,
+        string expectedSecretName)
+    {
+        var workflow = Workflow(workflowName);
+        var credentialValidator = File.ReadAllText(Path.Combine(
+            FindRepositoryRoot(), "scripts", "validate-firebase-service-account.py"));
+
+        workflow.Should().Contain(expectedSecretName);
+        workflow.Should().Contain("scripts/validate-firebase-service-account.py");
+        workflow.Should().Contain("Firebase__Chat__ServiceAccountKeyPath");
+        workflow.Should().Contain("/run/secrets/firebase_admin_json");
+        credentialValidator.Should().Contain("credential type must be service_account");
+        credentialValidator.Should().Contain("credential project_id must be");
+        workflow.Should().NotContain("gateway_firebase_${GITHUB_RUN_ID}");
+        var preflight = workflow.IndexOf(
+            "scripts/validate-firebase-service-account.py", StringComparison.Ordinal);
+        var firstExternalMutation = new[]
+        {
+            workflow.IndexOf("docker login", StringComparison.Ordinal),
+            workflow.IndexOf("docker/build-push-action@", StringComparison.Ordinal),
+            workflow.IndexOf("docker secret create", StringComparison.Ordinal),
+        }.Where(index => index >= 0).Min();
+        preflight.Should().BeLessThan(firstExternalMutation,
+            "the protected Firebase document must be validated before external mutation");
+
+        if (workflowName == "jeeb-staging-deploy.yml")
+        {
+            var candidateContract = File.ReadAllText(Path.Combine(
+                FindRepositoryRoot(), "scripts", "staging-gateway-candidate-contract.jq"));
+            candidateContract.Should().Contain(
+                "[.TaskTemplate.ContainerSpec.Secrets[]?\n    | select(.File.Name == \"firebase_admin_json\")] | length) == 1");
+        }
+        else
+        {
+            workflow.Should().Contain("firebase_admin_json=");
+            workflow.Should().Contain("grep -Fxc firebase_admin_json");
+            workflow.Should().Contain(":65532:65532:256");
+        }
     }
 
     [Fact]
@@ -565,7 +650,9 @@ public sealed class DurableOwnershipDeploymentContractTests
             "add_rotated_secret \"$service_auth_secret_name\" jeeb_gateway_service_auth");
         workflow.Should().Contain(
             "Services__Realtime__GuardianSecret Operations__RealtimeProbe__MintKey \\\n" +
-            "                  ServiceAuth__SigningKey \"${retired_gateway_env[@]}\"");
+            "                  ServiceAuth__SigningKey Firestore__DatabaseId \\\n" +
+            "                  Firebase__FirestoreDatabaseId Firebase__Chat__FirestoreDatabaseId \\\n" +
+            "                  \"${retired_gateway_env[@]}\"");
         workflow.Should().Contain("scripts/staging-gateway-devtool-reassert-candidate.jq");
         workflow.Should().Contain("scripts/staging-gateway-public-edge-backoff.sh");
         workflow.Should().Contain(

@@ -76,6 +76,7 @@ jobs:
           REQUESTED_REPOSITORY: ${{ github.repository }}
           DEPLOY_ENVIRONMENT: staging
           DEPLOYMENT_MODE: ${{ inputs.deployment_mode }}
+          JEEB_FIREBASE_JSON: ${{ secrets.JEEB_FIREBASE_JSON }}
         run: |
           set -euo pipefail
           : "${DEFAULT_BRANCH:?repository default branch is required}"
@@ -94,6 +95,13 @@ jobs:
             exit 1
           }
           [ "$GITHUB_SHA" = "$(git rev-parse HEAD)" ]
+          python3 scripts/validate-jeeb-firebase-contract.py
+          : "${JEEB_FIREBASE_JSON:?JEEB_FIREBASE_JSON protected secret is required}"
+          firebase_stage=$(mktemp -d)
+          trap 'rm -rf -- "$firebase_stage"' EXIT
+          printf '%s' "$JEEB_FIREBASE_JSON" \
+            | python3 scripts/validate-firebase-service-account.py \
+                --materialize "$firebase_stage/firebase-admin.json" >/dev/null
 
       - name: Install cloudflared and configure strict SSH
         env:
@@ -250,6 +258,7 @@ jobs:
           published=10000
           health=/health/ready
           if [ "$REPOSITORY" = jeeb-gateway ]; then
+            : "${JEEB_FIREBASE_JSON:?JEEB_FIREBASE_JSON protected secret is required}"
             if [ "$DEPLOYMENT_MODE" != devtool-reassert ]; then
               : "${JEEB_STAGING_WSS_PROBE_MINT_KEY:?JEEB_STAGING_WSS_PROBE_MINT_KEY is required}"
               [ "$(printf '%s' "$JEEB_STAGING_WSS_PROBE_MINT_KEY" | LC_ALL=C wc -c)" -ge 32 ]
@@ -263,7 +272,6 @@ jobs:
               : "${JWT_SIGNING_KEY:?JEEB_JWT_SIGNING_KEY is required}"
               : "${JEEB_RTC_GUARDIAN_SECRET_KEY:?JEEB_RTC_GUARDIAN_SECRET_KEY is required}"
               : "${JEEB_RTC_MEMBERSHIP_TICKET_KEY:?JEEB_RTC_MEMBERSHIP_TICKET_KEY is required}"
-              : "${JEEB_FIREBASE_JSON:?JEEB_FIREBASE_JSON is required}"
               [ "${#JWT_SIGNING_KEY}" -ge 32 ]
               [ -z "$UMJWT_SIGNING_KEY" ] || \
                 [ "${#UMJWT_SIGNING_KEY}" -ge 32 ]
@@ -294,7 +302,6 @@ jobs:
               guardian_secret_name="jeeb_staging_gateway_guardian_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
               probe_secret_name="jeeb_staging_gateway_wss_probe_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
               membership_secret_name="jeeb_staging_gateway_membership_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
-              firebase_secret_name="jeeb_staging_gateway_firebase_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
               [ "$DEPLOYMENT_MODE" != otp-cutover ] || \
                 service_auth_secret_name="jeeb_staging_gateway_service_auth_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
               [ -z "$UMJWT_SIGNING_KEY" ] || \
@@ -715,27 +722,25 @@ jobs:
               # shellcheck disable=SC2029
               printf '%s' "$2" | ssh jeeb-staging "docker secret create '$1' - >/dev/null"
             }
-            stream_secret_file() {
+            stream_content_addressed_secret_file() {
+              # The content-addressed name is validated locally and intentionally expanded.
+              # shellcheck disable=SC2029
+              if ssh jeeb-staging "docker secret inspect '$1' >/dev/null 2>&1"; then
+                return 0
+              fi
               # shellcheck disable=SC2029
               ssh jeeb-staging "docker secret create '$1' - >/dev/null" < "$2"
             }
-            if [ "$DEPLOYMENT_MODE" != devtool-reassert ]; then
-              if printf '%s' "$JEEB_FIREBASE_JSON" \
-                | jq -e '.type == "service_account" and .project_id == "jeeb-5a293"' >/dev/null; then
-                printf '%s' "$JEEB_FIREBASE_JSON" > "$firebase_file"
-              elif printf '%s' "$JEEB_FIREBASE_JSON" | base64 --decode \
-                | jq -e '.type == "service_account" and .project_id == "jeeb-5a293"' > "$firebase_file"; then
-                :
-              else
-                echo '::error::JEEB_FIREBASE_JSON is not a jeeb-5a293 service-account document' >&2
-                exit 1
-              fi
-              chmod 600 "$firebase_file"
-            fi
+            firebase_digest=$(printf '%s' "$JEEB_FIREBASE_JSON" \
+              | python3 scripts/validate-firebase-service-account.py \
+                  --materialize "$firebase_file")
+            [[ "$firebase_digest" =~ ^[0-9a-f]{64}$ ]]
+            firebase_secret_name="jeeb_staging_gateway_firebase_${firebase_digest}"
             if [ "$DEPLOYMENT_MODE" != devtool-reassert ]; then
               (umask 077; printf '%s' "$JEEB_STAGING_WSS_PROBE_MINT_KEY" > "$probe_key_file")
             fi
             staging_gateway_lock_acquire
+            stream_content_addressed_secret_file "$firebase_secret_name" "$firebase_file"
             if [ "$DEPLOYMENT_MODE" != devtool-reassert ]; then
               stream_secret "$state_secret_name" "$JEEB_STATE_SERVICE_TOKEN"
               stream_secret "$notification_secret_name" "$NOTIFICATION_SERVICE_TOKEN"
@@ -748,7 +753,6 @@ jobs:
               stream_secret "$guardian_secret_name" "$JEEB_RTC_GUARDIAN_SECRET_KEY"
               stream_secret "$probe_secret_name" "$JEEB_STAGING_WSS_PROBE_MINT_KEY"
               stream_secret "$membership_secret_name" "$JEEB_RTC_MEMBERSHIP_TICKET_KEY"
-              stream_secret_file "$firebase_secret_name" "$firebase_file"
               [ -z "$service_auth_secret_name" ] || \
                 stream_secret "$service_auth_secret_name" "$JEEB_OTP_SERVICE_AUTH_KEY"
             fi
@@ -844,16 +848,22 @@ jobs:
           case "$REPOSITORY" in
             jeeb-gateway)
               service=jeeb-staging-jeeb-gateway; published=10000; target=8080; health=/health/ready
+              : "${firebase_secret_name:?file-backed Firebase service account is required}"
               if [ "$DEPLOYMENT_MODE" != devtool-reassert ]; then
                 : "${jwt_secret_name:?file-backed gateway JWT secret is required}"
                 : "${guardian_secret_name:?file-backed realtime Guardian secret is required}"
                 : "${probe_secret_name:?file-backed staging WSS probe secret is required}"
                 : "${membership_secret_name:?file-backed membership-ticket secret is required}"
-                : "${firebase_secret_name:?file-backed Firebase service account is required}"
                 : "${push_secret_name:?file-backed push relay credential is required}"
               fi
               add_env ASPNETCORE_ENVIRONMENT Staging
               add_env ASPNETCORE_URLS http://+:8080
+              add_env JeebFirebaseContract__SchemaVersion 1
+              add_env JeebFirebaseContract__ProjectId jeeb-5a293
+              add_env JeebFirebaseContract__ProjectNumber 1051234312170
+              add_env JeebFirebaseContract__FirestoreDatabaseId '(default)'
+              add_env JeebFirebaseContract__ChatEnabled true
+              add_env JeebFirebaseContract__PushProducer notification-service
               add_env Jwt__SigningKeyFile /run/secrets/jeeb_gateway_jwt
               add_env Jwt__Issuer jeeb-gateway
               add_env Jwt__Audience jeeb-clients
@@ -918,6 +928,7 @@ jobs:
                 local target_name=$1
                 secret_remove_targets+=("$target_name")
               }
+              add_rotated_secret "$firebase_secret_name" firebase_admin_json
               if [ "$DEPLOYMENT_MODE" != devtool-reassert ]; then
                 add_rotated_secret "$state_secret_name" jeeb_state_service_token
                 add_rotated_secret "$notification_secret_name" notification_service_token
@@ -935,7 +946,6 @@ jobs:
                 add_rotated_secret "$guardian_secret_name" realtime_guardian_secret
                 add_rotated_secret "$probe_secret_name" staging_wss_probe_mint_key
                 add_rotated_secret "$membership_secret_name" realtime_membership_ticket_key
-                add_rotated_secret "$firebase_secret_name" firebase_admin_json
                 if [ "$DEPLOYMENT_MODE" = otp-cutover ]; then
                   add_rotated_secret "$service_auth_secret_name" jeeb_gateway_service_auth
                 fi
@@ -946,13 +956,16 @@ jobs:
                   PRIVATE_ARTIFACT_STORE_BEARER_TOKEN_FILE DATA_EXPORT_TOKEN_SIGNING_KEY_FILE \
                   Services__Settlement__ApiToken Jwt__SigningKey UmJwt__SigningKey \
                   Services__Realtime__GuardianSecret Operations__RealtimeProbe__MintKey \
-                  ServiceAuth__SigningKey "${retired_gateway_env[@]}"; do
+                  ServiceAuth__SigningKey Firestore__DatabaseId \
+                  Firebase__FirestoreDatabaseId Firebase__Chat__FirestoreDatabaseId \
+                  "${retired_gateway_env[@]}"; do
                   env_remove_keys+=("$stale_env")
                 done
               fi
               add_env FeatureFlags__DurableRequests__Enabled true
               add_env FeatureFlags__NotificationDurableWrite__Enabled true
               add_env FeatureFlags__NotificationOutboxMode upstream-authority
+              add_env FeatureFlags__PushDispatchMode local
               add_env FeatureFlags__UseUpstream__UserManagement true
               add_env FeatureFlags__UseUpstream__RemoteUserPreferences true
               add_env FeatureFlags__UseUpstream__Ratings true
@@ -1072,15 +1085,30 @@ jobs:
             # This mode is a surgical incumbent patch. Its exact-delta contract below
             # proves that no unrelated environment row, secret, network, resource,
             # endpoint, or service setting changes.
-            jq -e -S -c --arg image "$IMAGE" '
-              def env_key: (split("=")[0] | ascii_downcase);
+            jq -e -S -c --arg image "$IMAGE" \
+              --slurpfile secret_additions "$secret_additions_json" '
+              def env_key: (split("=")[0] | ascii_downcase | gsub(":"; "__"));
               def is_devtool_flag:
                 env_key as $key
                 | [
                     "superlogin__openmode",
                     "demousers__enabled",
                     "features__devendpoints__enabled",
-                    "features__swagger__enabled"
+                    "features__swagger__enabled",
+                    "jeebfirebasecontract__schemaversion",
+                    "jeebfirebasecontract__projectid",
+                    "jeebfirebasecontract__projectnumber",
+                    "jeebfirebasecontract__firestoredatabaseid",
+                    "jeebfirebasecontract__chatenabled",
+                    "jeebfirebasecontract__pushproducer",
+                    "firebase__chat__projectid",
+                    "firebase__chat__serviceaccountkeypath",
+                    "featureflags__notificationdurablewrite__enabled",
+                    "featureflags__notificationoutboxmode",
+                    "featureflags__pushdispatchmode",
+                    "firestore__databaseid",
+                    "firebase__firestoredatabaseid",
+                    "firebase__chat__firestoredatabaseid"
                   ]
                 | index($key) != null;
               .TaskTemplate.ContainerSpec.Image = $image
@@ -1091,8 +1119,25 @@ jobs:
                       "SuperLogin__OpenMode=true",
                       "DemoUsers__Enabled=true",
                       "Features__DevEndpoints__Enabled=true",
-                      "Features__Swagger__Enabled=true"
+                      "Features__Swagger__Enabled=true",
+                      "JeebFirebaseContract__SchemaVersion=1",
+                      "JeebFirebaseContract__ProjectId=jeeb-5a293",
+                      "JeebFirebaseContract__ProjectNumber=1051234312170",
+                      "JeebFirebaseContract__FirestoreDatabaseId=(default)",
+                      "JeebFirebaseContract__ChatEnabled=true",
+                      "JeebFirebaseContract__PushProducer=notification-service",
+                      "Firebase__Chat__ProjectId=jeeb-5a293",
+                      "Firebase__Chat__ServiceAccountKeyPath=/run/secrets/firebase_admin_json",
+                      "FeatureFlags__NotificationDurableWrite__Enabled=true",
+                      "FeatureFlags__NotificationOutboxMode=upstream-authority",
+                      "FeatureFlags__PushDispatchMode=local"
                     ]
+                )
+              | .TaskTemplate.ContainerSpec.Secrets = (
+                  ((.TaskTemplate.ContainerSpec.Secrets // [])
+                    | map(select(.File.Name != "firebase_admin_json")))
+                  + ($secret_additions[0]
+                    | map(select(.File.Name == "firebase_admin_json")))
                 )
               | .UpdateConfig = ((.UpdateConfig // {}) + {
                   Parallelism:1,Monitor:20000000000,
@@ -1114,7 +1159,7 @@ jobs:
               --slurpfile env_remove "$env_remove_json" \
               --slurpfile secret_additions "$secret_additions_json" \
               --slurpfile secret_remove "$secret_remove_json" '
-                def env_key: (split("=")[0] | ascii_downcase);
+                def env_key: (split("=")[0] | ascii_downcase | gsub(":"; "__"));
                 ($env_remove[0] | map(ascii_downcase)) as $removed_env
                 | ($desired_env[0] | map(env_key)) as $replaced_env
                 | ($secret_remove[0] + ($secret_additions[0] | map(.File.Name)) | unique) as $removed_secret_targets
@@ -1195,6 +1240,7 @@ jobs:
             "$candidate_spec" >/dev/null
           if [ "$DEPLOYMENT_MODE" = devtool-reassert ]; then
             jq -e --arg image "$IMAGE" --slurpfile incumbent "$incumbent_spec" \
+              --slurpfile firebase_secret "$secret_additions_json" \
               -f scripts/staging-gateway-devtool-reassert-candidate.jq \
               "$candidate_spec" >/dev/null
           fi

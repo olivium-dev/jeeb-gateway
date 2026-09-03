@@ -350,15 +350,28 @@ def validate_bootstrap_workflow(text):
         'state_secret_name="jeeb_staging_gateway_state_token_',
         'jwt_secret_name="jeeb_staging_gateway_jwt_',
         'probe_secret_name="jeeb_staging_gateway_wss_probe_',
-        'firebase_secret_name="jeeb_staging_gateway_firebase_',
     ):
         if secret_name not in secret_name_block:
             raise ValueError(f"run-scoped secret escaped the non-devtool gate: {secret_name}")
     stream_gate = text.index('if [ "$DEPLOYMENT_MODE" != devtool-reassert ]; then', text.index('staging_gateway_lock_acquire'))
     stream_end = text.index('            unset JEEB_STATE_SERVICE_TOKEN', stream_gate)
     stream_block = text[stream_gate:stream_end]
-    if 'stream_secret "$state_secret_name"' not in stream_block or 'stream_secret_file "$firebase_secret_name"' not in stream_block:
+    if 'stream_secret "$state_secret_name"' not in stream_block:
         raise ValueError("run-scoped secret creation escaped the non-devtool gate")
+    firebase_validation = text.index(
+        'python3 scripts/validate-firebase-service-account.py',
+        text.index('service=jeeb-staging-jeeb-gateway'),
+    )
+    firebase_name = text.index(
+        'firebase_secret_name="jeeb_staging_gateway_firebase_${firebase_digest}"',
+        firebase_validation,
+    )
+    firebase_stream = text.index(
+        'stream_content_addressed_secret_file "$firebase_secret_name" "$firebase_file"',
+        firebase_name,
+    )
+    if not firebase_validation < firebase_name < firebase_stream < stream_gate:
+        raise ValueError("Firebase validation/content-addressed rotation does not cover devtool-reassert")
     exact_devtool_builder = text.index('if [ "$DEPLOYMENT_MODE" = devtool-reassert ]; then', text.index('desired_env_json='))
     generic_builder = text.index('--slurpfile desired_env "$desired_env_json"', exact_devtool_builder)
     exact_delta = text.index('-f scripts/staging-gateway-devtool-reassert-candidate.jq', generic_builder)

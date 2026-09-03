@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "projectId": "jeeb-5a293",
+  "projectNumber": "1051234312170",
+  "firestoreDatabaseId": "(default)",
+  "chatEnabled": true,
+  "pushProducer": "notification-service"
+}
