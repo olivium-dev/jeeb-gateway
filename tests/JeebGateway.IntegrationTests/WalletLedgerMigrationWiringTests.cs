@@ -85,8 +85,9 @@ public sealed class WalletLedgerMigrationWiringTests : IClassFixture<WebApplicat
     public void Ready_roster_no_longer_declares_the_wallet_database_probe()
     {
         GatewayHealthRoster.Ready.Should().NotContain("wallet-postgres");
-        GatewayHealthRoster.ExpectedReadyCount.Should().Be(20,
-            "18 after O8 retired role-service, +1 for notification credential, +1 for scoped relay readiness");
+        GatewayHealthRoster.ExpectedReadyCount.Should().Be(27,
+            "18 after O8 retired role-service, +1 for notification credential, +1 for scoped relay "
+            + "readiness, +1 for chat-upstream readiness, +6 for the remaining declared credentials");
         GatewayHealthRoster.Ready.Should().HaveCount(GatewayHealthRoster.ExpectedReadyCount);
     }
 }

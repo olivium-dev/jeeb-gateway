@@ -601,7 +601,10 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().Contain("staging_gateway_external_gate_recover");
         workflow.Should().Contain("staging_gateway_forward_apply");
         workflow.Should().Contain("recovery_armed=true");
-        workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Chat false");
+        // Chat is resolved once per deploy, never a literal: a hardcoded false reverted every
+        // completed Chat B activation on the next staging deploy.
+        workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Chat \"$chat_upstream_enabled\"");
+        workflow.Should().NotContain("add_env FeatureFlags__UseUpstream__Chat false");
         workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Realtime false");
         workflow.Should().Contain("add_env Features__RealtimeWebSocketProxy__Enabled false");
         workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Voice false");

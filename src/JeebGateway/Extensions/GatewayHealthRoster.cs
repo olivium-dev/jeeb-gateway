@@ -26,24 +26,30 @@ public static class GatewayHealthRoster
         ("contract-signing-service", "Services:ContractSigning:BaseUrl"),
         ("cdn-service", "Services:Cdn:BaseUrl"),
         ("form-builder-service", "Services:FormBuilder:BaseUrl"),
+        // 2026-09-04: chat had NO health row on either host while a deploy-time flag
+        // could 503 every chat route. Registered by HealthCheckExtensions as
+        // ChatUpstreamHealthCheck (not a URL group), gated on the same BaseUrl key.
+        (JeebGateway.Health.ChatUpstreamHealthCheck.Name, JeebGateway.Health.ChatUpstreamHealthCheck.BaseUrlConfigurationKey),
         // Registered by HealthCheckExtensions as BundlerServiceHealthCheck (not a URL group),
         // still gated on the same BaseUrl key, so name and registration cannot drift.
         (JeebGateway.Cms.BundlerServiceHealthCheck.Name, JeebGateway.Cms.BundlerCmsSurfaceStore.BaseUrlConfigurationKey),
     };
 
     /// <summary>Ready-tagged checks registered in <c>Program.cs</c> rather than the extension.</summary>
-    public static readonly string[] InProcessChecks =
+    public static readonly string[] InProcessChecks = new[]
     {
         "admin-oidc-configuration",
-        // 2026-08-23: proves the notification owner credential resolves (608debf outage
-        // stayed green because no surface exercised the fail-closed credential chain).
-        JeebGateway.Notifications.NotificationCredentialHealthCheck.Name,
         // 2026-08-29: the mounted gateway key must be accepted for its fixed
         // provider scope, not merely resolve from the local secret file.
         JeebGateway.Notifications.PushRelayCredentialHealthCheck.Name,
         "whisper",
         "jeeb-state-service",
-    };
+    }
+    // 2026-09-04: one row per declared credential. The 608debf outage stayed green
+    // because no surface exercised the fail-closed chain; notification-credential
+    // (added 2026-08-23) covered exactly one of seven such credentials.
+    .Concat(JeebGateway.Health.GatewayCredentialDeclarations.All.Select(d => d.Name))
+    .ToArray();
 
     /// <summary>The full live roster, sorted. "self" is live-tagged and not part of ready.</summary>
     public static IReadOnlyList<string> Ready { get; } =
@@ -58,6 +64,11 @@ public static class GatewayHealthRoster
     /// retired role-service outright — that probe was the aggregate's only Degraded entry,
     /// verified against a real /health/ready read before and after. 19 from 2026-08-23:
     /// notification-credential joined after the 608debf silent push outage; 20 from
-    /// 2026-08-29 when relay scoped-readiness became a deployment gate.</summary>
-    public const int ExpectedReadyCount = 20;
+    /// 2026-08-29 when relay scoped-readiness became a deployment gate. 27 from
+    /// 2026-09-04: chat-upstream-readiness (chat had no health row at all while a
+    /// deploy-time flag could 503 every chat route) plus six more declared
+    /// credentials — the six /run/secrets defaults deleted from
+    /// appsettings.Production.json — joining notification-credential under one
+    /// ConfiguredCredentialHealthCheck.</summary>
+    public const int ExpectedReadyCount = 27;
 }

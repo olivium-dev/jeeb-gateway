@@ -1,5 +1,6 @@
 using System.Net;
 using FluentAssertions;
+using Microsoft.Extensions.Configuration;
 using JeebGateway.StateService;
 using Xunit;
 
@@ -73,13 +74,20 @@ public sealed class StateServiceCredentialHandlerTests
     }
 
     [Fact]
-    public void Production_configuration_contains_only_the_mounted_path()
+    public void Production_configuration_commits_no_credential_path_or_value()
     {
-        var text = File.ReadAllText(Path.Combine(
-            FindRepositoryRoot(), "src", "JeebGateway", "appsettings.Production.json"));
+        var root = Path.Combine(FindRepositoryRoot(), "src", "JeebGateway");
+        var production = new ConfigurationBuilder()
+            .AddJsonFile(Path.Combine(root, "appsettings.json"))
+            .AddJsonFile(Path.Combine(root, "appsettings.Production.json"))
+            .Build();
 
-        text.Should().Contain("/run/secrets/jeeb_state_service_token");
-        text.Should().NotContain("state-service-token-aaaaaaaa");
+        // 2026-09-04: the path is no longer committed — /run/secrets exists only under
+        // Swarm, and a baked host path is the 608debf class. The deploy supplies it, and
+        // credential-state-service-token reports an unsupplied one on /health/ready.
+        production["JeebStateService:ServiceTokenFile"].Should().BeNullOrEmpty();
+        File.ReadAllText(Path.Combine(root, "appsettings.Production.json"))
+            .Should().NotContain("state-service-token-aaaaaaaa");
     }
 
     private static HttpClient Client(string path, CaptureHandler capture) => new(

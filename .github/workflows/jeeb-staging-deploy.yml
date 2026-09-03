@@ -224,6 +224,7 @@ jobs:
           IMAGE: ${{ steps.immutable.outputs.image }}
           REPOSITORY: ${{ github.event.repository.name }}
           DEPLOYMENT_MODE: ${{ inputs.deployment_mode }}
+          JEEB_STAGING_CHAT_ENABLED: ${{ vars.JEEB_STAGING_CHAT_ENABLED }}
           JEEB_RTC_GUARDIAN_SECRET_KEY: ${{ secrets.JEEB_RTC_GUARDIAN_SECRET_KEY }}
           JEEB_STAGING_WSS_PROBE_MINT_KEY: ${{ secrets.JEEB_STAGING_WSS_PROBE_MINT_KEY }}
           JWT_SIGNING_KEY: ${{ secrets.JEEB_JWT_SIGNING_KEY }}
@@ -263,6 +264,35 @@ jobs:
           service=jeeb-staging-jeeb-gateway
           published=10000
           health=/health/ready
+          # Single source of truth for chat activation. A deploy must never be
+          # the thing that turns chat off: declared state wins, else carry the
+          # incumbent's persisted flag forward, else default on.
+          chat_upstream_declared="${JEEB_STAGING_CHAT_ENABLED:-}"
+          case "$chat_upstream_declared" in
+            true|false)
+              chat_upstream_enabled="$chat_upstream_declared"
+              chat_upstream_source='declared vars.JEEB_STAGING_CHAT_ENABLED'
+              ;;
+            '')
+              chat_upstream_persisted=$(ssh jeeb-staging bash -s -- "$service" \
+                < scripts/read-staging-chat-flag.sh) || chat_upstream_persisted=''
+              case "$chat_upstream_persisted" in
+                true|false)
+                  chat_upstream_enabled="$chat_upstream_persisted"
+                  chat_upstream_source='persisted incumbent service state'
+                  ;;
+                *)
+                  chat_upstream_enabled=true
+                  chat_upstream_source='default (no declared or persisted state)'
+                  ;;
+              esac
+              ;;
+            *)
+              echo '::error::JEEB_STAGING_CHAT_ENABLED must be exactly true or false' >&2
+              exit 64
+              ;;
+          esac
+          echo "Chat upstream for this deploy: $chat_upstream_enabled (from $chat_upstream_source)"
           if [ "$REPOSITORY" = jeeb-gateway ]; then
             : "${JEEB_FIREBASE_JSON:?JEEB_FIREBASE_JSON protected secret is required}"
             if [ "$DEPLOYMENT_MODE" != devtool-reassert ]; then
@@ -432,10 +462,12 @@ jobs:
                 < scripts/staging-gateway-readiness-backoff.sh
             }
             verify_bootstrap_flags() {
-              ssh jeeb-staging bash -s -- "$service" "$DEPLOYMENT_MODE" <<'FLAGS'
+              ssh jeeb-staging bash -s -- "$service" "$DEPLOYMENT_MODE" \
+                "$chat_upstream_enabled" <<'FLAGS'
                 set -euo pipefail
                 service=$1
                 deployment_mode=$2
+                chat_upstream_enabled=$3
                 environment=$(docker service inspect "$service" \
                   --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}')
                 if [ "$deployment_mode" = devtool-reassert ]; then
@@ -447,7 +479,7 @@ jobs:
                   )
                 else
                   expected_contract=(
-                    FeatureFlags__UseUpstream__Chat=false
+                    "FeatureFlags__UseUpstream__Chat=$chat_upstream_enabled"
                     FeatureFlags__UseUpstream__Realtime=false
                     Features__RealtimeWebSocketProxy__Enabled=false
                     FeatureFlags__UseUpstream__Voice=false
@@ -1013,8 +1045,9 @@ jobs:
               add_env FeatureFlags__UseUpstream__Voice false
               add_env FeatureFlags__UseUpstream__Delivery true
               add_env FeatureFlags__UseUpstream__Offer true
-              # Bootstrap only. Activation is a separate, reviewed future change.
-              add_env FeatureFlags__UseUpstream__Chat false
+              # Resolved once at the top of this step; never a literal here, so a
+              # deploy cannot revert a completed Chat B activation.
+              add_env FeatureFlags__UseUpstream__Chat "$chat_upstream_enabled"
               add_env FeatureFlags__UseUpstream__Otp true
               add_env FeatureFlags__UseUpstream__Realtime false
               add_env Features__RealtimeWebSocketProxy__Enabled false

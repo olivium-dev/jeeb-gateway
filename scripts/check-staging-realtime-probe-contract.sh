@@ -201,7 +201,7 @@ def validate_bootstrap_workflow(text):
         '[ "$GITHUB_REF_PROTECTED" = true ]',
         '[ "$(hostname -s)" = "olivium-ephemerals" ]',
         'grep -Fxc "192.168.2.20"',
-        "add_env FeatureFlags__UseUpstream__Chat false",
+        'add_env FeatureFlags__UseUpstream__Chat "$chat_upstream_enabled"',
         "add_env FeatureFlags__UseUpstream__Realtime false",
         "add_env Features__RealtimeWebSocketProxy__Enabled false",
         "add_env FeatureFlags__UseUpstream__Voice false",
@@ -390,11 +390,19 @@ def validate_bootstrap_workflow(text):
     exact_delta = text.index('-f scripts/staging-gateway-devtool-reassert-candidate.jq', generic_builder)
     if not exact_devtool_builder < generic_builder < exact_delta:
         raise ValueError("Dev Tool candidate is not split from and checked after the generic builder")
-    for authority in ("Chat", "Realtime", "Voice"):
+    for authority in ("Realtime", "Voice"):
         false_lock = f"add_env FeatureFlags__UseUpstream__{authority} false"
         true_lock = f"add_env FeatureFlags__UseUpstream__{authority} true"
         if text.count(false_lock) != 1 or true_lock in text:
             raise ValueError(f"staging bootstrap authority drifted: {authority}")
+    # Chat is resolved, never literal: a hardcoded false reverted every completed
+    # B activation on the next deploy.
+    chat_binding = 'add_env FeatureFlags__UseUpstream__Chat "$chat_upstream_enabled"'
+    if text.count(chat_binding) != 1:
+        raise ValueError("staging Chat activation binding drifted")
+    for literal in ("true", "false", "'true'", "'false'", '"true"', '"false"'):
+        if f"add_env FeatureFlags__UseUpstream__Chat {literal}" in text:
+            raise ValueError(f"staging deploy hardcodes Chat={literal}")
 
     mode_gate = text.index("Require supported protected staging mode")
     provider_gate = text.index("Hold caller activation until relay expand is verified")
@@ -522,8 +530,10 @@ negative_controls = (
         ),
     ),
     (
-        "chat bootstrap lock removed",
-        workflow.replace("add_env FeatureFlags__UseUpstream__Chat false", "", 1),
+        "chat activation binding removed",
+        workflow.replace(
+            'add_env FeatureFlags__UseUpstream__Chat "$chat_upstream_enabled"', "", 1
+        ),
     ),
     (
         "realtime bootstrap activated",
