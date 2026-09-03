@@ -177,13 +177,15 @@ for name, source in workflows.items():
             fail(f"{name} does not enforce Firebase credential marker {marker}")
 
 content_addressed_prefix = {
-    "deploy-to-jeeb.yml": "jeeb_gateway_firebase_${firebase_digest}",
-    "jeeb-production-deploy.yml": "jeeb_production_gateway_firebase_${firebase_digest}",
-    "jeeb-staging-deploy.yml": "jeeb_staging_gateway_firebase_${firebase_digest}",
+    "deploy-to-jeeb.yml": "jeeb_fb_ \"$firebase_digest\"",
+    "jeeb-production-deploy.yml": "jeeb_production_fb_ \"$firebase_digest\"",
+    "jeeb-staging-deploy.yml": "jeeb_staging_fb_ \"$firebase_digest\"",
 }
 for name, prefix in content_addressed_prefix.items():
     if prefix not in workflows[name]:
         fail(f"{name} does not content-address Firebase credential rotation")
+    if "scripts/firebase-docker-secret-name.sh" not in workflows[name]:
+        fail(f"{name} does not enforce the bounded Docker secret-name contract")
 
 for name in ("deploy-to-jeeb.yml", "jeeb-production-deploy.yml"):
     source = workflows[name]

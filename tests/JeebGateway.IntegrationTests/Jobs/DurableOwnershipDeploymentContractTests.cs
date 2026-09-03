@@ -194,9 +194,9 @@ public sealed class DurableOwnershipDeploymentContractTests
     }
 
     [Theory]
-    [InlineData("deploy-to-jeeb.yml", "jeeb_gateway_firebase_${firebase_digest}")]
-    [InlineData("jeeb-production-deploy.yml", "jeeb_production_gateway_firebase_${firebase_digest}")]
-    [InlineData("jeeb-staging-deploy.yml", "jeeb_staging_gateway_firebase_${firebase_digest}")]
+    [InlineData("deploy-to-jeeb.yml", "jeeb_fb_ \"$firebase_digest\"")]
+    [InlineData("jeeb-production-deploy.yml", "jeeb_production_fb_ \"$firebase_digest\"")]
+    [InlineData("jeeb-staging-deploy.yml", "jeeb_staging_fb_ \"$firebase_digest\"")]
     public void Every_rollout_rotates_and_post_verifies_one_content_addressed_firebase_mount(
         string workflowName,
         string expectedSecretName)
@@ -207,6 +207,7 @@ public sealed class DurableOwnershipDeploymentContractTests
 
         workflow.Should().Contain(expectedSecretName);
         workflow.Should().Contain("scripts/validate-firebase-service-account.py");
+        workflow.Should().Contain("scripts/firebase-docker-secret-name.sh");
         workflow.Should().Contain("Firebase__Chat__ServiceAccountKeyPath");
         workflow.Should().Contain("/run/secrets/firebase_admin_json");
         credentialValidator.Should().Contain("credential type must be service_account");
@@ -236,6 +237,25 @@ public sealed class DurableOwnershipDeploymentContractTests
             workflow.Should().Contain("grep -Fxc firebase_admin_json");
             workflow.Should().Contain(":65532:65532:256");
         }
+    }
+
+    [Fact]
+    public void Staging_secret_preflight_and_cleanup_are_bounded_and_preserve_primary_failure()
+    {
+        var workflow = Workflow("jeeb-staging-deploy.yml");
+        var preflight = workflow.IndexOf("for planned_secret in", StringComparison.Ordinal);
+        var lockAcquire = workflow.IndexOf("staging_gateway_lock_acquire", preflight,
+            StringComparison.Ordinal);
+
+        preflight.Should().BeGreaterThanOrEqualTo(0);
+        preflight.Should().BeLessThan(lockAcquire,
+            "every Docker secret name must be bounded before the deployment lock or remote mutation");
+        workflow.Should().Contain("for created in \"${cleanup_secret_names[@]}\"");
+        workflow.Should().Contain("if ! docker secret inspect '$created' >/dev/null 2>&1; then");
+        workflow.Should().Contain(
+            "if [ \"$lock_cleanup_ok\" != true ] && [ \"$status\" -eq 0 ]; then");
+        workflow.Should().NotContain(
+            "for created in \"$jwt_secret_name\" \"$umjwt_secret_name\"");
     }
 
     [Fact]

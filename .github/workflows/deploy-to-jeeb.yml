@@ -428,7 +428,8 @@ jobs:
             | python3 scripts/validate-firebase-service-account.py \
                 --materialize "$firebase_file")
           [[ "$firebase_digest" =~ ^[0-9a-f]{64}$ ]]
-          FIREBASE_SECRET="jeeb_gateway_firebase_${firebase_digest}"
+          FIREBASE_SECRET=$(bash scripts/firebase-docker-secret-name.sh \
+            jeeb_fb_ "$firebase_digest")
           : "${STATE_SERVICE_TOKEN:?JEEB_STATE_SERVICE_TOKEN secret is required}"
           : "${DELIVERY_OWNER_TOKEN:?DELIVERY_SERVICE_TOKEN secret is required}"
           : "${NOTIFICATION_OWNER_TOKEN:?NOTIFICATION_SERVICE_TOKEN secret is required}"
@@ -447,6 +448,17 @@ jobs:
           ARTIFACT_SECRET="jeeb_gateway_artifact_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
           EXPORT_SECRET="jeeb_gateway_export_key_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
           JOB_SECRET="jeeb_gateway_job_token_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          validate_docker_secret_name() {
+            local secret_name=$1
+            [ -n "$secret_name" ] \
+              && [ "${#secret_name}" -le 64 ] \
+              && [[ "$secret_name" =~ ^[a-zA-Z0-9_.-]+$ ]]
+          }
+          for planned_secret in "$FIREBASE_SECRET" "$STATE_SECRET" "$DELIVERY_SECRET" \
+            "$NOTIFICATION_SECRET" "$PUSH_SECRET" "$BUNDLER_SECRET" "$ARTIFACT_SECRET" \
+            "$EXPORT_SECRET" "$JOB_SECRET"; do
+            validate_docker_secret_name "$planned_secret"
+          done
           stream_secret() {
             # The generated secret name is intentionally expanded by the runner.
             # shellcheck disable=SC2029
