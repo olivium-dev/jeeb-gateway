@@ -128,8 +128,11 @@ public sealed class AdminAuthController : ControllerBase
         if (!Request.Headers.TryGetValue("Origin", out var origin) || string.IsNullOrWhiteSpace(origin))
             return _environment.IsDevelopment() || _environment.IsEnvironment("Testing");
 
+        // Compare against the browser-visible scheme; Request.Scheme is the
+        // internal hop scheme behind an edge whose forwarded proto is untrusted.
+        var publicScheme = PublicOriginResolver.ResolveScheme(Request, _configuration);
         if (Uri.TryCreate(origin.ToString(), UriKind.Absolute, out var supplied)
-            && string.Equals(supplied.Scheme, Request.Scheme, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(supplied.Scheme, publicScheme, StringComparison.OrdinalIgnoreCase)
             && string.Equals(supplied.Authority, Request.Host.Value, StringComparison.OrdinalIgnoreCase))
             return true;
 
