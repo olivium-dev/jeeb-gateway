@@ -21,24 +21,71 @@ questions instead:
 
 | Leg | Call | Assertion |
 |---|---|---|
-| 0 preflight | `GET /health/live` | reachable (this is the **only** health read, and it gates nothing else) |
+| 0 preflight | `GET /health/live` | reachable (the **only** health read; it gates nothing else) |
 | 1 identity | `POST /auth/tokens` ×2 with `X-Service-Auth-Key` | both fixed canary bearers mint |
-| 2 presence | `PUT {prefix}/jeebers/me/availability`, `POST /location/update` | jeeber is online with a GPS fix at the pickup coordinate — fan-out is geo-filtered **fail-closed**, so without this the request reaches nobody and the canary would pass vacuously |
+| 2 presence | `PUT {prefix}/jeebers/me/availability`, `POST /location/update` | jeeber online with a GPS fix at the pickup point |
 | 3 device | `PUT /api/PushNotification/register` | the jeeber has an FCM seat, so a dispatch row can exist |
-| 4 request | `GET /tiers`, `POST /requests` | a Flash request is created at 33.8886, 35.4955 |
-| 5 push | ledger or inbox (below) | a push outcome for the jeeber, within the budget |
-| 6 chat | `GET /v1/chat/jeeb/conversations/by-request/{id}` → `POST /v1/conversations/{id}/messages` → `GET …/messages` **as the jeeber** → `POST /v1/chat/firebase-token` | the recipient's own viewer-scoped page carries the message, and the minted Firebase uid equals the jeeber id |
-| 7 cleanup | availability off, `DELETE /requests/{id}` | bounded trail |
+| 4 request | `GET /tiers`, `POST /requests` | a Flash request at the fixed offshore coordinate |
+| 5 chat gate | `GET /v1/chat/jeeb/conversations/by-request/{id}` (create on 404) | the conversation resolves — **a 503 here is `UseUpstream__Chat=false`** |
+| 6 lifecycle | `POST /v1/requests/{id}/offers` as the jeeber, `POST /v1/offers/{id}/accept` as the client | the jeeber is actually seated in the conversation |
+| 7 chat | `POST /v1/conversations/{id}/messages`, then `GET …/messages` **as the jeeber**, then `POST /v1/chat/firebase-token` | the recipient's own viewer-scoped page carries the message, and the minted Firebase uid equals the jeeber id |
+| 8 push | ledger or inbox (below) | a push outcome for the jeeber |
+| 9 cleanup | EXIT trap: availability off + cancel | bounded trail **even when the run fails** |
 
-Leg 6 is the visibility lane end-to-end. chat-service scopes the message page to
-the bearer and echoes `viewer_id`; a jeeber-side hit therefore proves the message's
-`VisibleTo[]` carries the jeeber. The Firebase-uid check closes the third of the
-three identifiers that must agree or the recipient silently sees nothing
-(gateway mint uid == app `currentUserId` == an element of `VisibleTo[]`).
+### Why leg 5 runs before leg 8
 
-A `503` from the conversation route is caught and reported by name: that is
-`FeatureFlags__UseUpstream__Chat=false`, which every staging gateway deploy
-re-writes and which only `jeeb-chat-b-activation.yml` turns back on.
+`UseUpstream__Chat` self-reverts on every staging gateway deploy and is the
+top-ranked cause of chat outages. If the push leg ran first, a simultaneously
+broken push would consume the budget and the run would never reach — and never
+name — the flag. The chat gate therefore comes first, so the likeliest root
+cause is always reported by name.
+
+### Why leg 6 exists (this is not optional)
+
+chat-service creates the conversation with **only the owner** as a participant.
+The jeeber becomes a participant through an offer (`jeeber_offerer`), and a full
+`Participant` through accept. Without leg 6, `GET …/messages` as the jeeber is a
+403 from chat-service's membership gate, and the visibility assertion would fail
+on a perfectly healthy stack.
+
+Two further consequences, both load-bearing:
+
+- The message is sent with **`"audience": "all"` — a string, not an object.**
+  The visibility resolver treats a structured `audience` as opaque and falls back
+  to the role matrix, under which a restricted offerer sees only their own
+  messages. A string `"all"` is the shape the resolver actually reads.
+- `JEEB_CANARY_ACCEPT_OFFER=false` stops after the offer. The jeeber is then
+  seated as a restricted offerer, which the `"all"` audience still satisfies —
+  and no accepted delivery is created per run. Set it if the accepted-delivery
+  trail becomes a problem; the default (`true`) walks the full real path and
+  exercises the offer and accept push events too.
+
+### Why the canary ids are not GUIDs
+
+`canary-chat-push-client` / `canary-chat-push-jeeber` do not parse as GUIDs, and
+the offer route's wallet-sufficiency guard only runs when the caller id does
+(`Guid.TryParse`). A GUID-shaped canary jeeber would need a funded wallet to
+place its offer. Keep these ids non-GUID.
+
+### The fixed coordinate is offshore, and that is a hard rule
+
+New-request fan-out pushes to **every online jeeber within the tier radius**
+(Flash = 3 km) of the pickup point. A downtown-Beirut coordinate would send a
+real "New delivery request" to every real staging tester's phone, 96 times a day.
+The default `33.9500, 35.2000` is in the sea west of Beirut: no tester is ever
+within 3 km, and the only jeeber the fan-out can reach is the canary's own,
+because leg 2 uploads its fix to exactly that point. The offer route re-checks
+the same radius fail-closed, so leg 6 also proves the fix landed.
+
+**If you change `JEEB_CANARY_LAT/LNG`, move the jeeber's fix with it, and keep it
+away from anywhere a human tests.**
+
+### Out of scope
+
+The Phoenix socket lane — `GET /v1/realtime/jeeb:chat:{id}`, the membership
+ticket, and `wss://…/socket/websocket` — is **not** probed. Staging runs with
+`UseUpstream__Realtime=false`, so that leg is dead by design there, and the app
+renders chat from Firestore regardless. A socket canary is a separate probe.
 
 ## The push leg has two proof strengths — know which one you got
 
@@ -64,11 +111,13 @@ the jeeber for a durable record naming the canary request. This proves gateway �
 notification-service, i.e. the leg that was dead in 2026-08-22 — but **not** the FCM
 call. The run says so in its logs and in the job summary; do not read it as FCM proof.
 
-To get the full leg, give the runner a route to push-notification and set the repo
-variable `JEEB_PUSH_LEDGER_BASE_URL`. Either publish a scoped read path at the edge,
-or open a cloudflared SSH port-forward first, exactly as `heartbeat-presence-smoke.yml`
-does (`JEEB_SSH_PRIVATE_KEY` + `cloudflared access ssh`), then point
-`PUSH_LEDGER_BASE_URL` at `http://127.0.0.1:<forwarded port>`.
+To get the full leg, set the repo variable `JEEB_PUSH_LEDGER_BASE_URL` to a URL the
+runner can reach. **Do not bolt a cloudflared SSH hop onto a 15-minute cron** — it
+doubles the runtime and the secret surface for every run. The right shape is a
+gateway admin proxy for the `?target_user_id=` list form, sitting next to the
+existing `GET /admin/v1/case-recovery/push-dispatches/{key}`; that is a small
+gateway change, not a canary change. Until then, `push-relay-scoped-readiness`
+(in the 19/19 roster since #548) is the standing guard on the relay credential.
 
 ## The Firestore assertion (optional, no service account needed)
 
@@ -83,6 +132,14 @@ Set `JEEB_FIREBASE_WEB_API_KEY` and the canary additionally:
 
 The Firestore security rules do the proving: a uid not in `VisibleTo` gets nothing
 back. This is a genuine end-to-end assertion of the lane the mobile listener uses.
+
+**The secret does not exist yet.** `JEEB_FIREBASE_WEB_API_KEY` is present at
+neither repo nor `staging` environment level, so this leg is currently skipped —
+and `jeeb-chat-firebase-live-smoke.yml` is silently degraded for the same reason.
+The value is the *public* Web API key of `jeeb-5a293` (Firebase console → project
+settings; also the `current_key` in the mobile `google-services.json`). Add it as
+a **repo** secret — the canary job declares no `environment:` — and this leg
+turns on with no code change.
 
 A *service-account*–based assertion would instead need a new secret holding the
 `jeeb-5a293` admin JSON (equivalently, `Firebase__Chat__ServiceAccountKeyPath`
@@ -117,17 +174,40 @@ Bash + curl + jq only. Every secret is read from the environment and printed as
 | Variable | Default | Meaning |
 |---|---|---|
 | `JEEB_CANARY_BASE_URL` | `https://app.jeeb.fds-1.com` | gateway origin (`--base-url`) |
-| `JEEB_CANARY_TIMEOUT` | `150` | whole-run budget in seconds (`--timeout`) |
-| `JEEB_TOKEN_MINT_KEY` | — | **required for `--execute`** |
-| `JEEB_CANARY_CLIENT_ID` | `canary-chat-push-client` | fixed canary client |
-| `JEEB_CANARY_JEEBER_ID` | `canary-chat-push-jeeber` | fixed canary jeeber |
-| `JEEB_CANARY_LAT` / `_LNG` | `33.8886` / `35.4955` | fixed Beirut pickup |
-| `JEEB_CANARY_AVAILABILITY_PREFIX` | `/v1` | edge prefix for the availability surface; try `/api` or `` if it 404s |
+| `JEEB_CANARY_TIMEOUT` | `150` | overall cap in seconds (`--timeout`) |
+| `JEEB_CANARY_PUSH_BUDGET` | `60` | budget for the push poll alone |
+| `JEEB_CANARY_CHAT_BUDGET` | `30` | budget for the recipient-visibility poll |
+| `JEEB_CANARY_FIRESTORE_BUDGET` | `30` | budget for the Firestore poll |
+| `JEEB_TOKEN_MINT_KEY` | — | **required for `--execute`**; the run refuses to start without it |
+| `JEEB_CANARY_CLIENT_ID` | `canary-chat-push-client` | fixed canary client (keep it non-GUID) |
+| `JEEB_CANARY_JEEBER_ID` | `canary-chat-push-jeeber` | fixed canary jeeber (keep it non-GUID) |
+| `JEEB_CANARY_LAT` / `_LNG` | `33.9500` / `35.2000` | fixed **offshore** pickup — see the hard rule above |
+| `JEEB_CANARY_ACCEPT_OFFER` | `true` | `false` stops after the offer, creating no accepted delivery |
+| `JEEB_CANARY_AVAILABILITY_PREFIX` | `/v1` | edge prefix for the availability surface |
 | `PUSH_LEDGER_BASE_URL` | unset | push-notification origin; enables the full push leg |
 | `JEEB_PUSH_INTERNAL_API_KEY` | — | `X-Api-Key` for the ledger read |
 | `JEEB_PUSH_CALLER_ID` | `jeeb-gateway` | `X-Caller-Id` for the ledger read |
 | `JEEB_FIREBASE_WEB_API_KEY` | unset | enables the Firestore assertion |
 | `JEEB_CANARY_ALLOW_FCM_TOKEN_REJECT` | `true` | accept a terminal `failed` as producer-chain proof |
+
+Per-leg budgets exist so a slow push leg cannot starve the chat polls down to a
+single attempt. `JEEB_CANARY_TIMEOUT` is the overall cap, not the sum.
+
+## Independence from SuperLogin open mode — read this before trusting the claim
+
+The canary passes `X-Service-Auth-Key: $JEEB_TOKEN_MINT_KEY` and **refuses to
+start in `--execute` without it**, so it never *relies* on open mode. But that is
+not yet the same as being independent of it: staging currently runs
+`SuperLogin__OpenMode=true`, and `AuthorizeMint()` short-circuits before any key
+check — so today the header is accepted regardless of its value. The deploy sets
+`Security__TokenMint__Enabled=true` but **no `Security__TokenMint__Key`**, in
+which case the gate falls back to `JeebJwt__SigningKey`.
+
+**Owner action, one of:** set `Security__TokenMint__Key` from the repo secret
+`JEEB_TOKEN_MINT_KEY` in the staging deploy, or confirm that `JEEB_TOKEN_MINT_KEY`
+and `JEEB_JWT_SIGNING_KEY` hold the same value. Until one of those is true, the
+first close of open mode will break this canary — which is the correct alarm, but
+it should be a planned one.
 
 ## Triggers
 
@@ -135,10 +215,14 @@ Bash + curl + jq only. Every secret is read from the environment and printed as
 concurrency group is keyed on the base URL with `cancel-in-progress: false`, so
 runs never overlap on one environment.
 
-The cron **mutates staging**: one Flash request created and cancelled every 15
-minutes, plus one chat message tagged `canary`. To stop it, comment out the
-`schedule:` block — do not disable the whole workflow, or the deploy gate below
-goes with it.
+The cron **mutates staging**: per run, one Flash request (created, offered on,
+accepted, then cancelled), one conversation, one chat message and one durable
+notification row. Cleanup runs from an `EXIT` trap, so a **failed** run still
+cancels the request and puts the canary jeeber offline. Conversations and
+messages are never deleted — there is no API — but they carry `subtype: canary`.
+Set `JEEB_CANARY_ACCEPT_OFFER=false` to stop creating accepted deliveries. To
+stop the cron, comment out the `schedule:` block — do not disable the whole
+workflow, or the deploy gate below goes with it.
 
 ## Using it as a post-cutover deploy gate
 
@@ -171,5 +255,6 @@ name first:
 | `presence` | availability prefix wrong at the edge (404), or heart-beat service auth rejected (401) |
 | `device` | push-notification registration path down — the relay itself is unreachable |
 | `request` | delivery-service / jeeb-state-service down, or the tier catalog lost its Flash row |
+| `lifecycle` | offer 409 `offer-out-of-range` ⇒ the GPS fix never reached delivery-service presence; 402 ⇒ the canary id became GUID-shaped and hit the wallet guard; accept 409 ⇒ the request left the pre-acceptance phase |
 | `push` | **the outage class this exists for** — recipient resolution, the durable dispatcher flag, notification-service `WEBHOOK_BASE_URL`, or the FCM credential |
 | `chat` | `503` ⇒ `UseUpstream__Chat` is off; a viewer-scoped miss ⇒ `VisibleTo[]` does not carry the jeeber; a uid mismatch ⇒ the Firebase mint and the app disagree on identity |

@@ -10,9 +10,7 @@ CANARY_WORKDIR="${CANARY_WORKDIR:-}"
 CANARY_LAST_CODE=""
 CANARY_LAST_BODY_FILE=""
 
-# ---------------------------------------------------------------------------
-# Logging + evidence
-# ---------------------------------------------------------------------------
+# --- Logging + evidence
 
 canary_log() {
   printf '%s\n' "$*"
@@ -49,16 +47,13 @@ canary_require_tools() {
   [ -z "$missing" ] || canary_fail preflight "required tools missing:$missing"
 }
 
-# ---------------------------------------------------------------------------
-# Secret-safe transport. Plan mode prints the exact call and executes nothing.
-# ---------------------------------------------------------------------------
+# --- Secret-safe transport. Plan mode prints the exact call and executes nothing.
 
-# canary_http METHOD URL [--bearer-var NAME] [--header 'K: V']
-#             [--header-var 'K:VARNAME'] [--json BODY] [--out FILE]
+# canary_http METHOD URL [--bearer-var N] [--header H] [--header-var K:V] [--json B] [--out F] [--no-preview]
 # Sets CANARY_LAST_CODE / CANARY_LAST_BODY_FILE. Never asserts; callers do.
 canary_http() {
   local method="$1" url="$2"; shift 2
-  local out="" body="" timeout="${CANARY_HTTP_TIMEOUT:-25}"
+  local out="" body="" preview=1 timeout="${CANARY_HTTP_TIMEOUT:-25}"
   local -a args=(-sS -m "$timeout" -X "$method")
   local -a shown=("curl" "-sS" "-m" "$timeout" "-X" "$method")
 
@@ -83,6 +78,9 @@ canary_http() {
         shift 2 ;;
       --out)
         out="$2"; shift 2 ;;
+      --no-preview)
+        # For responses that carry a token: log the status only, never the body.
+        preview=0; shift ;;
       *) canary_fail internal "canary_http: unknown flag $1" ;;
     esac
   done
@@ -100,8 +98,17 @@ canary_http() {
   fi
 
   canary_log "  CALL $method $url"
-  CANARY_LAST_CODE="$(curl "${args[@]}" "$url" 2>/dev/null || printf '000')"
-  canary_log "    HTTP $CANARY_LAST_CODE ($(canary_body_preview "$out"))"
+  local code
+  code="$(curl "${args[@]}" "$url" 2>/dev/null)"
+  # curl already writes 000 via -w on a transport failure AND exits non-zero;
+  # anything that is not exactly three characters is that failure.
+  [ "${#code}" -eq 3 ] || code="000"
+  CANARY_LAST_CODE="$code"
+  if [ "$preview" -eq 1 ]; then
+    canary_log "    HTTP $CANARY_LAST_CODE ($(canary_body_preview "$out"))"
+  else
+    canary_log "    HTTP $CANARY_LAST_CODE (body withheld: carries a token)"
+  fi
   return 0
 }
 
@@ -111,20 +118,39 @@ canary_tmpfile() {
   printf '%s/%s-%s.json' "$CANARY_WORKDIR" "$name" "$RANDOM"
 }
 
+# Every JWT starts with `eyJ`, so this redacts bearers and ID tokens while
+# leaving GUIDs and status text readable.
 canary_body_preview() {
   local file="$1"
   [ -s "$file" ] || { printf 'empty body'; return 0; }
-  head -c 240 "$file" | tr -d '\n' | tr -s ' '
+  head -c 240 "$file" | tr -d '\n' | tr -s ' ' \
+    | sed -E 's/eyJ[A-Za-z0-9_-]+(\.[A-Za-z0-9_.-]+)?/<jwt-redacted>/g'
+}
+
+# Accepts a status list as "200 201" or "200|201". A `|` produced by parameter
+# expansion is a literal, so `case $code in $want)` silently never matches.
+canary_status_accepted() {
+  local code="$1" want="${2//|/ }"
+  case " $want " in
+    *" $code "*) return 0 ;;
+  esac
+  return 1
 }
 
 # Asserts the last call's status. Plan mode is a no-op so a plan never fails.
 canary_expect() {
   local leg="$1" want="$2" what="$3"
   [ "$CANARY_MODE" = "execute" ] || return 0
-  case "$CANARY_LAST_CODE" in
-    $want) return 0 ;;
-  esac
+  canary_status_accepted "$CANARY_LAST_CODE" "$want" && return 0
+  if [ "$CANARY_LAST_CODE" = "000" ]; then
+    canary_fail "$leg" "$what got NO HTTP response (transport failure, DNS, TLS or timeout)"
+  fi
   canary_fail "$leg" "$what expected HTTP $want, got $CANARY_LAST_CODE — $(canary_body_preview "$CANARY_LAST_BODY_FILE")"
+}
+
+# A per-leg budget, so a slow push poll cannot starve the chat polls.
+canary_deadline() {
+  printf '%s' "$(( $(date +%s) + $1 ))"
 }
 
 # canary_poll LEG DEADLINE_EPOCH INTERVAL DESCRIPTION -- command...
@@ -152,9 +178,7 @@ canary_poll() {
   done
 }
 
-# ---------------------------------------------------------------------------
-# Pure helpers — no network, unit-tested by test-canary-lib.sh
-# ---------------------------------------------------------------------------
+# --- Pure helpers — no network, unit-tested by test-canary-lib.sh
 
 # Flash tier id out of GET /tiers; empty when the catalog has no Flash row.
 canary_flash_tier_id() {
@@ -189,9 +213,8 @@ canary_message_visible() {
   ' >/dev/null 2>&1
 }
 
-# 0 when push-notification's ledger shows a terminal dispatch for $user.
-# $allow_reject=true also accepts `failed` — a bogus canary FCM token is
-# rejected by FCM, which still proves the whole producer chain reached FCM.
+# 0 when push-notification's ledger shows a terminal dispatch for $user. With
+# $allow_reject, `failed` counts: FCM rejecting a bogus token still proves the chain.
 canary_dispatch_terminal() {
   local user="$1" allow_reject="${2:-true}"
   jq -e --arg user "$user" --arg allow "$allow_reject" '
@@ -203,13 +226,15 @@ canary_dispatch_terminal() {
   ' >/dev/null 2>&1
 }
 
-# 0 when the jeeber's notification inbox carries a row for $request.
+# 0 when the inbox carries a new_request row whose body preview names $tag. The
+# projection drops the request id entirely, so the run tag rides the description.
 canary_inbox_hit() {
-  local request="$1"
-  jq -e --arg request "$request" '
+  local tag="$1"
+  jq -e --arg tag "$tag" '
     (.items // .notifications // [])
-    | map(tostring)
-    | map(select(contains($request)))
+    | map(select(
+        (((.type // .Type // "") | ascii_downcase) | test("new_request"))
+        and (((.body // .Body // "") + " " + (.title // .Title // "")) | contains($tag))))
     | length > 0
   ' >/dev/null 2>&1
 }

@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-#
-# Offline unit tests for the canary's non-trivial jq/bash logic and for the
-# plan-mode contract (a plan must execute nothing and print no secret).
-# No network. Run: bash scripts/canary/test-canary-lib.sh
+# Offline unit tests for the canary's jq/bash logic and its plan-mode contract.
+# No network, no secret. Run: bash scripts/canary/test-canary-lib.sh
 
 set -uo pipefail
 
@@ -30,6 +28,8 @@ check_exit() {
 CANARY_MODE=plan
 # shellcheck source=scripts/canary/lib.sh
 . "$SCRIPT_DIR/lib.sh"
+CANARY_TEST_TMP="$(mktemp -d)"
+trap 'rm -rf "$CANARY_TEST_TMP"' EXIT
 
 # --- canary_flash_tier_id ---------------------------------------------------
 check "flash tier id is picked out of the catalog" "0be308ce" \
@@ -84,11 +84,70 @@ check_exit "another user's dispatch never counts" 1 \
 check_exit "an empty ledger fails" 1 \
   bash -c "printf '%s' '{\"items\":[]}' | { . '$SCRIPT_DIR/lib.sh'; canary_dispatch_terminal jeeber-1 true; }"
 
-# --- canary_inbox_hit -------------------------------------------------------
-check_exit "an inbox row naming the request passes" 0 \
-  bash -c "printf '%s' '{\"items\":[{\"title\":\"New request req-7\"}]}' | { . '$SCRIPT_DIR/lib.sh'; canary_inbox_hit req-7; }"
-check_exit "an inbox with no matching row fails" 1 \
-  bash -c "printf '%s' '{\"items\":[{\"title\":\"New request req-1\"}]}' | { . '$SCRIPT_DIR/lib.sh'; canary_inbox_hit req-7; }"
+# --- canary_inbox_hit (the projection drops the request id, so the run tag
+# --- rides the 80-char description preview in `body`) -----------------------
+INBOX_HIT='{"items":[{"type":"new_request","title":"New delivery request","body":"canary run-77 automated probe, ignore"}]}'
+INBOX_OTHER_RUN='{"items":[{"type":"new_request","title":"New delivery request","body":"canary run-12 automated probe, ignore"}]}'
+INBOX_OTHER_TYPE='{"items":[{"type":"chat_message","title":"x","body":"canary run-77 automated probe, ignore"}]}'
+check_exit "a new_request row whose body carries the run tag passes" 0 \
+  bash -c "printf '%s' '$INBOX_HIT' | { . '$SCRIPT_DIR/lib.sh'; canary_inbox_hit run-77; }"
+check_exit "another run's new_request row never counts" 1 \
+  bash -c "printf '%s' '$INBOX_OTHER_RUN' | { . '$SCRIPT_DIR/lib.sh'; canary_inbox_hit run-77; }"
+check_exit "a non-new_request row carrying the tag never counts" 1 \
+  bash -c "printf '%s' '$INBOX_OTHER_TYPE' | { . '$SCRIPT_DIR/lib.sh'; canary_inbox_hit run-77; }"
+check_exit "a request id is NOT matched — the projection drops it" 1 \
+  bash -c "printf '%s' '$INBOX_HIT' | { . '$SCRIPT_DIR/lib.sh'; canary_inbox_hit 9f2c-request-id; }"
+check_exit "an empty inbox fails" 1 \
+  bash -c "printf '%s' '{\"items\":[]}' | { . '$SCRIPT_DIR/lib.sh'; canary_inbox_hit run-77; }"
+
+# --- canary_status_accepted / canary_expect (EXECUTE mode). Regression gate:
+# --- a `|` from parameter expansion is literal, so `case $code in $want)` never matched.
+check_exit "a single status matches" 0 \
+  bash -c ". '$SCRIPT_DIR/lib.sh'; canary_status_accepted 200 '200'"
+check_exit "a pipe-separated want matches its first code" 0 \
+  bash -c ". '$SCRIPT_DIR/lib.sh'; canary_status_accepted 200 '200|201'"
+check_exit "a pipe-separated want matches its second code" 0 \
+  bash -c ". '$SCRIPT_DIR/lib.sh'; canary_status_accepted 201 '200|201'"
+check_exit "a space-separated want matches its second code" 0 \
+  bash -c ". '$SCRIPT_DIR/lib.sh'; canary_status_accepted 201 '200 201'"
+check_exit "an unlisted status does not match" 1 \
+  bash -c ". '$SCRIPT_DIR/lib.sh'; canary_status_accepted 403 '200 201'"
+check_exit "a partial-digit status does not match" 1 \
+  bash -c ". '$SCRIPT_DIR/lib.sh'; canary_status_accepted 20 '200 201'"
+
+# canary_expect must PASS in execute mode on an accepted multi-status want...
+check_exit "canary_expect passes on 201 against a 200 201 want, in EXECUTE mode" 0 \
+  bash -c "CANARY_MODE=execute; . '$SCRIPT_DIR/lib.sh'; CANARY_MODE=execute; CANARY_LAST_CODE=201; CANARY_LAST_BODY_FILE=/dev/null; canary_expect device '200 201' 'registration'"
+# ...and FAIL on a code outside it, naming the leg.
+EXPECT_FAIL="$(bash -c "CANARY_MODE=execute; . '$SCRIPT_DIR/lib.sh'; CANARY_MODE=execute; CANARY_LAST_CODE=403; CANARY_LAST_BODY_FILE=/dev/null; canary_expect device '200 201' 'registration'" 2>&1)"
+check_exit "canary_expect exits 1 on an unaccepted status" 1 \
+  bash -c "CANARY_MODE=execute; . '$SCRIPT_DIR/lib.sh'; CANARY_LAST_CODE=403; CANARY_LAST_BODY_FILE=/dev/null; canary_expect device '200 201' 'registration'"
+case "$EXPECT_FAIL" in
+  *'leg [device]'*) check "the failure names the leg that died" "named" "named" ;;
+  *) check "the failure names the leg that died" "named" "MISSING" ;;
+esac
+EXPECT_000="$(bash -c "CANARY_MODE=execute; . '$SCRIPT_DIR/lib.sh'; CANARY_MODE=execute; CANARY_LAST_CODE=000; CANARY_LAST_BODY_FILE=/dev/null; canary_expect push '200' 'ledger read'" 2>&1)"
+case "$EXPECT_000" in
+  *"NO HTTP response"*) check "a 000 status is reported as a transport failure" "yes" "yes" ;;
+  *) check "a 000 status is reported as a transport failure" "yes" "no" ;;
+esac
+
+# --- canary_body_preview redacts JWTs ---------------------------------------
+# The fixture is BUILT, never written literally: a literal JWT in the tree is a
+# gitleaks finding even when it is obviously fake.
+b64url() { printf '%s' "$1" | base64 | tr -d '=\n' | tr '/+' '_-'; }
+FAKE_JWT="$(b64url '{"alg":"none"}').$(b64url '{"sub":"canary"}').$(b64url 'not-a-signature')"
+JWT_BODY="$CANARY_TEST_TMP/jwt-body.json"
+printf '{"accessToken":"%s","userId":"0be308ce-01b5-5cb9-a3e8-9adb60668d9c"}' "$FAKE_JWT" >"$JWT_BODY"
+PREVIEW="$(canary_body_preview "$JWT_BODY")"
+case "$PREVIEW" in
+  *eyJ*) check "the preview never leaks a JWT" "redacted" "LEAKED" ;;
+  *) check "the preview never leaks a JWT" "redacted" "redacted" ;;
+esac
+case "$PREVIEW" in
+  *0be308ce-01b5-5cb9-a3e8-9adb60668d9c*) check "the preview keeps GUIDs readable" "kept" "kept" ;;
+  *) check "the preview keeps GUIDs readable" "kept" "LOST" ;;
+esac
 
 # --- canary_firestore_hit ---------------------------------------------------
 HIT='[{"document":{"name":"projects/jeeb-5a293/databases/(default)/documents/Conversations/c1/Messages/m1"}}]'
@@ -127,7 +186,7 @@ case "$PLAN_OUT" in
   *'  CALL '*) check "plan mode issues no live call" "none" "EXECUTED" ;;
   *) check "plan mode issues no live call" "none" "none" ;;
 esac
-for leg in 'v1/chat/jeeb/conversations/by-request' 'v1/conversations/' 'requests' 'location/update' 'api/PushNotification/register' 'auth/tokens'; do
+for leg in 'v1/chat/jeeb/conversations/by-request' 'v1/conversations/' '/requests' 'location/update' 'api/PushNotification/register' 'auth/tokens' '/offers' '/accept' 'v1/notifications'; do
   case "$PLAN_OUT" in
     *"$leg"*) check "plan covers $leg" "covered" "covered" ;;
     *) check "plan covers $leg" "covered" "MISSING" ;;

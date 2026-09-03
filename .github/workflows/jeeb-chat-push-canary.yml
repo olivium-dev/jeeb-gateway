@@ -1,17 +1,5 @@
-# End-to-end chat + push OUTCOME canary.
-#
-# Every large chat/push outage in this fleet passed /health/ready while push was
-# 100% dead (2026-08-22: 23 hours, gateway fail-closed on an absent Swarm secret,
-# 19/19 green throughout). Health checks answer "is the process up"; this answers
-# "did a real request reach a real jeeber, did a real dispatch terminate, and can
-# the recipient actually see the message". Only an outcome probe catches that class.
-#
-# It mints its own bearers at POST /auth/tokens with X-Service-Auth-Key — NOT
-# SuperLogin open mode, which is a security hole scheduled to be closed — and it
-# never touches a real user account. It creates one Flash request per run and
-# cancels it in the cleanup leg; the trail is tagged `canary`.
-#
-# Also callable as a post-cutover deploy gate: see docs/runbooks/chat-push-canary.md.
+# End-to-end chat + push OUTCOME canary; health checks cannot see this class.
+# Rationale, config and the deploy-gate snippet: docs/runbooks/chat-push-canary.md.
 name: Jeeb chat+push canary
 
 "on":
@@ -54,13 +42,12 @@ name: Jeeb chat+push canary
 permissions:
   contents: read
 
-concurrency:
-  group: jeeb-chat-push-canary-${{ inputs.base_url || 'https://app.jeeb.fds-1.com' }}
-  cancel-in-progress: false
-
 jobs:
   canary:
     if: github.repository == 'olivium-dev/jeeb-gateway'
+    concurrency:
+      group: jeeb-chat-push-canary-${{ inputs.base_url || 'https://app.jeeb.fds-1.com' }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     timeout-minutes: 6
     env:
