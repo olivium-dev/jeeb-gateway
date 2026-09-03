@@ -19,6 +19,19 @@ check() {
   fi
 }
 
+# canary_deadline reads the clock itself, so an exact compare races the second
+# boundary; assert a window instead.
+check_range() {
+  local label="$1" lo="$2" hi="$3" actual="$4"
+  CASES=$((CASES + 1))
+  if [ "$actual" -ge "$lo" ] && [ "$actual" -le "$hi" ]; then
+    printf 'ok   %s\n' "$label"
+  else
+    printf 'FAIL %s\n  expected: %s..%s\n  actual  : %s\n' "$label" "$lo" "$hi" "$actual"
+    FAILURES=$((FAILURES + 1))
+  fi
+}
+
 check_exit() {
   local label="$1" expected="$2"; shift 2
   "$@" >/dev/null 2>&1
@@ -205,11 +218,12 @@ esac
 
 # --- canary_deadline is clamped by the whole-run cap, so --timeout is enforced
 NOW="$(date +%s)"
-check "a per-leg budget inside the cap is used as-is" "$((NOW + 30))" \
+check_range "a per-leg budget inside the cap is used as-is" "$((NOW + 30))" "$((NOW + 33))" \
   "$(CANARY_HARD_DEADLINE=$((NOW + 300)) bash -c ". '$SCRIPT_DIR/lib.sh'; canary_deadline 30")"
-check "a per-leg budget beyond the cap is clamped to it" "$((NOW + 5))" \
+# The clamped answer IS the cap, so this one is exact — no clock in the result.
+check "a per-leg budget beyond the cap is clamped to exactly the cap" "$((NOW + 5))" \
   "$(CANARY_HARD_DEADLINE=$((NOW + 5)) bash -c ". '$SCRIPT_DIR/lib.sh'; canary_deadline 600")"
-check "no cap means no clamp" "$((NOW + 60))" \
+check_range "no cap means no clamp" "$((NOW + 60))" "$((NOW + 63))" \
   "$(bash -c ". '$SCRIPT_DIR/lib.sh'; canary_deadline 60")"
 
 # --- canary_mask only emits the Actions directive inside Actions
