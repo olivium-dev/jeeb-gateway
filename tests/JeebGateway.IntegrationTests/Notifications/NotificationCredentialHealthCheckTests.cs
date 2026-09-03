@@ -7,10 +7,8 @@ using Xunit;
 
 namespace JeebGateway.IntegrationTests.Notifications;
 
-/// <summary>
-/// The 608debf behaviours, preserved after NotificationCredentialHealthCheck was
-/// generalised into ConfiguredCredentialHealthCheck (one row per declared credential).
-/// </summary>
+/// <summary>The 608debf behaviours, preserved after NotificationCredentialHealthCheck was
+/// generalised into ConfiguredCredentialHealthCheck.</summary>
 public sealed class NotificationCredentialHealthCheckTests
 {
     private static readonly GatewayCredentialDeclaration Notification =

@@ -10,36 +10,22 @@ public enum GatewayCredentialSourceKind
     Value,
 }
 
-/// <summary>One rung of a credential's ordered resolution chain.</summary>
-/// <param name="ConfigurationKey">The configuration key read for this rung.</param>
-/// <param name="Kind">Whether the key names a secret file or holds the value.</param>
+/// <summary>One rung of a credential's ordered resolution chain: the key read, and whether
+/// it names a secret file or holds the value.</summary>
 public sealed record GatewayCredentialSource(
     string ConfigurationKey,
     GatewayCredentialSourceKind Kind);
 
-/// <summary>
-/// A credential the gateway must be able to resolve at runtime, declared so a
-/// single readiness check can exercise it. The 608debf outage (23h of dead push
-/// behind a green /health/ready) happened because a Swarm-only
-/// <c>/run/secrets</c> path was a committed default on a native host and no
-/// surface traversed the fail-closed chain. Committed configuration therefore
-/// declares only KEYS; the deploy supplies the path or the value.
-/// </summary>
-/// <param name="Name">The name this credential reports under on <c>/health/ready</c>.</param>
-/// <param name="ArmedDescription">Human-readable statement of the gate in <paramref name="IsArmed"/>.</param>
-/// <param name="IsArmed">True when the consuming feature can actually dial, so the credential is required.</param>
-/// <param name="Chain">Ordered resolution chain; the first usable rung wins, exactly as the runtime handler resolves it.</param>
+/// <summary>A credential the gateway must resolve at runtime, declared so one readiness check can
+/// exercise it. Committed config declares KEYS only; the deploy supplies the path or value.</summary>
 public sealed record GatewayCredentialDeclaration(
     string Name,
     string ArmedDescription,
     Func<IConfiguration, bool> IsArmed,
     IReadOnlyList<GatewayCredentialSource> Chain);
 
-/// <summary>
-/// The declared credential roster. Every entry here becomes one
-/// <see cref="ConfiguredCredentialHealthCheck"/> registration and one
-/// <c>/health/ready</c> row, so a credential cannot be silently unresolvable.
-/// </summary>
+/// <summary>The declared credential roster: every entry becomes one health-check registration
+/// and one <c>/health/ready</c> row.</summary>
 public static class GatewayCredentialDeclarations
 {
     private static bool Flag(IConfiguration configuration, string key, bool defaultValue = false) =>

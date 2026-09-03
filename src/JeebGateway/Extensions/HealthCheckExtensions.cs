@@ -144,16 +144,8 @@ public static class HealthCheckExtensions
         // identity traffic and should be pulled from rotation.
         AddDownstreamProbe(checks, config, "user-management",         "UserManagementServiceApi:BaseUrl", healthPath: "health/ready");
 
-        // --- chat-service readiness (2026-09-04).
-        // CORRECTION: chat-service was listed below as "exposes NO health route".
-        // That premise was wrong — it serves GET /api/Health/check, and since
-        // 2026-09-03 (#116/#118) a real Firestore probe at GET /api/Health/firebase.
-        // The consequence of the stale exclusion was that chat could be 100% 503
-        // (FeatureFlags:UseUpstream:Chat off) with /health/ready fully green.
-        // ChatUpstreamHealthCheck reports the flag state as Degraded and probes the
-        // real routes when the flag is on. It is NOT a URL group, so it is added
-        // directly; the BaseUrl key still gates it, so name and registration cannot
-        // drift from GatewayHealthRoster.
+        // CORRECTION: chat-service was excluded below as "exposes NO health route"; it
+        // serves /api/Health/check and, since #116/#118, /api/Health/firebase.
         var chatBaseUrl = config[JeebGateway.Health.ChatUpstreamHealthCheck.BaseUrlConfigurationKey];
         if (!string.IsNullOrWhiteSpace(chatBaseUrl))
         {

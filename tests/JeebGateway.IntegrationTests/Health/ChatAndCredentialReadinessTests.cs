@@ -14,11 +14,8 @@ using Xunit;
 
 namespace JeebGateway.IntegrationTests.Health;
 
-/// <summary>
-/// Chat was 100% 503-able by a deploy-time flag while /health/ready stayed green on
-/// both hosts, and six credentials defaulted to Swarm-only /run/secrets paths with no
-/// readiness surface. These tests pin the visibility, not the plumbing.
-/// </summary>
+/// <summary>Chat was 503-able by a deploy-time flag while /health/ready stayed green, and six
+/// credentials defaulted to Swarm-only paths. These pin the visibility, not the plumbing.</summary>
 public sealed class ChatAndCredentialReadinessTests
 {
     // ---------------------------------------------------------------- chat
@@ -68,6 +65,24 @@ public sealed class ChatAndCredentialReadinessTests
             .And.Contain(ChatUpstreamHealthCheck.LivenessProbePath)
             .And.Contain("UNVERIFIED");
         upstream.Hits.Should().Contain("/" + ChatUpstreamHealthCheck.LivenessProbePath);
+    }
+
+    [Fact]
+    public async Task Chat_firestore_probe_204_is_not_Unhealthy()
+    {
+        // A post-#118 chat-service answers this route with a bodiless 204. Unhealthy would
+        // restart-loop the gateway via the Dockerfile HEALTHCHECK on /health/ready.
+        await using var upstream = await StubChatServiceAsync(
+            firebase: HttpStatusCode.NoContent, check: HttpStatusCode.OK);
+
+        var result = await ProbeChatAsync(chatEnabled: true, upstream.Url);
+
+        result.Status.Should().Be(HealthStatus.Healthy);
+        result.Description.Should()
+            .Contain("204")
+            .And.Contain("Firestore round-trip UNVERIFIED");
+        upstream.Hits.Should().NotContain("/" + ChatUpstreamHealthCheck.LivenessProbePath,
+            "a 2xx on the Firestore route is conclusive; the fallback is for a 404 only");
     }
 
     [Fact]

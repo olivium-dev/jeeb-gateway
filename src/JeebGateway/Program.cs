@@ -520,11 +520,8 @@ builder.Services.AddHealthChecks()
         failureStatus: HealthStatus.Unhealthy,
         tags: new[] { "ready" });
 
-// 608debf outage: a credential chain failed closed while every health surface stayed
-// green. One row per DECLARED credential, so no configured secret can be silently
-// unresolvable — and the description names the rung that actually resolved. Skipped in
-// Dev/Testing for the same reason the downstream probes are: those environments carry no
-// deploy-supplied credentials, so every row would report a deploy gap that does not exist.
+// 608debf outage: a credential chain failed closed while every health surface stayed green.
+// One row per declared credential. Dev/Testing skip it — they carry no deploy credentials.
 if (!builder.Environment.IsDevelopment()
     && !builder.Environment.IsEnvironment("Testing"))
 {

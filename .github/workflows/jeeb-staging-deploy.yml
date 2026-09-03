@@ -264,9 +264,8 @@ jobs:
           service=jeeb-staging-jeeb-gateway
           published=10000
           health=/health/ready
-          # Single source of truth for chat activation. A deploy must never be
-          # the thing that turns chat off: declared state wins, else carry the
-          # incumbent's persisted flag forward, else default on.
+          # Single source of truth for chat activation: declared state wins, else
+          # carry the incumbent's persisted flag forward, else default on.
           chat_upstream_declared="${JEEB_STAGING_CHAT_ENABLED:-}"
           case "$chat_upstream_declared" in
             true|false)
@@ -274,16 +273,24 @@ jobs:
               chat_upstream_source='declared vars.JEEB_STAGING_CHAT_ENABLED'
               ;;
             '')
+              chat_read_ok=true
               chat_upstream_persisted=$(ssh jeeb-staging bash -s -- "$service" \
-                < scripts/read-staging-chat-flag.sh) || chat_upstream_persisted=''
-              case "$chat_upstream_persisted" in
+                < scripts/read-staging-chat-flag.sh) || chat_read_ok=false
+              case "${chat_upstream_persisted:-}" in
                 true|false)
                   chat_upstream_enabled="$chat_upstream_persisted"
                   chat_upstream_source='persisted incumbent service state'
                   ;;
                 *)
+                  # Fail-open: an unreadable incumbent must not deploy chat off.
                   chat_upstream_enabled=true
-                  chat_upstream_source='default (no declared or persisted state)'
+                  if [ "$chat_read_ok" = true ]; then
+                    chat_upstream_source='default (no persisted chat state on incumbent)'
+                    echo '::warning::no persisted chat state on incumbent; defaulting true'
+                  else
+                    chat_upstream_source='default (incumbent unreadable)'
+                    echo '::warning::could not read the incumbent chat state; defaulting true'
+                  fi
                   ;;
               esac
               ;;
@@ -460,6 +467,15 @@ jobs:
             verify_candidate_readiness() {
               ssh jeeb-staging bash -s -- "$published" "$health" \
                 < scripts/staging-gateway-readiness-backoff.sh
+            }
+            # Degraded is HTTP 200, so the curl-based readiness gate cannot see a
+            # chat-off (or Firestore-UNVERIFIED) deploy. Assert the row itself.
+            verify_chat_readiness_row() {
+              local readiness
+              readiness=$(ssh jeeb-staging \
+                "curl -fsS --max-time 10 'http://127.0.0.1:${published}${health}'") || return 1
+              printf '%s' "$readiness" \
+                | bash scripts/assert-staging-chat-readiness-row.sh "$chat_upstream_enabled"
             }
             verify_bootstrap_flags() {
               ssh jeeb-staging bash -s -- "$service" "$DEPLOYMENT_MODE" \
@@ -1352,6 +1368,9 @@ jobs:
             < scripts/verify-swarm-service-image.sh
           verify_candidate_readiness
           verify_bootstrap_flags
+          if [ "$DEPLOYMENT_MODE" != devtool-reassert ]; then
+            verify_chat_readiness_row
+          fi
           if [ "$DEPLOYMENT_MODE" = devtool-reassert ]; then
             echo 'staging phase=devtool-public-edge-stabilization result=started (redacted)'
             bash scripts/staging-gateway-public-edge-backoff.sh \

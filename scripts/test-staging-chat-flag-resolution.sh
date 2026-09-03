@@ -45,8 +45,9 @@ expect() {
 }
 
 STUB_PERSISTED_CHAT_FLAG='' JEEB_STAGING_CHAT_ENABLED='' \
-  expect 'no declaration, no incumbent -> on' \
-  'Chat upstream for this deploy: true (from default (no declared or persisted state))'
+  expect 'no declaration, no incumbent -> on, with a distinct warning' \
+  '::warning::no persisted chat state on incumbent; defaulting true
+Chat upstream for this deploy: true (from default (no persisted chat state on incumbent))'
 
 STUB_PERSISTED_CHAT_FLAG='true' JEEB_STAGING_CHAT_ENABLED='' \
   expect 'activated incumbent carries forward' \
@@ -65,8 +66,9 @@ STUB_PERSISTED_CHAT_FLAG='false' JEEB_STAGING_CHAT_ENABLED='true' \
   'Chat upstream for this deploy: true (from declared vars.JEEB_STAGING_CHAT_ENABLED)'
 
 STUB_PERSISTED_CHAT_FLAG='' STUB_SSH_EXIT=255 JEEB_STAGING_CHAT_ENABLED='' \
-  expect 'unreadable incumbent does not abort the deploy' \
-  'Chat upstream for this deploy: true (from default (no declared or persisted state))'
+  expect 'unreadable incumbent fails open, and says so distinctly' \
+  '::warning::could not read the incumbent chat state; defaulting true
+Chat upstream for this deploy: true (from default (incumbent unreadable))'
 
 status=0
 env PATH="$work/bin:$PATH" JEEB_STAGING_CHAT_ENABLED='maybe' \
@@ -107,4 +109,36 @@ STUB_SERVICE_ENV='FeatureFlags__UseUpstream__Chat=yes' \
   expect_flag 'ignores a non-boolean value' ''
 STUB_DOCKER_EXIT=1 expect_flag 'absent service yields no value' ''
 
-echo "Staging chat activation resolver: PASS"
+row() {
+  printf '{"status":"%s","checks":[{"name":"chat-upstream-readiness","status":"%s","description":"%s"}]}' \
+    "$1" "$1" "$2"
+}
+
+assert_row() {
+  local label=$1 expected=$2 json=$3 want=$4 status=0
+  printf '%s' "$json" \
+    | bash scripts/assert-staging-chat-readiness-row.sh "$expected" >/dev/null 2>&1 || status=$?
+  if [ "$status" != "$want" ]; then
+    echo "FAIL: $label -> exit $status, wanted $want" >&2
+    exit 1
+  fi
+}
+
+assert_row 'chat on + Healthy row passes' true \
+  "$(row Healthy 'chat-service api/Health/firebase passed (Firestore reachable)')" 0
+assert_row 'chat on + legacy 204 row passes' true \
+  "$(row Healthy 'chat-service api/Health/firebase returned 204; Firestore round-trip UNVERIFIED (legacy 204)')" 0
+assert_row 'chat on but silently disabled is rejected' true \
+  "$(row Degraded 'chat disabled by flag (FeatureFlags:UseUpstream:Chat=false)')" 1
+assert_row 'chat on but Firestore UNVERIFIED is rejected' true \
+  "$(row Degraded 'chat-service has no api/Health/firebase route (404) on this build')" 1
+assert_row 'chat off + disabled-by-flag row passes' false \
+  "$(row Degraded 'chat disabled by flag (FeatureFlags:UseUpstream:Chat=false)')" 0
+assert_row 'chat off but a live chat row is rejected' false \
+  "$(row Healthy 'chat-service api/Health/firebase passed (Firestore reachable)')" 1
+assert_row 'a missing chat row is rejected' true \
+  '{"status":"Healthy","checks":[{"name":"self","status":"Healthy"}]}' 1
+assert_row 'an unparseable payload is rejected' true '<html>503</html>' 1
+assert_row 'a malformed expectation is rejected' maybe "$(row Healthy ok)" 64
+
+echo "Staging chat activation resolver and readiness-row assertion: PASS"

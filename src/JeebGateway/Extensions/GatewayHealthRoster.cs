@@ -26,9 +26,8 @@ public static class GatewayHealthRoster
         ("contract-signing-service", "Services:ContractSigning:BaseUrl"),
         ("cdn-service", "Services:Cdn:BaseUrl"),
         ("form-builder-service", "Services:FormBuilder:BaseUrl"),
-        // 2026-09-04: chat had NO health row on either host while a deploy-time flag
-        // could 503 every chat route. Registered by HealthCheckExtensions as
-        // ChatUpstreamHealthCheck (not a URL group), gated on the same BaseUrl key.
+        // 2026-09-04: chat had no health row while a deploy-time flag could 503 every
+        // chat route. Registered by HealthCheckExtensions, gated on the same BaseUrl key.
         (JeebGateway.Health.ChatUpstreamHealthCheck.Name, JeebGateway.Health.ChatUpstreamHealthCheck.BaseUrlConfigurationKey),
         // Registered by HealthCheckExtensions as BundlerServiceHealthCheck (not a URL group),
         // still gated on the same BaseUrl key, so name and registration cannot drift.
@@ -45,9 +44,8 @@ public static class GatewayHealthRoster
         "whisper",
         "jeeb-state-service",
     }
-    // 2026-09-04: one row per declared credential. The 608debf outage stayed green
-    // because no surface exercised the fail-closed chain; notification-credential
-    // (added 2026-08-23) covered exactly one of seven such credentials.
+    // 2026-09-04: one row per declared credential; notification-credential (2026-08-23)
+    // covered exactly one of the seven the 608debf class can silently break.
     .Concat(JeebGateway.Health.GatewayCredentialDeclarations.All.Select(d => d.Name))
     .ToArray();
 
@@ -64,11 +62,7 @@ public static class GatewayHealthRoster
     /// retired role-service outright — that probe was the aggregate's only Degraded entry,
     /// verified against a real /health/ready read before and after. 19 from 2026-08-23:
     /// notification-credential joined after the 608debf silent push outage; 20 from
-    /// 2026-08-29 when relay scoped-readiness became a deployment gate. 27 from
-    /// 2026-09-04: chat-upstream-readiness (chat had no health row at all while a
-    /// deploy-time flag could 503 every chat route) plus six more declared
-    /// credentials — the six /run/secrets defaults deleted from
-    /// appsettings.Production.json — joining notification-credential under one
-    /// ConfiguredCredentialHealthCheck.</summary>
+    /// 2026-08-29 when relay scoped-readiness became a deployment gate; 27 from 2026-09-04.
+    /// DECLARED, not wire — see docs/runbooks/chat-activation-and-readiness.md.</summary>
     public const int ExpectedReadyCount = 27;
 }

@@ -28,6 +28,22 @@ onto the Swarm service, and the next deploy carries that value forward instead o
 Rung 3 means a fresh service comes up with chat **on** — a deploy is never the thing that
 turns chat off.
 
+### Day 0 — this PR does NOT turn chat on
+
+**The first staging deploy after merging this lands `Chat=false` and chat stays off.** Rung 1 is
+empty (no `JEEB_STAGING_CHAT_ENABLED` variable exists at repository or `staging` environment level)
+and the incumbent persists `false` (live `/v1/conversations*` 503s "UseUpstream:Chat is off"), so
+rung 2 carries `false` forward. This change removes the ratchet; it does not perform the
+activation. To actually turn chat on, do **one** of:
+
+- set repository or `staging`-environment variable `JEEB_STAGING_CHAT_ENABLED=true` and deploy —
+  after which the variable may be deleted, because rung 2 now carries `true` forward; **or**
+- dispatch `jeeb-chat-b-activation.yml` (its precondition — exactly one row, `=false` — is
+  satisfied today), which is now durable across later deploys.
+
+Order matters: after the first option the activation workflow refuses, because its precondition
+requires the incumbent to be `false`. It activates; it does not toggle.
+
 ### Operating it
 
 - **Turn chat off deliberately:** set repository/environment variable
@@ -54,8 +70,28 @@ ratchet is fixed on the deploy side where it lived.
   `add_env FeatureFlags__UseUpstream__Chat <literal>`.
 - `scripts/test-staging-chat-flag-resolution.sh` (CI) **extracts** the resolver from the
   workflow and executes it against a stubbed `ssh`/`docker` across all six resolution cases.
+- The deploy asserts what it declared. Degraded is HTTP 200, so `curl -fsS` on `/health/ready`
+  cannot see a chat-off deploy; `verify_chat_readiness_row` (after `verify_bootstrap_flags`, and
+  skipped in `devtool-reassert`) reads the JSON and requires `chat-upstream-readiness` to be
+  `Healthy` when the resolved flag is `true`, or `Degraded` with `disabled by flag` when it is
+  `false`. A chat-off deploy — or a chat-on deploy whose Firestore probe is UNVERIFIED — now fails
+  the gate instead of passing silently.
 
-## `/health/ready` roster: 20 -> 27
+### Rung 2 fails open, loudly
+
+Any SSH or `docker service inspect` failure resolves to rung 3 (`true`) rather than deploying chat
+off on a read error. The two cases are logged distinctly — `::warning::no persisted chat state on
+incumbent; defaulting true` versus `::warning::could not read the incumbent chat state; defaulting
+true` — so the log never claims "absent" when it means "unreadable". The only durable *off* is the
+declared variable.
+
+## `/health/ready` roster: 20 -> 27 declared (19 -> 26 staging, 18 -> 25 MSI on the wire)
+
+`GatewayHealthRoster.ExpectedReadyCount` counts the **declared** roster. `whisper` and
+`push-relay-scoped-readiness` register conditionally, which is why live staging reads 19 rows today
+against a constant of 20, and MSI reads 18 (it is also missing `push-relay-scoped-readiness` — gap
+G5). That skew is pre-existing and unchanged here; this PR adds 7 rows to both the declared roster
+and the wire, so expect **26 on staging and 25 on MSI**, not 27.
 
 ### `chat-upstream-readiness`
 
@@ -68,8 +104,14 @@ is skipped in Development/Testing exactly like the other downstream probes.
 | `FeatureFlags:UseUpstream:Chat` false | **Degraded** — "chat disabled by flag" |
 | enabled, `ChatServiceApi:BaseUrl` unset | **Degraded** |
 | `GET /api/Health/firebase` 200 | **Healthy** (Firestore reachable) |
-| `GET /api/Health/firebase` 404, `GET /api/Health/check` 200 | **Degraded** — older chat-service; Firestore is UNVERIFIED |
+| any other 2xx (a post-#118 build answers a bodiless **204**) | **Healthy** — "Firestore round-trip UNVERIFIED (legacy 204)" |
+| `GET /api/Health/firebase` 404, `GET /api/Health/check` 2xx | **Degraded** — older chat-service; Firestore is UNVERIFIED |
 | any other status / timeout / transport fault | **Unhealthy** |
+
+Every 2xx is accepted deliberately. `Dockerfile` runs `HEALTHCHECK … /health/ready`, so an
+Unhealthy row here is not a red dashboard entry — Swarm restarts the gateway task. A chat-service
+answering 204 with chat on would otherwise restart-loop the gateway. The weaker proof is stated in
+the description and asserted by the deploy gate instead.
 
 The previous exclusion comment ("chat-service exposes NO health route") was factually wrong:
 chat-service serves `GET /api/Health/check`, and since 2026-09-03 (#116/#118) a real Firestore

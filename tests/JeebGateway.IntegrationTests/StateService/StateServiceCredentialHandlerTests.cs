@@ -82,9 +82,8 @@ public sealed class StateServiceCredentialHandlerTests
             .AddJsonFile(Path.Combine(root, "appsettings.Production.json"))
             .Build();
 
-        // 2026-09-04: the path is no longer committed — /run/secrets exists only under
-        // Swarm, and a baked host path is the 608debf class. The deploy supplies it, and
-        // credential-state-service-token reports an unsupplied one on /health/ready.
+        // 2026-09-04: the path is no longer committed (the 608debf class). The deploy
+        // supplies it; credential-state-service-token reports an unsupplied one.
         production["JeebStateService:ServiceTokenFile"].Should().BeNullOrEmpty();
         File.ReadAllText(Path.Combine(root, "appsettings.Production.json"))
             .Should().NotContain("state-service-token-aaaaaaaa");

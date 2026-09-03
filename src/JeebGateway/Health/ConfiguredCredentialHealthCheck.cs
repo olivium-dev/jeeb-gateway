@@ -2,13 +2,8 @@ using Microsoft.Extensions.Diagnostics.HealthChecks;
 
 namespace JeebGateway.Health;
 
-/// <summary>
-/// Readiness gate over one <see cref="GatewayCredentialDeclaration"/>. It walks the
-/// declared chain exactly as the runtime handler does, so a credential that fails
-/// closed at request time cannot report green here. It also names the rung that
-/// actually resolved, which is what makes a value-backed fallback masking an
-/// unmounted secret file visible instead of silently green.
-/// </summary>
+/// <summary>Readiness gate over one <see cref="GatewayCredentialDeclaration"/>: walks the declared
+/// chain as the runtime handler does, and names the rung that resolved.</summary>
 public sealed class ConfiguredCredentialHealthCheck(
     GatewayCredentialDeclaration declaration,
     IConfiguration configuration) : IHealthCheck
