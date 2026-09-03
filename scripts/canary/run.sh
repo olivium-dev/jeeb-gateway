@@ -56,6 +56,8 @@ CANARY_EVIDENCE="$CANARY_WORKDIR/evidence.log"
 export CANARY_WORKDIR CANARY_EVIDENCE
 
 RUN_TAG="${GITHUB_RUN_ID:-local-$(date +%s)}"
+CANARY_HARD_DEADLINE="$(( $(date +%s) + TIMEOUT ))"
+export CANARY_HARD_DEADLINE
 PUSH_PROOF="none"
 REQUEST_ID=""
 CLIENT_TOKEN=""
@@ -75,9 +77,16 @@ canary_cleanup() {
   local status=$?
   if [ "$CANARY_MODE" = "execute" ]; then
     if [ -n "$JEEBER_TOKEN" ]; then
-      curl -sS -m 15 -o /dev/null -X PUT "$BASE_URL$AVAIL_PREFIX/jeebers/me/availability" \
+      local offline
+      offline="$(curl -sS -m 15 -o /dev/null -w '%{http_code}' -X PUT \
+        "$BASE_URL$AVAIL_PREFIX/jeebers/me/availability" \
         -H "Authorization: Bearer $JEEBER_TOKEN" -H 'Content-Type: application/json' \
-        --data-binary '{"online": false}' 2>/dev/null || true
+        --data-binary '{"online": false}' 2>/dev/null)"
+      [ "${#offline}" -eq 3 ] || offline="000"
+      case "$offline" in
+        200|204) printf 'cleanup: canary jeeber is offline (HTTP %s)\n' "$offline" ;;
+        *) printf '::warning::cleanup: go-offline returned HTTP %s — the canary jeeber may still be online\n' "$offline" ;;
+      esac
     fi
     if [ -n "$REQUEST_ID" ] && [ -n "$CLIENT_TOKEN" ]; then
       local code
@@ -105,7 +114,7 @@ canary_log "  base url    : $BASE_URL"
 canary_log "  client id   : $CLIENT_ID"
 canary_log "  jeeber id   : $JEEBER_ID"
 canary_log "  pickup      : $LAT,$LNG (fixed OFFSHORE coordinate — no real tester in radius)"
-canary_log "  budgets     : push ${PUSH_BUDGET}s, chat ${CHAT_BUDGET}s, firestore ${FIRESTORE_BUDGET}s (cap ${TIMEOUT}s)"
+canary_log "  budgets     : push ${PUSH_BUDGET}s, chat ${CHAT_BUDGET}s, firestore ${FIRESTORE_BUDGET}s, hard cap ${TIMEOUT}s"
 canary_log "  accept leg  : $ACCEPT_OFFER"
 canary_log "  push ledger : ${PUSH_LEDGER_BASE_URL:-<unset — falling back to the durable notification inbox>}"
 if [ -n "${JEEB_FIREBASE_WEB_API_KEY:-}" ]; then
@@ -143,7 +152,7 @@ mint_bearer() {
   MINTED_TOKEN="$(canary_access_token <"$out")"
   [ "$CANARY_MODE" != execute ] || [ -n "$MINTED_TOKEN" ] || \
     canary_fail identity "$role mint returned no accessToken"
-  [ "$CANARY_MODE" != execute ] || printf '::add-mask::%s\n' "$MINTED_TOKEN"
+  canary_mask "$MINTED_TOKEN"
 }
 mint_bearer "$CLIENT_ID" client; CLIENT_TOKEN="$MINTED_TOKEN"
 mint_bearer "$JEEBER_ID" jeeber; JEEBER_TOKEN="$MINTED_TOKEN"
@@ -187,7 +196,9 @@ canary_note "flash tier id: $TIER_ID"
 # request id; the 80-char body preview is the only place the canary can mark.
 REQUEST_DESCRIPTION="canary $RUN_TAG automated probe, ignore"
 REQUEST_FILE="$(canary_tmpfile request)"
-canary_http POST "$BASE_URL/requests" \
+# The fan-out lives ONLY on the V1 create route: legacy POST /requests has no
+# NotifyNewRequestAsync caller and seeds no delivery row, so it pushes nothing.
+canary_http POST "$BASE_URL/v1/requests" \
   --bearer-var CLIENT_TOKEN \
   --header "Idempotency-Key: jeeb-canary-request-$RUN_TAG" \
   --json "$(jq -nc \
@@ -327,7 +338,7 @@ if [ -n "${JEEB_FIREBASE_WEB_API_KEY:-}" ]; then
     FIREBASE_ID_TOKEN="$(jq -r '(.idToken // "")' <"$EXCHANGE_FILE" 2>/dev/null)"
     export FIREBASE_ID_TOKEN
     [ -n "$FIREBASE_ID_TOKEN" ] || canary_fail chat "Firebase custom-token exchange returned no idToken"
-    printf '::add-mask::%s\n' "$FIREBASE_ID_TOKEN"
+    canary_mask "$FIREBASE_ID_TOKEN"
   else
     FIREBASE_ID_TOKEN=""; export FIREBASE_ID_TOKEN
   fi

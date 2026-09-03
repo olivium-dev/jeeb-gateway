@@ -25,7 +25,7 @@ questions instead:
 | 1 identity | `POST /auth/tokens` ×2 with `X-Service-Auth-Key` | both fixed canary bearers mint |
 | 2 presence | `PUT {prefix}/jeebers/me/availability`, `POST /location/update` | jeeber online with a GPS fix at the pickup point |
 | 3 device | `PUT /api/PushNotification/register` | the jeeber has an FCM seat, so a dispatch row can exist |
-| 4 request | `GET /tiers`, `POST /requests` | a Flash request at the fixed offshore coordinate |
+| 4 request | `GET /tiers`, `POST /v1/requests` | a Flash request at the fixed offshore coordinate |
 | 5 chat gate | `GET /v1/chat/jeeb/conversations/by-request/{id}` (create on 404) | the conversation resolves — **a 503 here is `UseUpstream__Chat=false`** |
 | 6 lifecycle | `POST /v1/requests/{id}/offers` as the jeeber, `POST /v1/offers/{id}/accept` as the client | the jeeber is actually seated in the conversation |
 | 7 chat | `POST /v1/conversations/{id}/messages`, then `GET …/messages` **as the jeeber**, then `POST /v1/chat/firebase-token` | the recipient's own viewer-scoped page carries the message, and the minted Firebase uid equals the jeeber id |
@@ -39,6 +39,17 @@ top-ranked cause of chat outages. If the push leg ran first, a simultaneously
 broken push would consume the budget and the run would never reach — and never
 name — the flag. The chat gate therefore comes first, so the likeliest root
 cause is always reported by name.
+
+### The create MUST be `POST /v1/requests`
+
+New-request fan-out lives **only** on the V1 create route. The legacy
+`POST /requests` has no `NotifyNewRequestAsync` caller at all and seeds no
+delivery-service row, so a request created there pushes nothing, produces no
+durable `jeeb.new_request` record, and gives the accept saga nothing to work
+with. Both routes return 201 with an id, which is what makes the mistake
+invisible: the canary looks healthy right up to a push leg that can never go
+green. `test-canary-lib.sh` asserts the V1 route by value and asserts the legacy
+route is absent, so a regression fails offline in CI.
 
 ### Why leg 6 exists (this is not optional)
 
@@ -167,14 +178,17 @@ bash scripts/canary/test-canary-lib.sh
 ```
 
 Bash + curl + jq only. Every secret is read from the environment and printed as
-`$VARNAME`; plan mode issues no request at all.
+`$VARNAME`; plan mode issues no request at all. Bearers are masked with
+`::add-mask::` only when `GITHUB_ACTIONS` is set — outside Actions that directive
+is not consumed by anything, so emitting it would print the token instead of
+hiding it. A local `--execute` run therefore prints no bearer at all.
 
 ## Configuration
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `JEEB_CANARY_BASE_URL` | `https://app.jeeb.fds-1.com` | gateway origin (`--base-url`) |
-| `JEEB_CANARY_TIMEOUT` | `150` | overall cap in seconds (`--timeout`) |
+| `JEEB_CANARY_TIMEOUT` | `150` | whole-run hard cap in seconds (`--timeout`); every per-leg deadline is clamped to it |
 | `JEEB_CANARY_PUSH_BUDGET` | `60` | budget for the push poll alone |
 | `JEEB_CANARY_CHAT_BUDGET` | `30` | budget for the recipient-visibility poll |
 | `JEEB_CANARY_FIRESTORE_BUDGET` | `30` | budget for the Firestore poll |
@@ -191,7 +205,17 @@ Bash + curl + jq only. Every secret is read from the environment and printed as
 | `JEEB_CANARY_ALLOW_FCM_TOKEN_REJECT` | `true` | accept a terminal `failed` as producer-chain proof |
 
 Per-leg budgets exist so a slow push leg cannot starve the chat polls down to a
-single attempt. `JEEB_CANARY_TIMEOUT` is the overall cap, not the sum.
+single attempt. `JEEB_CANARY_TIMEOUT` is a real ceiling, not a label: every
+`canary_deadline` is clamped to `start + JEEB_CANARY_TIMEOUT`, so the sum of the
+per-leg budgets can never overrun it.
+
+## Hard dependencies beyond chat and push
+
+Because leg 6 walks the real lifecycle, this canary also fails when
+**offer-service** or **delivery-service** is down. That is deliberate — those are
+real-app dependencies of a real chat thread — but it means a red `lifecycle` leg
+must not be read as a chat or push outage. The leg name in the failure message is
+the thing to read first.
 
 ## Independence from SuperLogin open mode — read this before trusting the claim
 
@@ -255,6 +279,6 @@ name first:
 | `presence` | availability prefix wrong at the edge (404), or heart-beat service auth rejected (401) |
 | `device` | push-notification registration path down — the relay itself is unreachable |
 | `request` | delivery-service / jeeb-state-service down, or the tier catalog lost its Flash row |
-| `lifecycle` | offer 409 `offer-out-of-range` ⇒ the GPS fix never reached delivery-service presence; 402 ⇒ the canary id became GUID-shaped and hit the wallet guard; accept 409 ⇒ the request left the pre-acceptance phase |
+| `lifecycle` | **offer-service is a hard dependency of this leg** — 502/503 means offer-service is unreachable, not a chat or push outage. 409 `offer-out-of-range` ⇒ the GPS fix never reached delivery-service presence (also a hard dependency, via the presence row the radius check reads); 402 ⇒ the canary id became GUID-shaped and hit the wallet guard; accept 409 ⇒ the request left the pre-acceptance phase |
 | `push` | **the outage class this exists for** — recipient resolution, the durable dispatcher flag, notification-service `WEBHOOK_BASE_URL`, or the FCM credential |
 | `chat` | `503` ⇒ `UseUpstream__Chat` is off; a viewer-scoped miss ⇒ `VisibleTo[]` does not carry the jeeber; a uid mismatch ⇒ the Firebase mint and the app disagree on identity |

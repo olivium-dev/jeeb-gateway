@@ -148,9 +148,23 @@ canary_expect() {
   canary_fail "$leg" "$what expected HTTP $want, got $CANARY_LAST_CODE — $(canary_body_preview "$CANARY_LAST_BODY_FILE")"
 }
 
-# A per-leg budget, so a slow push poll cannot starve the chat polls.
+# ::add-mask:: is an Actions runner directive; outside Actions it would just print
+# the token, so a local run gets nothing.
+canary_mask() {
+  [ "$CANARY_MODE" = "execute" ] || return 0
+  [ -n "${GITHUB_ACTIONS:-}" ] || return 0
+  [ -n "${1:-}" ] || return 0
+  printf '::add-mask::%s\n' "$1"
+}
+
+# A per-leg budget, clamped to the whole-run cap so --timeout is really enforced.
 canary_deadline() {
-  printf '%s' "$(( $(date +%s) + $1 ))"
+  local deadline=$(( $(date +%s) + $1 ))
+  local cap="${CANARY_HARD_DEADLINE:-0}"
+  if [ "$cap" -gt 0 ] && [ "$deadline" -gt "$cap" ]; then
+    deadline="$cap"
+  fi
+  printf '%s' "$deadline"
 }
 
 # canary_poll LEG DEADLINE_EPOCH INTERVAL DESCRIPTION -- command...

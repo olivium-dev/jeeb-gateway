@@ -132,9 +132,8 @@ case "$EXPECT_000" in
   *) check "a 000 status is reported as a transport failure" "yes" "no" ;;
 esac
 
-# --- canary_body_preview redacts JWTs ---------------------------------------
-# The fixture is BUILT, never written literally: a literal JWT in the tree is a
-# gitleaks finding even when it is obviously fake.
+# --- canary_body_preview redacts JWTs. The fixture is BUILT, never written
+# --- literally: a literal JWT in the tree is a gitleaks finding even when fake.
 b64url() { printf '%s' "$1" | base64 | tr -d '=\n' | tr '/+' '_-'; }
 FAKE_JWT="$(b64url '{"alg":"none"}').$(b64url '{"sub":"canary"}').$(b64url 'not-a-signature')"
 JWT_BODY="$CANARY_TEST_TMP/jwt-body.json"
@@ -186,12 +185,40 @@ case "$PLAN_OUT" in
   *'  CALL '*) check "plan mode issues no live call" "none" "EXECUTED" ;;
   *) check "plan mode issues no live call" "none" "none" ;;
 esac
-for leg in 'v1/chat/jeeb/conversations/by-request' 'v1/conversations/' '/requests' 'location/update' 'api/PushNotification/register' 'auth/tokens' '/offers' '/accept' 'v1/notifications'; do
+for leg in 'v1/chat/jeeb/conversations/by-request' 'v1/conversations/' 'location/update' 'api/PushNotification/register' 'auth/tokens' '/offers' '/accept' 'v1/notifications'; do
   case "$PLAN_OUT" in
     *"$leg"*) check "plan covers $leg" "covered" "covered" ;;
     *) check "plan covers $leg" "covered" "MISSING" ;;
   esac
 done
+
+# The create route is asserted BY VALUE: only POST /v1/requests fans out, and the
+# legacy POST /requests silently pushes nothing.
+case "$PLAN_OUT" in
+  *"-X POST"*"'https://app.jeeb.fds-1.com/v1/requests'"*) check "the plan creates the request on the V1 route" "v1" "v1" ;;
+  *) check "the plan creates the request on the V1 route" "v1" "MISSING" ;;
+esac
+case "$PLAN_OUT" in
+  *"'https://app.jeeb.fds-1.com/requests'"*) check "the plan never uses the legacy create route" "absent" "PRESENT" ;;
+  *) check "the plan never uses the legacy create route" "absent" "absent" ;;
+esac
+
+# --- canary_deadline is clamped by the whole-run cap, so --timeout is enforced
+NOW="$(date +%s)"
+check "a per-leg budget inside the cap is used as-is" "$((NOW + 30))" \
+  "$(CANARY_HARD_DEADLINE=$((NOW + 300)) bash -c ". '$SCRIPT_DIR/lib.sh'; canary_deadline 30")"
+check "a per-leg budget beyond the cap is clamped to it" "$((NOW + 5))" \
+  "$(CANARY_HARD_DEADLINE=$((NOW + 5)) bash -c ". '$SCRIPT_DIR/lib.sh'; canary_deadline 600")"
+check "no cap means no clamp" "$((NOW + 60))" \
+  "$(bash -c ". '$SCRIPT_DIR/lib.sh'; canary_deadline 60")"
+
+# --- canary_mask only emits the Actions directive inside Actions
+check "canary_mask prints nothing outside GitHub Actions" "" \
+  "$(CANARY_MODE=execute bash -c "unset GITHUB_ACTIONS; . '$SCRIPT_DIR/lib.sh'; canary_mask a-real-bearer")"
+check "canary_mask emits the directive inside GitHub Actions" "::add-mask::a-real-bearer" \
+  "$(CANARY_MODE=execute GITHUB_ACTIONS=true bash -c ". '$SCRIPT_DIR/lib.sh'; canary_mask a-real-bearer")"
+check "canary_mask prints nothing in plan mode" "" \
+  "$(CANARY_MODE=plan GITHUB_ACTIONS=true bash -c ". '$SCRIPT_DIR/lib.sh'; canary_mask a-real-bearer")"
 
 printf '\n%s case(s), %s failure(s)\n' "$CASES" "$FAILURES"
 [ "$FAILURES" -eq 0 ] || exit 1
