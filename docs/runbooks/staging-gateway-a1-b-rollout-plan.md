@@ -194,3 +194,27 @@ manifest hash, candidate manifest hash, exact image proof, encrypted overlay ID,
 service membership and in-task DNS result, readiness result, A1/B flag result,
 public canary result, ingress/XFF source proof, authenticated WSS positive and
 negative join results, final full-Spec comparison, and recovery result when armed.
+
+## Open defect — `security-cutover`'s remote Version.Index verify
+
+**`security-cutover` must not be used until this is reviewed.** Its remote proof
+(`staging_gateway_security_cutover_observe`, `scripts/staging-gateway-security-cutover.sh`)
+requires, of one service document read, **both**:
+
+- `.Version.Index == $expected_version` — the index captured at CAS submit, and
+- `.UpdateStatus.State == "completed"`.
+
+Those look mutually exclusive. The write that sets `UpdateStatus.State` to
+`completed` is itself a write to the service object, so it advances
+`Version.Index` past the submit value; a document that satisfies the second
+condition should therefore fail the first. This is the same Swarm behaviour that
+made the terminal candidate check unsatisfiable in `normal` mode (run
+33814328644), where the exact `Version.Index` compare was replaced by a
+monotonic one. `security-cutover` deliberately keeps the exact compare in the
+terminal check *because* of this remote proof, so the two must be re-reviewed
+together — either the remote verify accepts a monotonic advance, or it must
+capture the expected index after convergence rather than at submit.
+
+`otp-cutover` has **no** remote CAS proof: it reaches the terminal check through
+the ordinary `staging_gateway_forward_apply`, exactly like `normal`, so it uses
+the monotonic rule.

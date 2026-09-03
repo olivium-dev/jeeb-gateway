@@ -728,6 +728,7 @@ jobs:
                 staging_gateway_lock_release || lock_cleanup_ok=false
               fi
               if [ "$lock_cleanup_ok" != true ] && [ "$status" -eq 0 ]; then
+                echo 'RED: generated-secret cleanup or lock release failed after an otherwise green deploy' >&2
                 status=98
               fi
               if ! append_sanitized_transaction_summary; then
