@@ -6,15 +6,8 @@ using Xunit;
 
 namespace JeebGateway.IntegrationTests.Tokens;
 
-/// <summary>
-/// G5 — refresh must not silently strip a session's capabilities. Rotation re-resolved roles
-/// from the process-RAM <c>IUsersStore</c> that super-login mints do not populate and that any
-/// bounce/replica move empties, while the refresh-token store is durable — so a healthy session
-/// rotated into a valid token with ZERO roles: still "signed in" at L1, 403
-/// <c>forbidden-capability</c> at ADR-005 L2 on every route, <c>/v1/users/me</c> included.
-/// These pin both halves: the minted context rides the record, and a rotation that still
-/// resolves nothing fails CLOSED (401 → clean re-login).
-/// </summary>
+/// <summary>G5 — rotation re-resolved roles from a process-RAM store any restart empties, minting
+/// valid roles-less tokens that 403 at L2 on every route. Pins the snapshot and the fail-closed 401.</summary>
 public class RefreshRoleContinuityTests
 {
     private const string Key = "refresh-role-continuity-signing-key-at-least-32-bytes!!";
@@ -154,10 +147,8 @@ public class RefreshRoleContinuityTests
             }),
             TimeProvider.System);
 
-    /// <summary>
-    /// Models a store holding records written BEFORE the session snapshot existed: everything
-    /// else behaves normally, but nothing ever reads back a SessionRoleSnapshot.
-    /// </summary>
+    /// <summary>Models records written BEFORE the snapshot existed: normal in every other way,
+    /// but nothing ever reads a SessionRoleSnapshot back.</summary>
     private sealed class LegacyRecordStore : IRefreshTokenStore
     {
         private readonly InMemoryRefreshTokenStore _inner = new();

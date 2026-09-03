@@ -514,12 +514,9 @@ public class TokenService : ITokenService
                 token.RoleSnapshot is { Count: > 0 });
     }
 
-    /// <summary>
-    /// G5 — reads the minted role context off an ordinary refresh record. Validated with the same
-    /// bounds as the external/bounded snapshots; a malformed or legacy (null) snapshot returns
-    /// false so the caller keeps the legacy <see cref="IUsersStoreAdapter"/> resolution.
-    /// </summary>
-    private static bool TryMintedSessionRoles(
+    /// <summary>G5 — reads the minted role context off an ordinary record, bounded like the
+    /// external/bounded snapshots. False (legacy or malformed) keeps the store resolution.</summary>
+    private bool TryMintedSessionRoles(
         RefreshToken token,
         out TokenRoleContext roleContext)
     {
@@ -541,6 +538,8 @@ public class TokenService : ITokenService
             || token.SessionActiveRoleSnapshot.Length > 128
             || !roles.Contains(token.SessionActiveRoleSnapshot, StringComparer.OrdinalIgnoreCase))
         {
+            // Present but malformed: log it, else a minter regression looks like random logouts.
+            _log.LogWarning("auth.refresh session role snapshot failed validation — falling back to the users store");
             return false;
         }
 
