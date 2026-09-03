@@ -63,6 +63,71 @@ public sealed class AdminAuthSecurityTests
         cookies.Should().Contain(AdminAuthController.CsrfCookie + "=");
     }
 
+    // Staging terminates TLS at nginx and the Swarm ingress peer is not a trusted
+    // proxy, so Request.Scheme is http while the browser-visible scheme is https.
+    [Theory]
+    [InlineData("http://app.jeeb.fds-1.com", "origin_rejected")]
+    [InlineData("https://app.jeeb.fds-1.com", "csrf_rejected")]
+    public async Task Refresh_ComparesOriginAgainstConfiguredPublicScheme(
+        string suppliedOrigin, string expectedProblem)
+    {
+        var controller = EdgeController(
+            requestScheme: "http",
+            host: "app.jeeb.fds-1.com",
+            settings: new Dictionary<string, string?>
+            {
+                ["Gateway:PublicBaseUrl"] = "https://app.jeeb.fds-1.com",
+                ["AdminPortal:AllowedOrigins:0"] = "https://cms.jeeb.fds-1.com",
+            });
+        controller.Request.Headers.Origin = suppliedOrigin;
+        controller.Request.Headers["Sec-Fetch-Site"] = "same-origin";
+
+        var result = (ObjectResult)await controller.Refresh(CancellationToken.None);
+
+        result.StatusCode.Should().Be(403);
+        ((ProblemDetails)result.Value!).Type.Should()
+            .Be($"https://jeeb.dev/errors/{expectedProblem}");
+    }
+
+    [Fact]
+    public async Task Refresh_KeepsPlainHttpSameOriginOnAnUnterminatedHost()
+    {
+        var controller = EdgeController(
+            requestScheme: "http",
+            host: "192.168.2.39:10090",
+            settings: new Dictionary<string, string?>
+            {
+                ["Gateway:PublicBaseUrl"] = "http://192.168.2.39:10090",
+            });
+        controller.Request.Headers.Origin = "http://192.168.2.39:10090";
+        controller.Request.Headers["Sec-Fetch-Site"] = "same-origin";
+
+        var result = (ObjectResult)await controller.Refresh(CancellationToken.None);
+
+        result.StatusCode.Should().Be(403);
+        ((ProblemDetails)result.Value!).Type.Should()
+            .Be("https://jeeb.dev/errors/csrf_rejected");
+    }
+
+    private static AdminAuthController EdgeController(
+        string requestScheme, string host, Dictionary<string, string?> settings)
+    {
+        var configuration = new ConfigurationBuilder()
+            .AddInMemoryCollection(settings).Build();
+        var httpContext = new DefaultHttpContext();
+        httpContext.Request.Scheme = requestScheme;
+        httpContext.Request.Host = new HostString(host);
+        httpContext.Request.Path = "/admin/v1/auth/refresh";
+        // The edge does send X-Forwarded-Proto; it is dropped as untrusted.
+        httpContext.Request.Headers["X-Forwarded-Proto"] = "https";
+        return new AdminAuthController(
+            null!, null!, new ThrowingTokenService(),
+            new TestingEnvironment { EnvironmentName = "Production" }, configuration)
+        {
+            ControllerContext = new ControllerContext { HttpContext = httpContext },
+        };
+    }
+
     private sealed class ThrowingTokenService : ITokenService
     {
         public Task<TokenPair> IssueAsync(
