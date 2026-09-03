@@ -260,6 +260,7 @@ jobs:
           membership_secret_name=''
           firebase_secret_name=''
           service_auth_secret_name=''
+          created_secret_names=()
           service=jeeb-staging-jeeb-gateway
           published=10000
           health=/health/ready
@@ -688,10 +689,7 @@ jobs:
                   "$forward_result" security-cutover-interrupted-fix-forward \
                   || status=99
               fi
-              for created in "$jwt_secret_name" "$umjwt_secret_name" "$guardian_secret_name" \
-                "$probe_secret_name" "$membership_secret_name" "$firebase_secret_name" "$state_secret_name" \
-                "$notification_secret_name" "$settlement_secret_name" "$bundler_secret_name" \
-                "$job_secret_name" "$service_auth_secret_name" "$push_secret_name"; do
+              for created in "${created_secret_names[@]}"; do
                 # The generated secret name is intentionally expanded by the runner.
                 # shellcheck disable=SC2029
                 if [ -n "$created" ] && [ "$STAGING_GATEWAY_LOCK_HELD" = true ]; then
@@ -699,6 +697,9 @@ jobs:
                     # Never remove a generated secret while any authoritative
                     # terminal Spec still references it, including a third Spec.
                     if ! ssh jeeb-staging "set -euo pipefail
+                      if ! docker secret inspect '$created' >/dev/null 2>&1; then
+                        exit 0
+                      fi
                       if docker service inspect '$service' \\
                         --format '{{range .Spec.TaskTemplate.ContainerSpec.Secrets}}{{.SecretName}}{{\"\\n\"}}{{end}}' \\
                         | grep -Fxq '$created'; then
@@ -715,7 +716,9 @@ jobs:
               if [ "$STAGING_GATEWAY_LOCK_HELD" = true ]; then
                 staging_gateway_lock_release || lock_cleanup_ok=false
               fi
-              [ "$lock_cleanup_ok" = true ] || status=98
+              if [ "$lock_cleanup_ok" != true ] && [ "$status" -eq 0 ]; then
+                status=98
+              fi
               if ! append_sanitized_transaction_summary; then
                 [ "$status" -ne 0 ] || status=99
               fi
@@ -723,9 +726,30 @@ jobs:
               exit "$status"
             }
             trap finish_deploy EXIT
+            validate_docker_secret_name() {
+              local secret_name=$1
+              [ "${#secret_name}" -le 64 ] || {
+                echo '::error::Generated Docker secret name exceeds the 64-character Swarm limit.' >&2
+                return 1
+              }
+              [[ "$secret_name" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$ ]] || {
+                echo '::error::Generated Docker secret name is outside the managed character contract.' >&2
+                return 1
+              }
+            }
+            validate_planned_secret_names() {
+              local planned
+              for planned in "$jwt_secret_name" "$umjwt_secret_name" "$guardian_secret_name" \
+                "$probe_secret_name" "$membership_secret_name" "$firebase_secret_name" "$state_secret_name" \
+                "$notification_secret_name" "$settlement_secret_name" "$bundler_secret_name" \
+                "$job_secret_name" "$service_auth_secret_name" "$push_secret_name"; do
+                [ -z "$planned" ] || validate_docker_secret_name "$planned"
+              done
+            }
             stream_secret() {
               # The generated secret name is intentionally expanded by the runner.
               # shellcheck disable=SC2029
+              created_secret_names+=("$1")
               printf '%s' "$2" | ssh jeeb-staging "docker secret create '$1' - >/dev/null"
             }
             stream_content_addressed_secret_file() {
@@ -735,16 +759,20 @@ jobs:
                 return 0
               fi
               # shellcheck disable=SC2029
+              created_secret_names+=("$1")
               ssh jeeb-staging "docker secret create '$1' - >/dev/null" < "$2"
             }
             firebase_digest=$(printf '%s' "$JEEB_FIREBASE_JSON" \
               | python3 scripts/validate-firebase-service-account.py \
                   --materialize "$firebase_file")
             [[ "$firebase_digest" =~ ^[0-9a-f]{64}$ ]]
-            firebase_secret_name="jeeb_staging_gateway_firebase_${firebase_digest}"
+            firebase_secret_suffix=$(python3 -c 'import base64, sys; print(base64.urlsafe_b64encode(bytes.fromhex(sys.argv[1])).decode("ascii").rstrip("="))' "$firebase_digest")
+            [[ "$firebase_secret_suffix" =~ ^[A-Za-z0-9_-]{43}$ ]]
+            firebase_secret_name="jeeb_staging_fb_${firebase_secret_suffix}"
             if [ "$DEPLOYMENT_MODE" != devtool-reassert ]; then
               (umask 077; printf '%s' "$JEEB_STAGING_WSS_PROBE_MINT_KEY" > "$probe_key_file")
             fi
+            validate_planned_secret_names
             staging_gateway_lock_acquire
             stream_content_addressed_secret_file "$firebase_secret_name" "$firebase_file"
             if [ "$DEPLOYMENT_MODE" != devtool-reassert ]; then

@@ -428,7 +428,10 @@ jobs:
             | python3 scripts/validate-firebase-service-account.py \
                 --materialize "$firebase_file")
           [[ "$firebase_digest" =~ ^[0-9a-f]{64}$ ]]
-          FIREBASE_SECRET="jeeb_gateway_firebase_${firebase_digest}"
+          firebase_secret_suffix=$(python3 -c 'import base64, sys; print(base64.urlsafe_b64encode(bytes.fromhex(sys.argv[1])).decode("ascii").rstrip("="))' "$firebase_digest")
+          [[ "$firebase_secret_suffix" =~ ^[A-Za-z0-9_-]{43}$ ]]
+          FIREBASE_SECRET="jeeb_gateway_fb_${firebase_secret_suffix}"
+          [ "${#FIREBASE_SECRET}" -le 64 ]
           : "${STATE_SERVICE_TOKEN:?JEEB_STATE_SERVICE_TOKEN secret is required}"
           : "${DELIVERY_OWNER_TOKEN:?DELIVERY_SERVICE_TOKEN secret is required}"
           : "${NOTIFICATION_OWNER_TOKEN:?NOTIFICATION_SERVICE_TOKEN secret is required}"

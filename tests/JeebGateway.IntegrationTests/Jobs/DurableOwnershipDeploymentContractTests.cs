@@ -194,12 +194,13 @@ public sealed class DurableOwnershipDeploymentContractTests
     }
 
     [Theory]
-    [InlineData("deploy-to-jeeb.yml", "jeeb_gateway_firebase_${firebase_digest}")]
-    [InlineData("jeeb-production-deploy.yml", "jeeb_production_gateway_firebase_${firebase_digest}")]
-    [InlineData("jeeb-staging-deploy.yml", "jeeb_staging_gateway_firebase_${firebase_digest}")]
+    [InlineData("deploy-to-jeeb.yml", "jeeb_gateway_fb_${firebase_secret_suffix}", "jeeb_gateway_fb_")]
+    [InlineData("jeeb-production-deploy.yml", "jeeb_production_fb_${firebase_secret_suffix}", "jeeb_production_fb_")]
+    [InlineData("jeeb-staging-deploy.yml", "jeeb_staging_fb_${firebase_secret_suffix}", "jeeb_staging_fb_")]
     public void Every_rollout_rotates_and_post_verifies_one_content_addressed_firebase_mount(
         string workflowName,
-        string expectedSecretName)
+        string expectedSecretName,
+        string expectedPrefix)
     {
         var workflow = Workflow(workflowName);
         var credentialValidator = File.ReadAllText(Path.Combine(
@@ -209,9 +210,14 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().Contain("scripts/validate-firebase-service-account.py");
         workflow.Should().Contain("Firebase__Chat__ServiceAccountKeyPath");
         workflow.Should().Contain("/run/secrets/firebase_admin_json");
+        workflow.Should().Contain("urlsafe_b64encode(bytes.fromhex");
+        workflow.Should().Contain("[A-Za-z0-9_-]{43}");
         credentialValidator.Should().Contain("credential type must be service_account");
         credentialValidator.Should().Contain("credential project_id must be");
         workflow.Should().NotContain("gateway_firebase_${GITHUB_RUN_ID}");
+        workflow.Should().NotContain("gateway_firebase_${firebase_digest}");
+        (expectedPrefix.Length + 43).Should().BeLessThanOrEqualTo(64,
+            "Docker secret names are capped at 64 characters");
         var preflight = workflow.IndexOf(
             "scripts/validate-firebase-service-account.py", StringComparison.Ordinal);
         var firstExternalMutation = new[]
@@ -229,6 +235,7 @@ public sealed class DurableOwnershipDeploymentContractTests
                 FindRepositoryRoot(), "scripts", "staging-gateway-candidate-contract.jq"));
             candidateContract.Should().Contain(
                 "[.TaskTemplate.ContainerSpec.Secrets[]?\n    | select(.File.Name == \"firebase_admin_json\")] | length) == 1");
+            candidateContract.Should().Contain("^jeeb_staging_fb_[A-Za-z0-9_-]{43}$");
         }
         else
         {
@@ -236,6 +243,45 @@ public sealed class DurableOwnershipDeploymentContractTests
             workflow.Should().Contain("grep -Fxc firebase_admin_json");
             workflow.Should().Contain(":65532:65532:256");
         }
+    }
+
+    [Fact]
+    public void Firebase_content_addressed_secret_names_fit_docker_swarm_name_limit()
+    {
+        var repositoryRoot = FindRepositoryRoot();
+        var workflows = new[]
+        {
+            ("deploy-to-jeeb.yml", "jeeb_gateway_fb_", "jeeb_gateway_firebase_"),
+            ("jeeb-production-deploy.yml", "jeeb_production_fb_", "jeeb_production_gateway_firebase_"),
+            ("jeeb-staging-deploy.yml", "jeeb_staging_fb_", "jeeb_staging_gateway_firebase_")
+        };
+
+        foreach (var (workflowName, prefix, retiredPrefix) in workflows)
+        {
+            var workflow = File.ReadAllText(Path.Combine(repositoryRoot, ".github", "workflows", workflowName));
+            workflow.Should().Contain($"{prefix}${{firebase_secret_suffix}}");
+            workflow.Should().NotContain($"{retiredPrefix}${{firebase_digest}}",
+                "64 hex chars plus the old prefix exceeds Docker's 64-character secret-name limit");
+            (prefix.Length + 43).Should().BeLessThanOrEqualTo(64);
+            (retiredPrefix.Length + 64).Should().BeGreaterThan(64);
+        }
+    }
+
+    [Fact]
+    public void Staging_cleanup_skips_uncreated_secrets_and_preserves_original_failure_status()
+    {
+        var workflow = Workflow("jeeb-staging-deploy.yml");
+        var cleanup = ShellFunction(workflow, "finish_deploy");
+        var streamSecret = ShellFunction(workflow, "stream_secret");
+        var streamContentAddressedSecret = ShellFunction(workflow, "stream_content_addressed_secret_file");
+
+        workflow.Should().Contain("created_secret_names=()");
+        streamSecret.Should().Contain("created_secret_names+=(\"$1\")");
+        streamContentAddressedSecret.Should().Contain("created_secret_names+=(\"$1\")");
+        cleanup.Should().Contain("for created in \"${created_secret_names[@]}\"");
+        cleanup.Should().Contain("if ! docker secret inspect '$created' >/dev/null 2>&1; then");
+        cleanup.Should().Contain("if [ \"$lock_cleanup_ok\" != true ] && [ \"$status\" -eq 0 ]; then");
+        cleanup.Should().NotContain("[ \"$lock_cleanup_ok\" = true ] || status=98");
     }
 
     [Fact]

@@ -251,7 +251,10 @@ jobs:
             | python3 scripts/validate-firebase-service-account.py \
                 --materialize "$firebase_file")
           [[ "$firebase_digest" =~ ^[0-9a-f]{64}$ ]]
-          firebase_secret_name="jeeb_production_gateway_firebase_${firebase_digest}"
+          firebase_secret_suffix=$(python3 -c 'import base64, sys; print(base64.urlsafe_b64encode(bytes.fromhex(sys.argv[1])).decode("ascii").rstrip("="))' "$firebase_digest")
+          [[ "$firebase_secret_suffix" =~ ^[A-Za-z0-9_-]{43}$ ]]
+          firebase_secret_name="jeeb_production_fb_${firebase_secret_suffix}"
+          [ "${#firebase_secret_name}" -le 64 ]
           # The content-addressed name is locally constrained and intentionally expanded.
           # shellcheck disable=SC2029
           if ! ssh jeeb-production \
@@ -267,7 +270,7 @@ jobs:
           image=$1
           remote_docker_config=$2
           firebase_secret_name=$3
-          [[ "$firebase_secret_name" =~ ^jeeb_production_gateway_firebase_[0-9a-f]{64}$ ]]
+          [[ "$firebase_secret_name" =~ ^jeeb_production_fb_[A-Za-z0-9_-]{43}$ ]]
           service=jeeb-production-jeeb-gateway
           base_url=http://127.0.0.1:10000
           candidate_started=false

@@ -53,7 +53,7 @@ cat > "$candidate" <<JSON
       ],
       "Secrets": [{
         "SecretID":"firebaseid",
-        "SecretName":"jeeb_staging_gateway_firebase_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "SecretName":"jeeb_staging_fb_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "File":{"Name":"firebase_admin_json","UID":"65532","GID":"65532","Mode":256}
       }]
     },
@@ -208,9 +208,9 @@ reject_mutant 'missing Firebase credential path' \
 reject_mutant 'missing Firebase secret target' \
   'del(.TaskTemplate.ContainerSpec.Secrets[] | select(.File.Name == "firebase_admin_json"))'
 reject_mutant 'stale duplicate Firebase secret target' \
-  '.TaskTemplate.ContainerSpec.Secrets += [{SecretID:"stale",SecretName:"jeeb_staging_gateway_firebase_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",File:{Name:"firebase_admin_json",UID:"65532",GID:"65532",Mode:256}}]'
+  '.TaskTemplate.ContainerSpec.Secrets += [{SecretID:"stale",SecretName:"jeeb_staging_fb_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",File:{Name:"firebase_admin_json",UID:"65532",GID:"65532",Mode:256}}]'
 reject_mutant 'run-addressed Firebase secret source' \
-  '(.TaskTemplate.ContainerSpec.Secrets[] | select(.File.Name == "firebase_admin_json")).SecretName = "jeeb_staging_gateway_firebase_123_1"'
+  '(.TaskTemplate.ContainerSpec.Secrets[] | select(.File.Name == "firebase_admin_json")).SecretName = "jeeb_staging_fb_123_1"'
 reject_mutant 'legacy named Firestore selector' \
   '.TaskTemplate.ContainerSpec.Env += ["Firestore__DatabaseId=staging"]'
 reject_mutant 'colon-delimited stale Chat activation' \

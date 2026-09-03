@@ -177,13 +177,17 @@ for name, source in workflows.items():
             fail(f"{name} does not enforce Firebase credential marker {marker}")
 
 content_addressed_prefix = {
-    "deploy-to-jeeb.yml": "jeeb_gateway_firebase_${firebase_digest}",
-    "jeeb-production-deploy.yml": "jeeb_production_gateway_firebase_${firebase_digest}",
-    "jeeb-staging-deploy.yml": "jeeb_staging_gateway_firebase_${firebase_digest}",
+    "deploy-to-jeeb.yml": "jeeb_gateway_fb_${firebase_secret_suffix}",
+    "jeeb-production-deploy.yml": "jeeb_production_fb_${firebase_secret_suffix}",
+    "jeeb-staging-deploy.yml": "jeeb_staging_fb_${firebase_secret_suffix}",
 }
 for name, prefix in content_addressed_prefix.items():
     if prefix not in workflows[name]:
         fail(f"{name} does not content-address Firebase credential rotation")
+    if "urlsafe_b64encode(bytes.fromhex" not in workflows[name]:
+        fail(f"{name} does not preserve the full SHA-256 digest in a Docker-safe suffix")
+    if "[A-Za-z0-9_-]{43}" not in workflows[name]:
+        fail(f"{name} does not validate the Docker-safe Firebase digest suffix")
 
 for name in ("deploy-to-jeeb.yml", "jeeb-production-deploy.yml"):
     source = workflows[name]

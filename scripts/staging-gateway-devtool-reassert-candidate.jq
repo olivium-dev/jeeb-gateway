@@ -79,6 +79,6 @@ and $firebase_secret[0][0].File.GID == "65532"
 and $firebase_secret[0][0].File.Mode == 256
 and ($firebase_secret[0][0].SecretID | test("^[a-z0-9]+$"))
 and ($firebase_secret[0][0].SecretName
-  | test("^jeeb_staging_gateway_firebase_[0-9a-f]{64}$"))
+  | test("^jeeb_staging_fb_[A-Za-z0-9_-]{43}$"))
 and (incumbent_devtool_keys | length) == (incumbent_devtool_keys | unique | length)
 and . == patch_devtool($incumbent[0])

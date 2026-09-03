@@ -132,7 +132,7 @@ def forbidden_payment_gateway_reference:
     and .File.GID == "65532"
     and .File.Mode == 256
     and (.SecretID | test("^[a-z0-9]+$"))
-    and (.SecretName | test("^jeeb_staging_gateway_firebase_[0-9a-f]{64}$"))
+    and (.SecretName | test("^jeeb_staging_fb_[A-Za-z0-9_-]{43}$"))
   )
   and $environment["featureflags__notificationdurablewrite__enabled"] == "true"
   and $environment["featureflags__notificationoutboxmode"] == "upstream-authority"
