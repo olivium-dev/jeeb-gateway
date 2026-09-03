@@ -191,8 +191,10 @@ require(
 
 def validate_bootstrap_workflow(text):
     required = (
-        "Owner block - forward-only promotion pending",
-        "::error::Forward-only promotion pending owner-approved failure handling",
+        "Require supported protected staging mode",
+        "::error::Unsupported protected staging deployment mode.",
+        "if: ${{ inputs.provider_expand_verified != true }}",
+        "Require designated staging owner",
         '[ "$GITHUB_REF_PROTECTED" = true ]',
         '[ "$(hostname -s)" = "olivium-ephemerals" ]',
         'grep -Fxc "192.168.2.20"',
@@ -350,15 +352,28 @@ def validate_bootstrap_workflow(text):
         'state_secret_name="jeeb_staging_gateway_state_token_',
         'jwt_secret_name="jeeb_staging_gateway_jwt_',
         'probe_secret_name="jeeb_staging_gateway_wss_probe_',
-        'firebase_secret_name="jeeb_staging_gateway_firebase_',
     ):
         if secret_name not in secret_name_block:
             raise ValueError(f"run-scoped secret escaped the non-devtool gate: {secret_name}")
     stream_gate = text.index('if [ "$DEPLOYMENT_MODE" != devtool-reassert ]; then', text.index('staging_gateway_lock_acquire'))
     stream_end = text.index('            unset JEEB_STATE_SERVICE_TOKEN', stream_gate)
     stream_block = text[stream_gate:stream_end]
-    if 'stream_secret "$state_secret_name"' not in stream_block or 'stream_secret_file "$firebase_secret_name"' not in stream_block:
+    if 'stream_secret "$state_secret_name"' not in stream_block:
         raise ValueError("run-scoped secret creation escaped the non-devtool gate")
+    firebase_validation = text.index(
+        'python3 scripts/validate-firebase-service-account.py',
+        text.index('service=jeeb-staging-jeeb-gateway'),
+    )
+    firebase_name = text.index(
+        'firebase_secret_name="jeeb_staging_gateway_firebase_${firebase_digest}"',
+        firebase_validation,
+    )
+    firebase_stream = text.index(
+        'stream_content_addressed_secret_file "$firebase_secret_name" "$firebase_file"',
+        firebase_name,
+    )
+    if not firebase_validation < firebase_name < firebase_stream < stream_gate:
+        raise ValueError("Firebase validation/content-addressed rotation does not cover devtool-reassert")
     exact_devtool_builder = text.index('if [ "$DEPLOYMENT_MODE" = devtool-reassert ]; then', text.index('desired_env_json='))
     generic_builder = text.index('--slurpfile desired_env "$desired_env_json"', exact_devtool_builder)
     exact_delta = text.index('-f scripts/staging-gateway-devtool-reassert-candidate.jq', generic_builder)
@@ -370,18 +385,19 @@ def validate_bootstrap_workflow(text):
         if text.count(false_lock) != 1 or true_lock in text:
             raise ValueError(f"staging bootstrap authority drifted: {authority}")
 
-    blocker = text.index("Owner block - forward-only promotion pending")
-    blocker_exit = text.index("exit 1", blocker)
+    mode_gate = text.index("Require supported protected staging mode")
+    provider_gate = text.index("Hold caller activation until relay expand is verified")
+    owner_gate = text.index("Require designated staging owner")
     first_external_mutation = min(
-        text.index("docker/login-action@", blocker),
-        text.index("docker/build-push-action@", blocker),
-        text.index("ssh jeeb-staging", blocker),
-        text.index("/services/$service_id/update?version=$expected_version", blocker),
+        text.index("docker/login-action@", mode_gate),
+        text.index("docker/build-push-action@", mode_gate),
+        text.index("ssh jeeb-staging", mode_gate),
+        text.index("/services/$service_id/update?version=$expected_version", mode_gate),
     )
-    if not blocker < blocker_exit < first_external_mutation:
-        raise ValueError("loud owner block does not precede every external mutation")
+    if not mode_gate < provider_gate < owner_gate < first_external_mutation:
+        raise ValueError("mode, provider, and owner gates do not precede every external mutation")
     if "if: always()" in text:
-        raise ValueError("an always() step can bypass the owner block")
+        raise ValueError("an always() step can bypass the protected staging gates")
     host_assertion = text.index("Assert exact staging host")
     topology_preflight = text.index("Preflight canonical Swarm ingress topology")
     registry_login = text.index("docker/login-action@")
@@ -471,8 +487,8 @@ validate_shared_staging_lock(workflow, documents["state-auth workflow"])
 
 negative_controls = (
     (
-        "owner block removed",
-        workflow.replace("Owner block - forward-only promotion pending", "Promotion gate", 1),
+        "supported-mode gate removed",
+        workflow.replace("Require supported protected staging mode", "Promotion gate", 1),
     ),
     (
         "protected-ref assertion removed",

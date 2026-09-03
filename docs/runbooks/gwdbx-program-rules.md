@@ -267,6 +267,13 @@ committed false in Production; it is not a gwdbx ownership cutover and therefore
 adds `PushNotificationServiceApi:GatewayApiKey` and `PushNotificationServiceApi:GatewayApiKeyFile` as
 `setting -` entries. They are service-authentication settings, not gateway-DB extraction cutovers.
 
+**2026-09-03 Jeeb Firebase v1 reconciliation.** The six scalar fields under
+`JeebFirebaseContract` are `setting -` entries. Together they mirror the
+non-secret cross-repository identity and ownership contract; they are not
+gateway-DB extraction flags. `FeatureFlags:UseUpstream:Chat` remains the
+separate activation control, and ADR-0013 permanently pins
+`FeatureFlags:PushDispatchMode` to the notification-service hand-over rung.
+
 `FRAMEWORK_MODE_TYPES` is now only `BoundedChannelFullMode`, `FullMode` (both `System.Threading.Channels`),
 `FileMode` (`System.IO`), `SameSiteMode` (ASP.NET cookie enum) and `PushDeliveryMode` (a local enum in
 `Notifications/PushSilencePolicy.cs`, never bound to configuration). **Re-verify against the binding sites before

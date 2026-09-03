@@ -12,9 +12,10 @@ namespace JeebGateway.Services.Dispatch;
 /// <para><b>Durability model.</b>  The outbox binding is mode-gated, never Postgres: in-memory today (MSI
 /// sets no override) or StateServiceNotificationDispatchOutbox at NotificationOutboxMode=upstream-authority.</para>
 ///
-/// <para><b>Push transport.</b>  Hands over to notification-service through
-/// <see cref="IGenericEventDispatcher"/>; at upstream-authority it posts the push service
-/// directly instead. The in-gateway push stack it used to call is deleted.</para>
+/// <para><b>Push ownership.</b> Hands durable delivery to notification-service through
+/// <see cref="IGenericEventDispatcher"/>. Startup pins <c>PushDispatchMode=local</c> and
+/// the gateway direct-send guard denies the legacy relay branch; push-notification is
+/// only the downstream FCM relay used by notification-service.</para>
 /// </summary>
 public sealed class JeebNotificationDispatcher : IJeebNotificationDispatcher
 {
@@ -44,8 +45,9 @@ public sealed class JeebNotificationDispatcher : IJeebNotificationDispatcher
         _phase = migration?.Value.PushDispatch ?? GwdbxMigrationPhase.Local;
     }
 
-    // W3-14: "local" keeps the in-gateway stack; only "upstream-authority" re-points, because a
-    // dual-write rung would send each notification twice (the D1 duplicate-producer defect).
+    // Legacy migration branch retained for binary compatibility only. Program startup
+    // requires local, where notification-service is the sole durable producer; the
+    // direct-send HTTP guard independently denies this branch if configuration drifts.
     private bool DispatchesUpstream =>
         _phase >= GwdbxMigrationPhase.UpstreamAuthority && _servicePush is not null;
 

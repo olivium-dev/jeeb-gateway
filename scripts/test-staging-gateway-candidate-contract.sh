@@ -12,6 +12,7 @@ otp_cutover="$test_root/otp-cutover.json"
 incumbent="$test_root/incumbent.json"
 devtool_incumbent="$test_root/devtool-incumbent.json"
 devtool_candidate="$test_root/devtool-candidate.json"
+firebase_secret="$test_root/firebase-secret.json"
 image=repo@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 network_id=networkabc
 
@@ -37,8 +38,24 @@ cat > "$candidate" <<JSON
         "Features__Swagger__Enabled=true",
         "Jwt__SigningKeyFile=/run/secrets/jeeb_gateway_jwt",
         "ServiceNotificationClient__ServiceTokenFile=/run/secrets/notification_service_token",
-        "Features__RealtimeWebSocketProxy__Enabled=false"
-      ]
+        "Features__RealtimeWebSocketProxy__Enabled=false",
+        "JeebFirebaseContract__SchemaVersion=1",
+        "JeebFirebaseContract__ProjectId=jeeb-5a293",
+        "JeebFirebaseContract__ProjectNumber=1051234312170",
+        "JeebFirebaseContract__FirestoreDatabaseId=(default)",
+        "JeebFirebaseContract__ChatEnabled=true",
+        "JeebFirebaseContract__PushProducer=notification-service",
+        "Firebase__Chat__ProjectId=jeeb-5a293",
+        "Firebase__Chat__ServiceAccountKeyPath=/run/secrets/firebase_admin_json",
+        "FeatureFlags__NotificationDurableWrite__Enabled=true",
+        "FeatureFlags__NotificationOutboxMode=upstream-authority",
+        "FeatureFlags__PushDispatchMode=local"
+      ],
+      "Secrets": [{
+        "SecretID":"firebaseid",
+        "SecretName":"jeeb_staging_gateway_firebase_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "File":{"Name":"firebase_admin_json","UID":"65532","GID":"65532","Mode":256}
+      }]
     },
     "Networks": [{"Target":"$network_id"}]
   },
@@ -51,6 +68,8 @@ cat > "$candidate" <<JSON
   "RollbackConfig": {"Order":"start-first","FailureAction":"pause"}
 }
 JSON
+jq '[.TaskTemplate.ContainerSpec.Secrets[] | select(.File.Name == "firebase_admin_json")]' \
+  "$candidate" > "$firebase_secret"
 
 validate() {
   local document=$1 mode=${2:-normal} incumbent_document=${3:-$candidate}
@@ -101,7 +120,7 @@ jq '
     "ServiceAuth__Caller=jeeb-gateway",
     "ServiceAuth__SigningKeyFile=/run/secrets/jeeb_gateway_service_auth"
   ]
-  | .TaskTemplate.ContainerSpec.Secrets = [{
+  | .TaskTemplate.ContainerSpec.Secrets += [{
       SecretID:"secretid",SecretName:"rotated-service-auth",
       File:{Name:"jeeb_gateway_service_auth",UID:"65532",GID:"65532",Mode:256}
     }]
@@ -184,6 +203,18 @@ reject_mutant 'Voice activated' \
   '(.TaskTemplate.ContainerSpec.Env[9]) = "FeatureFlags__UseUpstream__Voice=true"'
 reject_mutant 'case-insensitive duplicate environment key' \
   '.TaskTemplate.ContainerSpec.Env += ["DEMousers__enabled=false"]'
+reject_mutant 'missing Firebase credential path' \
+  'del(.TaskTemplate.ContainerSpec.Env[] | select(startswith("Firebase__Chat__ServiceAccountKeyPath=")))'
+reject_mutant 'missing Firebase secret target' \
+  'del(.TaskTemplate.ContainerSpec.Secrets[] | select(.File.Name == "firebase_admin_json"))'
+reject_mutant 'stale duplicate Firebase secret target' \
+  '.TaskTemplate.ContainerSpec.Secrets += [{SecretID:"stale",SecretName:"jeeb_staging_gateway_firebase_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",File:{Name:"firebase_admin_json",UID:"65532",GID:"65532",Mode:256}}]'
+reject_mutant 'run-addressed Firebase secret source' \
+  '(.TaskTemplate.ContainerSpec.Secrets[] | select(.File.Name == "firebase_admin_json")).SecretName = "jeeb_staging_gateway_firebase_123_1"'
+reject_mutant 'legacy named Firestore selector' \
+  '.TaskTemplate.ContainerSpec.Env += ["Firestore__DatabaseId=staging"]'
+reject_mutant 'colon-delimited stale Chat activation' \
+  '.TaskTemplate.ContainerSpec.Env += ["FeatureFlags:UseUpstream:Chat=true"]'
 reject_mutant 'extra task network' \
   '.TaskTemplate.Networks += [{"Target":"othernetwork"}]'
 reject_mutant 'staging trusts a forwarded proxy' \
@@ -255,23 +286,48 @@ jq '
   | .UpdateConfig = {Parallelism:3,Monitor:1,FailureAction:"pause",Order:"stop-first",MaxFailureRatio:0.25}
   | .RollbackConfig = {Parallelism:2,Monitor:2,FailureAction:"continue",Order:"stop-first",MaxFailureRatio:0.5}
 ' "$candidate" > "$devtool_incumbent"
-jq --arg image "$image" '
-  def env_key: (split("=")[0] | ascii_downcase);
+jq --arg image "$image" --slurpfile firebase_secret "$firebase_secret" '
+  def env_key: (split("=")[0] | ascii_downcase | gsub(":"; "__"));
   def target: env_key as $key | [
     "superlogin__openmode","demousers__enabled",
-    "features__devendpoints__enabled","features__swagger__enabled"
+    "features__devendpoints__enabled","features__swagger__enabled",
+    "jeebfirebasecontract__schemaversion","jeebfirebasecontract__projectid",
+    "jeebfirebasecontract__projectnumber","jeebfirebasecontract__firestoredatabaseid",
+    "jeebfirebasecontract__chatenabled","jeebfirebasecontract__pushproducer",
+    "firebase__chat__projectid","firebase__chat__serviceaccountkeypath",
+    "featureflags__notificationdurablewrite__enabled",
+    "featureflags__notificationoutboxmode","featureflags__pushdispatchmode",
+    "firestore__databaseid","firebase__firestoredatabaseid",
+    "firebase__chat__firestoredatabaseid"
   ] | index($key) != null;
   .TaskTemplate.ContainerSpec.Image = $image
   | .TaskTemplate.ContainerSpec.Env = (
       (.TaskTemplate.ContainerSpec.Env | map(select(target | not))) + [
         "SuperLogin__OpenMode=true","DemoUsers__Enabled=true",
-        "Features__DevEndpoints__Enabled=true","Features__Swagger__Enabled=true"
+        "Features__DevEndpoints__Enabled=true","Features__Swagger__Enabled=true",
+        "JeebFirebaseContract__SchemaVersion=1",
+        "JeebFirebaseContract__ProjectId=jeeb-5a293",
+        "JeebFirebaseContract__ProjectNumber=1051234312170",
+        "JeebFirebaseContract__FirestoreDatabaseId=(default)",
+        "JeebFirebaseContract__ChatEnabled=true",
+        "JeebFirebaseContract__PushProducer=notification-service",
+        "Firebase__Chat__ProjectId=jeeb-5a293",
+        "Firebase__Chat__ServiceAccountKeyPath=/run/secrets/firebase_admin_json",
+        "FeatureFlags__NotificationDurableWrite__Enabled=true",
+        "FeatureFlags__NotificationOutboxMode=upstream-authority",
+        "FeatureFlags__PushDispatchMode=local"
       ])
+  | .TaskTemplate.ContainerSpec.Secrets = (
+      (.TaskTemplate.ContainerSpec.Secrets
+        | map(select(.File.Name != "firebase_admin_json")))
+      + $firebase_secret[0]
+    )
   | .UpdateConfig += {Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"start-first"}
   | .RollbackConfig += {Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"start-first"}
 ' "$devtool_incumbent" > "$devtool_candidate"
 validate "$devtool_candidate" devtool-reassert "$devtool_incumbent"
 jq -e --arg image "$image" --slurpfile incumbent "$devtool_incumbent" \
+  --slurpfile firebase_secret "$firebase_secret" \
   -f "$repository_root/scripts/staging-gateway-devtool-reassert-candidate.jq" \
   "$devtool_candidate" >/dev/null
 
@@ -301,6 +357,7 @@ for unsafe_filter in \
   '.RollbackConfig.MaxFailureRatio = 0.75'; do
   jq "$unsafe_filter" "$devtool_candidate" > "$mutant"
   if jq -e --arg image "$image" --slurpfile incumbent "$devtool_incumbent" \
+    --slurpfile firebase_secret "$firebase_secret" \
     -f "$repository_root/scripts/staging-gateway-devtool-reassert-candidate.jq" \
     "$mutant" >/dev/null; then
     echo "devtool-reassert accepted unrelated incumbent drift: $unsafe_filter" >&2
@@ -311,10 +368,11 @@ done
 jq '.TaskTemplate.ContainerSpec.Env += ["SUPERLOGIN__OpenMode=true"]' \
   "$devtool_incumbent" > "$mutant"
 if jq -e --arg image "$image" --slurpfile incumbent "$mutant" \
+  --slurpfile firebase_secret "$firebase_secret" \
   -f "$repository_root/scripts/staging-gateway-devtool-reassert-candidate.jq" \
   "$devtool_candidate" >/dev/null; then
   echo 'devtool-reassert accepted duplicate target rows in the incumbent' >&2
   exit 1
 fi
 
-echo 'staging gateway candidate semantic contract tests: PASS (mode flags preserved; exact Dev Tool delta with 15 negative controls)'
+echo 'staging gateway candidate semantic contract tests: PASS (mode flags preserved; exact Dev Tool delta with 19 negative controls)'

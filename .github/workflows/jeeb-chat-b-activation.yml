@@ -1,0 +1,315 @@
+name: Jeeb Chat B activation
+
+"on":
+  workflow_dispatch:
+    inputs:
+      target_environment:
+        description: Protected Jeeb environment to activate
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+      expected_uid:
+        description: Existing non-privileged Jeeb user id for the post-activation smoke
+        required: true
+        type: string
+      confirm_activation:
+        description: Type activate-jeeb-chat-staging or activate-jeeb-chat-production
+        required: true
+        type: string
+
+permissions:
+  checks: read
+  contents: read
+
+concurrency:
+  group: jeeb-${{ inputs.target_environment }}-gateway-mutation
+  cancel-in-progress: false
+
+jobs:
+  activation:
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.target_environment }}
+    steps:
+      - name: Require protected source and designated Chat B owner
+        env:
+          CONFIRM_ACTIVATION: ${{ inputs.confirm_activation }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GITHUB_REF_PROTECTED: ${{ github.ref_protected }}
+          REQUESTING_ACTOR: ${{ github.actor }}
+          TARGET_ENVIRONMENT: ${{ inputs.target_environment }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_REPOSITORY" = olivium-dev/jeeb-gateway ]
+          [ "$REQUESTING_ACTOR" = oudaykhaled ]
+          [ "$TRIGGERING_ACTOR" = oudaykhaled ]
+          [ -n "$DEFAULT_BRANCH" ]
+          [ "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH" ]
+          [ "$GITHUB_REF_PROTECTED" = true ]
+          case "$TARGET_ENVIRONMENT" in staging|production) ;; *) exit 64 ;; esac
+          [ "$CONFIRM_ACTIVATION" = "activate-jeeb-chat-$TARGET_ENVIRONMENT" ]
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Validate exact Chat and Firebase contracts
+        run: |
+          set -euo pipefail
+          python3 scripts/validate-jeeb-firebase-contract.py
+          python3 scripts/validate-chat-b-activation-authority.py
+          python3 scripts/test-chat-b-activation-cancellation-contract.py
+          python3 scripts/test-smoke-jeeb-firebase-token-exchange.py
+          bash scripts/test-chat-b-activation-preflight.sh
+
+      - name: Require successful exact-SHA CI
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          checks=$(gh api \
+            -H 'Accept: application/vnd.github+json' \
+            "/repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/check-runs?per_page=100")
+          for required in \
+            audit \
+            build \
+            build-and-test \
+            'Gitleaks Secret Scan' \
+            gwdbx-flag-registry-gate \
+            nswag-freshness \
+            nswag-otp-freshness \
+            provider-boundary-gates \
+            stateless-gate \
+            docker; do
+            state=$(jq -r --arg name "$required" '
+              [.check_runs[] | select(.name == $name)]
+              | sort_by(.started_at)
+              | last
+              | "\(.status):\(.conclusion)"
+            ' <<<"$checks")
+            [ "$state" = completed:success ] || {
+              echo "::error::Exact-SHA check '$required' is not successful ($state)." >&2
+              exit 69
+            }
+          done
+
+      - name: Install pinned cloudflared and configure strict SSH
+        env:
+          SSH_HOST: ${{ secrets.JEEB_CHAT_ACTIVATION_SSH_HOST }}
+          SSH_USER: ${{ secrets.JEEB_CHAT_ACTIVATION_SSH_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.JEEB_CHAT_ACTIVATION_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.JEEB_CHAT_ACTIVATION_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          : "${SSH_HOST:?protected Chat activation SSH host is required}"
+          : "${SSH_USER:?protected Chat activation SSH user is required}"
+          : "${SSH_PRIVATE_KEY:?protected Chat activation SSH key is required}"
+          : "${SSH_KNOWN_HOSTS:?protected Chat activation known-hosts is required}"
+          curl -fsSL --retry 3 -o cloudflared.deb \
+            https://github.com/cloudflare/cloudflared/releases/download/2026.8.2/cloudflared-linux-amd64.deb
+          printf '%s  %s\n' \
+            'c805c7c8102190c04dfc16e3b4cc4acc9007d5b19b3afbcd608ea6fed7645a43' \
+            cloudflared.deb | sha256sum --check --strict
+          sudo dpkg -i cloudflared.deb || sudo apt-get install -f -y
+          install -d -m 700 "$HOME/.ssh"
+          if printf '%s' "$SSH_PRIVATE_KEY" | grep -q '^-----BEGIN'; then
+            printf '%s\n' "$SSH_PRIVATE_KEY" > "$HOME/.ssh/id_ed25519"
+          else
+            printf '%s' "$SSH_PRIVATE_KEY" | base64 --decode > "$HOME/.ssh/id_ed25519"
+          fi
+          chmod 600 "$HOME/.ssh/id_ed25519"
+          printf '%s\n' "$SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 600 "$HOME/.ssh/known_hosts"
+          ssh-keygen -F "$SSH_HOST" -f "$HOME/.ssh/known_hosts" >/dev/null
+          {
+            printf '%s\n' 'Host jeeb-chat-activation'
+            printf '  HostName %s\n' "$SSH_HOST"
+            printf '  User %s\n' "$SSH_USER"
+            printf '%s\n' \
+              '  IdentityFile ~/.ssh/id_ed25519' \
+              '  ProxyCommand cloudflared access ssh --hostname %h' \
+              '  UserKnownHostsFile ~/.ssh/known_hosts' \
+              '  StrictHostKeyChecking yes' \
+              '  ConnectTimeout 20' \
+              '  ServerAliveInterval 10' \
+              '  ServerAliveCountMax 2'
+          } > "$HOME/.ssh/config"
+          chmod 600 "$HOME/.ssh/config"
+
+      - name: Prove exact host provider expand A1 and scoped relay key
+        env:
+          JEEB_PUSH_GATEWAY_API_KEY: ${{ secrets.JEEB_PUSH_GATEWAY_API_KEY }}
+          TARGET_ENVIRONMENT: ${{ inputs.target_environment }}
+        run: |
+          set -euo pipefail
+          : "${JEEB_PUSH_GATEWAY_API_KEY:?protected gateway relay key is required}"
+          [[ "$JEEB_PUSH_GATEWAY_API_KEY" != *[[:space:]]* ]]
+          case "$TARGET_ENVIRONMENT" in
+            staging)
+              expected_host=olivium-ephemerals
+              expected_ip=192.168.2.20
+              gateway_service=jeeb-staging-jeeb-gateway
+              push_service=jeeb-staging-push-notification
+              ;;
+            production)
+              expected_host=jeeb-production
+              expected_ip=192.168.2.120
+              gateway_service=jeeb-production-jeeb-gateway
+              push_service=push-notification
+              ;;
+            *) exit 64 ;;
+          esac
+          ssh jeeb-chat-activation bash -s -- "$expected_host" "$expected_ip" <<'REMOTE'
+          set -euo pipefail
+          [ "$(hostname -s)" = "$1" ]
+          count=$(ip -4 -o addr show scope global \
+            | awk '{split($4,address,"/"); print address[1]}' \
+            | grep -Fxc "$2" || true)
+          [ "$count" -eq 1 ]
+          [ "$(docker info --format '{{.Swarm.LocalNodeState}}')" = active ]
+          [ "$(docker info --format '{{.Swarm.ControlAvailable}}')" = true ]
+          REMOTE
+          key_sha=$(printf '%s' "$JEEB_PUSH_GATEWAY_API_KEY" | sha256sum | awk '{print $1}')
+          ssh jeeb-chat-activation bash -s -- \
+            "$gateway_service" "$push_service" "$key_sha" \
+            < scripts/verify-chat-b-activation-preflight.sh
+
+      - name: Arm cancellation-safe Chat B mutation
+        id: arm
+        run: |
+          set -euo pipefail
+          printf 'armed=true\n' >> "$GITHUB_OUTPUT"
+
+      - name: Activate exact Chat B flag with start-first pause policy
+        id: activate
+        env:
+          TARGET_ENVIRONMENT: ${{ inputs.target_environment }}
+        run: |
+          set -euo pipefail
+          case "$TARGET_ENVIRONMENT" in
+            staging) gateway_service=jeeb-staging-jeeb-gateway ;;
+            production) gateway_service=jeeb-production-jeeb-gateway ;;
+            *) exit 64 ;;
+          esac
+          ssh jeeb-chat-activation bash -s -- "$gateway_service" true <<'REMOTE'
+          set -euo pipefail
+          service=$1
+          desired=$2
+          before_image=$(docker service inspect "$service" \
+            --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')
+          [[ "$before_image" =~ @sha256:[0-9a-f]{64}$ ]]
+          [ "$(docker service inspect "$service" --format '{{.Spec.Mode.Replicated.Replicas}}')" = 1 ]
+          chat_remove=()
+          current_flags=()
+          while IFS= read -r row; do
+            key=${row%%=*}
+            normalized=$(printf '%s' "$key" | sed 's/:/__/g' | tr '[:upper:]' '[:lower:]')
+            if [ "$normalized" = featureflags__useupstream__chat ]; then
+              chat_remove+=(--env-rm "$key")
+              current_flags+=("$row")
+            fi
+          done < <(docker service inspect "$service" \
+            --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}')
+          [ "${#current_flags[@]}" -eq 1 ]
+          [ "${current_flags[0]}" = FeatureFlags__UseUpstream__Chat=false ]
+          docker service update --detach=false \
+            --update-order start-first \
+            --update-parallelism 1 \
+            --update-monitor 30s \
+            --update-failure-action pause \
+            --update-max-failure-ratio 0 \
+            "${chat_remove[@]}" \
+            --env-add "FeatureFlags__UseUpstream__Chat=$desired" \
+            "$service"
+          [ "$(docker service inspect "$service" --format '{{.UpdateStatus.State}}')" = completed ]
+          [ "$(docker service inspect "$service" --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')" = "$before_image" ]
+          flag_count=$(docker service inspect "$service" \
+            --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' \
+            | awk -F= 'tolower($1)=="featureflags__useupstream__chat" {print $0}' \
+            | grep -Fxc 'FeatureFlags__UseUpstream__Chat=true')
+          [ "$flag_count" -eq 1 ]
+          curl -fsS --max-time 10 http://127.0.0.1:10000/health/ready >/dev/null
+          REMOTE
+
+      - name: Prove live Jeeb to Firebase identity exchange
+        id: live_smoke
+        env:
+          JEEB_TOKEN_MINT_KEY: ${{ secrets.JEEB_TOKEN_MINT_KEY }}
+          JEEB_FIREBASE_WEB_API_KEY: ${{ secrets.JEEB_FIREBASE_WEB_API_KEY }}
+          EXPECTED_UID: ${{ inputs.expected_uid }}
+          TARGET_ENVIRONMENT: ${{ inputs.target_environment }}
+        run: |
+          set -euo pipefail
+          case "$TARGET_ENVIRONMENT" in
+            staging) gateway_origin=https://app.jeeb.fds-1.com ;;
+            production) gateway_origin=https://jeeb.fds-1.com ;;
+            *) exit 64 ;;
+          esac
+          python3 scripts/smoke-jeeb-firebase-token-exchange.py \
+            --gateway-origin "$gateway_origin" \
+            --expected-uid "$EXPECTED_UID"
+
+      - name: Forward-fix Chat to A1 after any incomplete activation
+        if: ${{ always() && steps.arm.outputs.armed == 'true' && steps.live_smoke.outcome != 'success' }}
+        env:
+          TARGET_ENVIRONMENT: ${{ inputs.target_environment }}
+        run: |
+          set -euo pipefail
+          case "$TARGET_ENVIRONMENT" in
+            staging) gateway_service=jeeb-staging-jeeb-gateway ;;
+            production) gateway_service=jeeb-production-jeeb-gateway ;;
+            *) exit 64 ;;
+          esac
+          ssh jeeb-chat-activation bash -s -- "$gateway_service" false <<'REMOTE'
+          set -euo pipefail
+          service=$1
+          desired=$2
+          before_image=$(docker service inspect "$service" \
+            --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')
+          [[ "$before_image" =~ @sha256:[0-9a-f]{64}$ ]]
+          [ "$(docker service inspect "$service" --format '{{.Spec.Mode.Replicated.Replicas}}')" = 1 ]
+          chat_remove=()
+          current_flags=()
+          while IFS= read -r row; do
+            key=${row%%=*}
+            normalized=$(printf '%s' "$key" | sed 's/:/__/g' | tr '[:upper:]' '[:lower:]')
+            if [ "$normalized" = featureflags__useupstream__chat ]; then
+              chat_remove+=(--env-rm "$key")
+              current_flags+=("$row")
+            fi
+          done < <(docker service inspect "$service" \
+            --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}')
+          if [ "${#current_flags[@]}" -ne 1 ] \
+            || [ "${current_flags[0]:-}" != FeatureFlags__UseUpstream__Chat=false ]; then
+            docker service update --detach=false \
+              --update-order start-first \
+              --update-parallelism 1 \
+              --update-monitor 30s \
+              --update-failure-action pause \
+              --update-max-failure-ratio 0 \
+              "${chat_remove[@]}" \
+              --env-add "FeatureFlags__UseUpstream__Chat=$desired" \
+              "$service"
+            [ "$(docker service inspect "$service" --format '{{.UpdateStatus.State}}')" = completed ]
+          fi
+          [ "$(docker service inspect "$service" --format '{{.Spec.TaskTemplate.ContainerSpec.Image}}')" = "$before_image" ]
+          flag_count=$(docker service inspect "$service" \
+            --format '{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' \
+            | awk -F= 'tolower($1)=="featureflags__useupstream__chat" {print $0}' \
+            | grep -Fxc 'FeatureFlags__UseUpstream__Chat=false')
+          [ "$flag_count" -eq 1 ]
+          curl -fsS --max-time 10 http://127.0.0.1:10000/health/ready >/dev/null
+          REMOTE
+
+      - name: Require completed activation and live identity proof
+        if: ${{ always() }}
+        env:
+          ACTIVATE_OUTCOME: ${{ steps.activate.outcome }}
+          ARMED: ${{ steps.arm.outputs.armed }}
+          LIVE_SMOKE_OUTCOME: ${{ steps.live_smoke.outcome }}
+        run: |
+          set -euo pipefail
+          [ "$ARMED" = true ]
+          [ "$ACTIVATE_OUTCOME" = success ]
+          [ "$LIVE_SMOKE_OUTCOME" = success ]

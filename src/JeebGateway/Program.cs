@@ -49,6 +49,28 @@ var builder = WebApplication.CreateBuilder(args);
 // Services
 // ---------------------------------------------------------------------------
 
+// One versioned, non-secret Firebase identity/ownership contract for every
+// gateway boot. Environment overlays may repeat these values, but cannot change
+// the project, select a named Firestore database, disable Jeeb chat, or appoint
+// the gateway as a second durable push producer.
+builder.Services
+    .AddOptions<JeebGateway.Configuration.JeebFirebaseContractOptions>()
+    .BindConfiguration(JeebGateway.Configuration.JeebFirebaseContractOptions.SectionName)
+    .Validate(
+        JeebGateway.Configuration.JeebFirebaseContractOptions.IsCanonical,
+        "JeebFirebaseContract must match contracts/jeeb-firebase-v1.json exactly.")
+    .Validate(
+        options => string.Equals(
+            builder.Configuration["Firebase:Chat:ProjectId"],
+            options.ProjectId,
+            StringComparison.Ordinal),
+        "Firebase:Chat:ProjectId must match the canonical Jeeb Firebase project.")
+    .Validate(
+        _ => JeebGateway.Configuration.JeebFirebaseContractOptions
+            .HasNoConflictingDatabaseOverride(builder.Configuration),
+        "Named Firestore database overrides are forbidden; Jeeb chat uses (default).")
+    .ValidateOnStart();
+
 // ---------------------------------------------------------------------------
 // Forwarded headers (PR #32 review B2).
 //
@@ -1126,6 +1148,15 @@ builder.Services
         o => JeebGateway.Migration.GwdbxMigrationOptions.IsKnown(o.PushDispatchMode),
         "FeatureFlags:PushDispatchMode must be one of: "
             + JeebGateway.Migration.GwdbxMigrationOptions.LadderValues + ".")
+    // ADR-0013 — the historical upstream rung dials push-notification directly and is now
+    // permanently invalid. The local rung is the durable notification-service hand-over;
+    // pinning it at host start turns stale Swarm overlays into a loud boot failure instead of
+    // silently losing dispatches behind the unconditional outbound guard.
+    .Validate(
+        o => JeebGateway.Migration.GwdbxMigrationOptions.PhaseOf(o.PushDispatchMode)
+                is JeebGateway.Migration.GwdbxMigrationPhase.Local,
+        "FeatureFlags:PushDispatchMode is pinned to \"local\" (ADR-0013): "
+            + "notification-service is the sole durable push producer.")
     // G-20 — from dual-write-local-read up the mirror uploads export artifacts, so boot
     // fails closed rather than reaching cdn without an encryption key.
     .Validate(
@@ -1214,15 +1245,18 @@ builder.Services
 // Firebase chat custom-token mint (POST /v1/chat/firebase-token) — the identity hop
 // that lets the client read its own thread straight from Firestore instead of
 // re-fetching it over REST. The signing key is referenced by absolute HOST path in
-// configuration and is never committed; when unconfigured the route reports 503 and
-// nothing else changes. See FirebaseCustomTokenMinter for the credential-locality
-// guards and the project pinning.
+// configuration and is never committed. Deployed environments always set that path;
+// the hosted validator parses the credential during startup, so readiness cannot turn
+// green with a missing, malformed, or cross-project mount. Local development may leave
+// the path empty, in which case the authenticated route reports 503.
 builder.Services.Configure<JeebGateway.Chat.Firebase.FirebaseCustomTokenOptions>(
     builder.Configuration.GetSection(
         JeebGateway.Chat.Firebase.FirebaseCustomTokenOptions.SectionName));
-builder.Services.AddSingleton<
-    JeebGateway.Chat.Firebase.IFirebaseCustomTokenMinter,
-    JeebGateway.Chat.Firebase.FirebaseCustomTokenMinter>();
+builder.Services.AddSingleton<JeebGateway.Chat.Firebase.FirebaseCustomTokenMinter>();
+builder.Services.AddSingleton<JeebGateway.Chat.Firebase.IFirebaseCustomTokenMinter>(services =>
+    services.GetRequiredService<JeebGateway.Chat.Firebase.FirebaseCustomTokenMinter>());
+builder.Services.AddHostedService<
+    JeebGateway.Chat.Firebase.FirebaseCustomTokenStartupValidator>();
 
 // S07 / BR-10 — delivery-service typed-client tunables (active-delivery cap).
 // Bound from the existing Services:Delivery block (which holds the upstream

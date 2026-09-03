@@ -65,6 +65,28 @@ The July direct-callback rule is superseded only for the designated
 notification-service → push-notification owner path. It remains binding for all
 other domain microservices.
 
+### Canonical Firebase and activation contract
+
+The non-secret machine contract is
+[`contracts/jeeb-firebase-v1.json`](../../contracts/jeeb-firebase-v1.json). Version
+1 fixes the Jeeb project to `jeeb-5a293` / project number `1051234312170`, uses
+the Firestore `(default)` database, declares chat capability enabled, and names
+`notification-service` as the only durable push producer.
+
+The gateway binds the same values through strongly typed startup validation.
+Development/test configuration keeps `FeatureFlags:UseUpstream:Chat=false`;
+only a separately reviewed staging B target and the coordinated production
+target set it to `true`. Deploy workflows remove case-skewed and historical
+Firestore database aliases before adding the exact contract rows, so Docker
+Swarm cannot retain a stale false value or named database selector.
+
+`FeatureFlags:PushDispatchMode` is permanently pinned to `local`, whose current
+implementation is the durable notification-service hand-over. The historical
+`upstream-authority` rung would make the gateway call push-notification directly
+and is rejected at host startup. The unconditional HTTP guard remains a second
+independent boundary and still permits only token registration/deletion,
+health, and idempotency recovery.
+
 ### Authentication boundary
 
 - The relay derives identity and scope only from the credential matched by
@@ -99,7 +121,8 @@ other domain microservices.
 - One durable owner controls retry, replay, and end-to-end idempotency.
 - The relay stays generic and independently verifiable through the shared
   executable contract.
-- Gateway restarts or feature-flag drift cannot reintroduce a second producer.
+- Gateway restarts or feature-flag drift cannot reintroduce a second producer;
+  canonical identity or push-rung drift fails startup and deployment gates.
 
 ### Negative / trade-offs
 - notification-service startup/readiness depends on MongoDB, its worker, and

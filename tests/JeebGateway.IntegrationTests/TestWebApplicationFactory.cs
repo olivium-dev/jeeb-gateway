@@ -67,6 +67,14 @@ public class WebApplicationFactory<TEntryPoint>
         builder.UseSetting(
             "PushNotificationServiceApi:GatewayApiKey",
             "integration-test-push-relay-key");
+        // Some security tests deliberately boot the complete gateway under the
+        // Production environment. Production now correctly requires a usable
+        // Firebase signer at startup, so give every test host an ephemeral key
+        // generated outside the repository. Individual Firebase negative tests
+        // explicitly override this path with their invalid case.
+        builder.UseSetting(
+            "Firebase:Chat:ServiceAccountKeyPath",
+            TestFirebaseCredential.CredentialPath);
         // A full gateway host is created by thousands of integration cases. Its
         // production console providers otherwise stream every background-worker
         // retry into VSTest, overwhelming the CI runner before the suite finishes.
@@ -74,6 +82,13 @@ public class WebApplicationFactory<TEntryPoint>
         builder.ConfigureLogging(logging => logging.ClearProviders());
         builder.ConfigureServices((context, services) =>
         {
+            // The generated test signer is harness plumbing, not application
+            // behavior. Keep its startup status out of tests that intentionally
+            // assert no token-related security event was logged.
+            services.AddSingleton<ILogger<JeebGateway.Chat.Firebase.FirebaseCustomTokenMinter>>(
+                Microsoft.Extensions.Logging.Abstractions.NullLogger<
+                    JeebGateway.Chat.Firebase.FirebaseCustomTokenMinter>.Instance);
+
             if (context.HostingEnvironment.IsEnvironment("Testing")
                 || context.HostingEnvironment.IsDevelopment())
             {
@@ -87,6 +102,55 @@ public class WebApplicationFactory<TEntryPoint>
                 .ConfigurePrimaryHttpMessageHandler(
                     static () => new TestPushRelayReadinessHandler());
         });
+    }
+
+    private static class TestFirebaseCredential
+    {
+        private static readonly Lazy<string> Credential = new(CreateCredential);
+
+        internal static string CredentialPath => Credential.Value;
+
+        private static string CreateCredential()
+        {
+            var directory = Path.Combine(
+                Path.GetTempPath(), $"jeeb-gateway-firebase-tests-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(directory);
+            var path = Path.Combine(directory, "service-account.json");
+            using var rsa = System.Security.Cryptography.RSA.Create(2048);
+            var document = new
+            {
+                type = "service_account",
+                project_id = "jeeb-5a293",
+                private_key_id = "integration-test-key-id",
+                private_key = rsa.ExportPkcs8PrivateKeyPem(),
+                client_email = "firebase-test@jeeb-5a293.iam.gserviceaccount.com",
+            };
+            File.WriteAllText(path, System.Text.Json.JsonSerializer.Serialize(document));
+            if (!OperatingSystem.IsWindows())
+            {
+                File.SetUnixFileMode(
+                    path,
+                    UnixFileMode.UserRead | UnixFileMode.UserWrite);
+            }
+
+            AppDomain.CurrentDomain.ProcessExit += (_, _) =>
+            {
+                try
+                {
+                    File.Delete(path);
+                    Directory.Delete(directory);
+                }
+                catch (IOException)
+                {
+                    // Best effort only; the OS temp directory remains the security boundary.
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    // Best effort only; never weaken the runtime validator for cleanup.
+                }
+            };
+            return path;
+        }
     }
 
     private sealed class TestPushRelayReadinessHandler : HttpMessageHandler

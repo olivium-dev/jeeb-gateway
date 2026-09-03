@@ -17,6 +17,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: Reject banned gateway destinations
         run: bash scripts/check-no-50-server.sh
+      - name: Validate Jeeb Firebase, Chat, and push ownership contract
+        run: |
+          python3 scripts/validate-jeeb-firebase-contract.py
+          python3 scripts/validate-chat-b-activation-authority.py
+          python3 scripts/test-chat-b-activation-cancellation-contract.py
+          bash scripts/test-validate-firebase-service-account.sh
+          python3 scripts/test-smoke-jeeb-firebase-token-exchange.py
+          bash scripts/test-chat-b-activation-preflight.sh
       - name: Reject gateway provider-secret drift
         run: bash scripts/check-provider-secret-boundaries.sh
       - name: Lock staging authorized-WSS probe contract

@@ -219,6 +219,7 @@ expected_mutation_inventory = {
     ".github/scripts/jeeb-gateway-secret-lifecycle.sh",
     ".github/scripts/rotate-staging-gateway-probe-key.sh",
     ".github/workflows/deploy-to-jeeb.yml",
+    ".github/workflows/jeeb-chat-b-activation.yml",
     ".github/workflows/jeeb-production-deploy.yml",
     ".github/workflows/jeeb-staging-deploy.yml",
     ".github/workflows/jeeb-staging-state-auth-smoke.yml",
@@ -243,7 +244,18 @@ OWNER_ERROR = (
     "no image, SSH, provider, secret, or Swarm mutation was attempted."
 )
 OWNER_RUN_LINES = (f"echo '{OWNER_ERROR}' >&2", "exit 1")
-SECURITY_CUTOVER_OWNER_IF = "${{ inputs.deployment_mode == 'normal' }}"
+STAGING_MODE_GATE_NAME = "Require supported protected staging mode"
+STAGING_MODE_GATE_ENV = {"DEPLOYMENT_MODE": "${{ inputs.deployment_mode }}"}
+STAGING_MODE_GATE_LINES = (
+    "set -euo pipefail",
+    'case "$DEPLOYMENT_MODE" in',
+    "  normal|security-cutover|otp-cutover|devtool-reassert) ;;",
+    "  *)",
+    "    echo '::error::Unsupported protected staging deployment mode.' >&2",
+    "    exit 64",
+    "    ;;",
+    "esac",
+)
 SECURITY_CUTOVER_INPUT = {
     "description": "Protected staging deployment mode",
     "required": True,
@@ -262,15 +274,12 @@ STAGING_DISPATCH_INPUTS = {
     "provider_expand_verified": PROVIDER_EXPAND_VERIFIED_INPUT,
 }
 PROVIDER_EXPAND_HOLD_NAME = "Hold caller activation until relay expand is verified"
-PROVIDER_EXPAND_HOLD_IF = (
-    "${{ inputs.deployment_mode != 'normal' && inputs.provider_expand_verified != true }}"
-)
+PROVIDER_EXPAND_HOLD_IF = "${{ inputs.provider_expand_verified != true }}"
 PROVIDER_EXPAND_HOLD_LINES = (
     "echo '::error::Deployment HOLD: deploy and verify the protected-main push-notification image in expand mode first.' >&2",
     "exit 1",
 )
 SECURITY_CUTOVER_GATE_NAME = "Require designated staging owner"
-SECURITY_CUTOVER_GATE_IF = "${{ inputs.deployment_mode != 'normal' }}"
 SECURITY_CUTOVER_GATE_ENV = {
     "REQUESTING_ACTOR": "${{ github.actor }}",
     "TRIGGERING_ACTOR": "${{ github.triggering_actor }}",
@@ -409,7 +418,7 @@ PRODUCTION_HEALTH_COMMAND_LINES = (
     "wget --no-verbose --tries=1 --spider http://localhost:8080/health/ready || exit 1",
 )
 PRODUCTION_REMOTE_LOGIN_BODY_SHA256 = "7728bc5eb7225a3c2763109f2920c2d88803278f2772d8d67a0ce623a97e6f26"
-PRODUCTION_UPDATE_BODY_SHA256 = "e11c28f46c791518e51cb2089d7cfee459573f4c9932424048d5d63d0d6df012"
+PRODUCTION_UPDATE_BODY_SHA256 = "cad9240bc31e4722252979f1b8145e84e532647189673399fa363d9f40210c12"
 PRODUCTION_RELAY_HOLD_NAME = "Hold production activation pending scoped relay preflight"
 PRODUCTION_RELAY_HOLD_LINES = (
     "echo '::error::Production activation is held until the scoped relay key mount and authenticated provider-expand preflight are implemented.' >&2",
@@ -454,6 +463,17 @@ def run_owner_body(body):
         ["/bin/bash", "--noprofile", "--norc", "-c", body],
         cwd=repo_root,
         env={"PATH": ""},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+
+def run_staging_mode_gate(body, deployment_mode):
+    return subprocess.run(
+        ["/bin/bash", "--noprofile", "--norc", "-c", body],
+        cwd=repo_root,
+        env={"PATH": "", "DEPLOYMENT_MODE": deployment_mode},
         text=True,
         capture_output=True,
         check=False,
@@ -679,6 +699,18 @@ def validate_production_authority(document, job_name, job, steps):
         "Features__DevEndpoints__Enabled=false",
         "Features__Swagger__Enabled=false",
         "Security__TokenMint__Enabled=true",
+        "JeebFirebaseContract__SchemaVersion=1",
+        "JeebFirebaseContract__ProjectId=jeeb-5a293",
+        "JeebFirebaseContract__ProjectNumber=1051234312170",
+        "'JeebFirebaseContract__FirestoreDatabaseId=(default)'",
+        "JeebFirebaseContract__ChatEnabled=true",
+        "JeebFirebaseContract__PushProducer=notification-service",
+        "Firebase__Chat__ProjectId=jeeb-5a293",
+        "Firebase__Chat__ServiceAccountKeyPath=/run/secrets/firebase_admin_json",
+        "FeatureFlags__NotificationDurableWrite__Enabled=true",
+        "FeatureFlags__NotificationOutboxMode=upstream-authority",
+        "FeatureFlags__PushDispatchMode=local",
+        "FeatureFlags__UseUpstream__Chat=true",
         "TestControlPlane__Enabled=false",
     )
     actual_env = tuple(
@@ -858,18 +890,39 @@ def validate_workflow_authority(name, document):
             validate_production_authority(document, job_name, job, steps)
             continue
         owner = steps[0]
-        expected_owner_keys = (
-            {"name", "if", "run"}
-            if name == "jeeb-staging-deploy.yml"
-            else {"name", "run"}
-        )
-        if not isinstance(owner, dict) or set(owner) != expected_owner_keys:
-            raise ValueError(f"{name}:{job_name} first executable step is not canonical")
-        if owner.get("name") != OWNER_STEP_NAME:
-            raise ValueError(f"{name}:{job_name} owner step is not first")
         if name == "jeeb-staging-deploy.yml":
-            if owner.get("if") != SECURITY_CUTOVER_OWNER_IF:
-                raise ValueError(f"{name}:{job_name} security-cutover owner condition drifted")
+            if not isinstance(owner, dict) or set(owner) != {"name", "env", "run"}:
+                raise ValueError(f"{name}:{job_name} mode gate shape drifted")
+            if owner.get("name") != STAGING_MODE_GATE_NAME:
+                raise ValueError(f"{name}:{job_name} mode gate is not first")
+            if owner.get("env") != STAGING_MODE_GATE_ENV:
+                raise ValueError(f"{name}:{job_name} mode gate input drifted")
+            mode_body = owner.get("run")
+            if not isinstance(mode_body, str) or tuple(
+                mode_body.splitlines()
+            ) != STAGING_MODE_GATE_LINES:
+                raise ValueError(f"{name}:{job_name} mode gate body drifted")
+            for deployment_mode in (
+                "normal",
+                "security-cutover",
+                "otp-cutover",
+                "devtool-reassert",
+            ):
+                accepted_mode = run_staging_mode_gate(mode_body, deployment_mode)
+                if (
+                    accepted_mode.returncode != 0
+                    or accepted_mode.stdout
+                    or accepted_mode.stderr
+                ):
+                    raise ValueError(f"{name}:{job_name} supported mode was rejected")
+            rejected_mode = run_staging_mode_gate(mode_body, "unsupported")
+            if (
+                rejected_mode.returncode != 64
+                or rejected_mode.stdout
+                or rejected_mode.stderr
+                != "::error::Unsupported protected staging deployment mode.\n"
+            ):
+                raise ValueError(f"{name}:{job_name} unknown mode is not rejected safely")
             dispatch = document.get("on", {}).get("workflow_dispatch")
             inputs = dispatch.get("inputs") if isinstance(dispatch, dict) else None
             if inputs != STAGING_DISPATCH_INPUTS:
@@ -895,15 +948,12 @@ def validate_workflow_authority(name, document):
             security_gate = steps[2]
             if not isinstance(security_gate, dict) or set(security_gate) != {
                 "name",
-                "if",
                 "env",
                 "run",
             }:
                 raise ValueError(f"{name}:{job_name} security owner gate shape drifted")
             if security_gate.get("name") != SECURITY_CUTOVER_GATE_NAME:
                 raise ValueError(f"{name}:{job_name} security owner gate name drifted")
-            if security_gate.get("if") != SECURITY_CUTOVER_GATE_IF:
-                raise ValueError(f"{name}:{job_name} security owner gate condition drifted")
             if security_gate.get("env") != SECURITY_CUTOVER_GATE_ENV:
                 raise ValueError(f"{name}:{job_name} security owner identity inputs drifted")
             security_body = security_gate.get("run")
@@ -974,6 +1024,15 @@ def validate_workflow_authority(name, document):
                 raise ValueError(f"{name}:{job_name} remote credential cleanup is not failure-safe")
             if tuple(str(cleanup.get("run", "")).splitlines()) != CREDENTIAL_CLEANUP_LINES:
                 raise ValueError(f"{name}:{job_name} remote credential cleanup body drifted")
+            for index, step in enumerate(steps):
+                if not isinstance(step, dict):
+                    raise ValueError(f"{name}:{job_name}:step-{index} is not a mapping")
+                reject_bypass(f"{name}:{job_name}:step-{index}", step)
+            continue
+        if not isinstance(owner, dict) or set(owner) != {"name", "run"}:
+            raise ValueError(f"{name}:{job_name} first executable step is not canonical")
+        if owner.get("name") != OWNER_STEP_NAME:
+            raise ValueError(f"{name}:{job_name} owner step is not first")
         body = owner.get("run")
         if not isinstance(body, str) or tuple(body.splitlines()) != OWNER_RUN_LINES:
             raise ValueError(f"{name}:{job_name} owner run body is not canonical")
@@ -1056,7 +1115,7 @@ workflow_authority_paths = {
     "jeeb-staging-deploy.yml": workflow_dir / "jeeb-staging-deploy.yml",
     "jeeb-staging-state-auth-smoke.yml": workflow_dir / "jeeb-staging-state-auth-smoke.yml",
 }
-if len(workflow_authority_paths) + 2 != len(expected_mutation_inventory):
+if len(workflow_authority_paths) + 3 != len(expected_mutation_inventory):
     raise SystemExit("FAIL: owner-block authority inventory is incomplete")
 for name, path in workflow_authority_paths.items():
     document = load_workflow(path)
@@ -1190,7 +1249,7 @@ for name, path in workflow_authority_paths.items():
         unsafe_condition = copy.deepcopy(document)
         unsafe_condition["jobs"]["deploy"]["steps"][0]["if"] = "${{ false }}"
         assert_workflow_rejected(
-            "security-cutover owner condition widened", name, unsafe_condition
+            "supported-mode gate bypassed", name, unsafe_condition
         )
 
         extra_mode = copy.deepcopy(document)
@@ -1285,6 +1344,20 @@ for name, path in workflow_authority_paths.items():
         steps = late_freeze["jobs"]["deploy"]["steps"]
         steps[4], steps[7] = steps[7], steps[4]
         assert_workflow_rejected("public freeze moved after SSH", name, late_freeze)
+
+chat_b_contract = subprocess.run(
+    ["python3", "scripts/validate-chat-b-activation-authority.py"],
+    cwd=repo_root,
+    text=True,
+    capture_output=True,
+    check=False,
+)
+if chat_b_contract.returncode != 0:
+    raise SystemExit(
+        "FAIL: protected Chat B authority is invalid:\n"
+        + chat_b_contract.stdout
+        + chat_b_contract.stderr
+    )
 
 rotation_contract = subprocess.run(
     ["bash", "scripts/check-staging-probe-key-rotation-contract.sh"],
