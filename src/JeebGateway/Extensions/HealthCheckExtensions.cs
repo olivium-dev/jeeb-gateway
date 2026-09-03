@@ -144,6 +144,22 @@ public static class HealthCheckExtensions
         // identity traffic and should be pulled from rotation.
         AddDownstreamProbe(checks, config, "user-management",         "UserManagementServiceApi:BaseUrl", healthPath: "health/ready");
 
+        // CORRECTION: chat-service was excluded below as "exposes NO health route"; it
+        // serves /api/Health/check and, since #116/#118, /api/Health/firebase.
+        var chatBaseUrl = config[JeebGateway.Health.ChatUpstreamHealthCheck.BaseUrlConfigurationKey];
+        if (!string.IsNullOrWhiteSpace(chatBaseUrl))
+        {
+            services.AddHttpClient(JeebGateway.Health.ChatUpstreamHealthCheck.HttpClientName, client =>
+            {
+                client.BaseAddress = new Uri(chatBaseUrl.EndsWith('/') ? chatBaseUrl : chatBaseUrl + "/");
+                client.Timeout = JeebGateway.Health.ChatUpstreamHealthCheck.Budget;
+            });
+            checks.AddCheck<JeebGateway.Health.ChatUpstreamHealthCheck>(
+                JeebGateway.Health.ChatUpstreamHealthCheck.Name,
+                failureStatus: HealthStatus.Unhealthy,
+                tags: new[] { "ready", "downstream" });
+        }
+
         // --- Liveness-only services (NO readiness probe).
         // These expose NO health route at all (verified on the swarm: GET /health
         // AND /health/ready both 404), so we cannot assert their readiness. They
@@ -151,7 +167,6 @@ public static class HealthCheckExtensions
         // them — exactly the sibling-gateway "liveness-only" intent, and the same
         // treatment PR #47 gave feedback-service. Adding a probe here would 404
         // and falsely mark the gateway red.
-        //   - chat-service           (ChatServiceApi:BaseUrl) — salehly-mirrored top-level key
         //   - feedback               (FeedbackServiceApi:BaseUrl) — salehly-mirrored top-level key
         //   - remote-user-preferences (RemoteUserPreferencesServiceApi:BaseUrl) — host 10067, no /health route
         //   - auth-service           (Services:Auth — not yet deployed)

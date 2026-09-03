@@ -113,7 +113,12 @@ if input_references != {"deployment_mode", "provider_expand_verified"}:
         f"FAIL: staging workflow exposes unexpected callable inputs: {sorted(input_references)}"
     )
 
+# Chat is the one phase flag the deploy must NOT pin to a literal: a hardcoded
+# false reverted every completed Chat B activation on the next deploy.
+CHAT_KEY = "FeatureFlags__UseUpstream__Chat"
 for key, value in expected_a1.items():
+    if key == CHAT_KEY:
+        continue
     markers = (
         f"add_env {key} {value}",
         f"add_env {key} '{value}'",
@@ -125,8 +130,29 @@ for key, value in expected_a1.items():
             f"FAIL: A1 workflow does not bind exactly one {key}={value!r} row"
         )
 
+if workflow.count(f'add_env {CHAT_KEY} "$chat_upstream_enabled"') != 1:
+    raise SystemExit(
+        f"FAIL: staging workflow does not bind exactly one resolved {CHAT_KEY} row"
+    )
+for literal in ("true", "false", "'true'", "'false'", '"true"', '"false"'):
+    if f"add_env {CHAT_KEY} {literal}" in workflow:
+        raise SystemExit(
+            f"FAIL: staging workflow hardcodes {CHAT_KEY}={literal} instead of the"
+            " resolved single source of truth"
+        )
+for marker in (
+    "JEEB_STAGING_CHAT_ENABLED: ${{ vars.JEEB_STAGING_CHAT_ENABLED }}",
+    'chat_upstream_declared="${JEEB_STAGING_CHAT_ENABLED:-}"',
+    "scripts/read-staging-chat-flag.sh",
+    '"$chat_upstream_enabled" <<\'FLAGS\'',
+    f'"{CHAT_KEY}=$chat_upstream_enabled"',
+):
+    if marker not in workflow:
+        raise SystemExit(f"FAIL: chat activation single-source-of-truth marker missing: {marker}")
+if workflow.count("chat_upstream_enabled=") != 4:
+    raise SystemExit("FAIL: chat activation resolver assignment set drifted")
+
 for activated in (
-    "FeatureFlags__UseUpstream__Chat",
     "FeatureFlags__UseUpstream__Realtime",
     "Features__RealtimeWebSocketProxy__Enabled",
 ):

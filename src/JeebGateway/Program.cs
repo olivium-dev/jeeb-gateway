@@ -515,16 +515,26 @@ builder.Services.AddHealthChecks()
         "admin-oidc-configuration",
         failureStatus: HealthStatus.Unhealthy,
         tags: new[] { "ready" })
-    // 608debf outage: the credential chain failed closed while every health surface stayed
-    // green (the notification-service URL probe hits the token-free public /health).
-    .AddCheck<JeebGateway.Notifications.NotificationCredentialHealthCheck>(
-        JeebGateway.Notifications.NotificationCredentialHealthCheck.Name,
-        failureStatus: HealthStatus.Unhealthy,
-        tags: new[] { "ready" })
     .AddCheck<JeebGateway.Notifications.PushRelayCredentialHealthCheck>(
         JeebGateway.Notifications.PushRelayCredentialHealthCheck.Name,
         failureStatus: HealthStatus.Unhealthy,
         tags: new[] { "ready" });
+
+// 608debf outage: a credential chain failed closed while every health surface stayed green.
+// One row per declared credential. Dev/Testing skip it — they carry no deploy credentials.
+if (!builder.Environment.IsDevelopment()
+    && !builder.Environment.IsEnvironment("Testing"))
+{
+    foreach (var credential in JeebGateway.Health.GatewayCredentialDeclarations.All)
+    {
+        builder.Services.AddHealthChecks()
+            .AddTypeActivatedCheck<JeebGateway.Health.ConfiguredCredentialHealthCheck>(
+                credential.Name,
+                failureStatus: HealthStatus.Unhealthy,
+                tags: new[] { "ready" },
+                args: new object[] { credential });
+    }
+}
 
 // ---------------------------------------------------------------------------
 // BFF aggregation (JEB-67 / T-BE-031) + skeleton (T-migrate-gateway-shell)

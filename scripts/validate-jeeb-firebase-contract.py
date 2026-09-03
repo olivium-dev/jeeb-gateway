@@ -208,8 +208,13 @@ for key, value in CONTRACT_ENV.items():
     )
     if not any(row in staging for row in accepted_rows):
         fail(f"staging deploy does not reconcile {key}={value}")
-if "add_env FeatureFlags__UseUpstream__Chat false" not in staging:
-    fail("staging bootstrap workflow must leave B Chat activation separate")
+# B activation stays a separate reviewed decision, but the deploy must carry the
+# resolved state forward instead of hardcoding false and reverting it every run.
+if 'add_env FeatureFlags__UseUpstream__Chat "$chat_upstream_enabled"' not in staging:
+    fail("staging deploy does not bind Chat to the resolved activation state")
+for literal in ("true", "false", "'true'", "'false'", '"true"', '"false"'):
+    if f"add_env FeatureFlags__UseUpstream__Chat {literal}" in staging:
+        fail(f"staging deploy hardcodes Chat={literal} instead of resolving it")
 if "($removed_env + $replaced_env)" not in staging:
     fail("staging candidate must replace desired env keys case-insensitively")
 if 'gsub(":"; "__")' not in staging:
