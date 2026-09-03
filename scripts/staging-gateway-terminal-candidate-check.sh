@@ -56,9 +56,9 @@ candidate_version_index=$(<"$candidate_version")
   || fail "candidate Version.Index is malformed (candidate='$candidate_version_index')"
 
 case "$deployment_mode" in
-  security-cutover|otp-cutover)
-    # These modes pin candidate_version_index into a separate remote CAS proof,
-    # so they keep the exact compare until that proof is re-reviewed with them.
+  security-cutover)
+    # Only this mode pins candidate_version_index into a separate remote CAS
+    # proof, so it keeps the exact compare until that proof is re-reviewed.
     [ "$final_version_index" = "$candidate_version_index" ] || fail \
       "$deployment_mode requires an exact Version.Index" \
       "(final=$final_version_index candidate=$candidate_version_index)"
