@@ -27,46 +27,96 @@ for mode in normal security-cutover otp-cutover devtool-reassert; do
   check "$mode" "$test_root/final.json" "$test_root/final-version" "$test_root/final-id"
 done
 
+# Swarm writes UpdateStatus after convergence, so Version.Index has always
+# advanced by the time the final Spec is re-read. Run 33814328644 died here.
 printf '%s\n' 41 > "$test_root/final-version"
-check devtool-reassert "$test_root/final.json" "$test_root/final-version" "$test_root/final-id"
+for mode in normal devtool-reassert; do
+  check "$mode" "$test_root/final.json" "$test_root/final-version" "$test_root/final-id"
+done
 
-for mode in normal security-cutover otp-cutover; do
+for mode in security-cutover otp-cutover; do
   if check "$mode" "$test_root/final.json" "$test_root/final-version" "$test_root/final-id"; then
-    echo "non-Dev Tool mode accepted a higher Version.Index: $mode" >&2
+    echo "cutover mode accepted a higher Version.Index: $mode" >&2
     exit 1
   fi
 done
 
 printf '%s\n' 39 > "$test_root/final-version"
-if check devtool-reassert "$test_root/final.json" "$test_root/final-version" "$test_root/final-id"; then
-  echo 'Dev Tool mode accepted a lower Version.Index' >&2
-  exit 1
-fi
-
-for malformed in invalid '' -1; do
-  printf '%s\n' "$malformed" > "$test_root/final-version"
-  if check devtool-reassert "$test_root/final.json" "$test_root/final-version" "$test_root/final-id"; then
-    echo 'Dev Tool mode accepted a malformed Version.Index' >&2
+for mode in normal security-cutover otp-cutover devtool-reassert; do
+  if check "$mode" "$test_root/final.json" "$test_root/final-version" "$test_root/final-id"; then
+    echo "mode accepted a lower Version.Index: $mode" >&2
     exit 1
   fi
 done
 
+for malformed in invalid '' -1; do
+  printf '%s\n' "$malformed" > "$test_root/final-version"
+  for mode in normal devtool-reassert; do
+    if check "$mode" "$test_root/final.json" "$test_root/final-version" "$test_root/final-id"; then
+      echo "mode accepted a malformed Version.Index: $mode" >&2
+      exit 1
+    fi
+  done
+done
+
 printf '%s\n' invalid > "$test_root/candidate-version"
 printf '%s\n' 40 > "$test_root/final-version"
-if check devtool-reassert "$test_root/final.json" "$test_root/final-version" "$test_root/final-id"; then
-  echo 'Dev Tool mode accepted a malformed candidate Version.Index' >&2
-  exit 1
-fi
+for mode in normal devtool-reassert; do
+  if check "$mode" "$test_root/final.json" "$test_root/final-version" "$test_root/final-id"; then
+    echo "mode accepted a malformed candidate Version.Index: $mode" >&2
+    exit 1
+  fi
+done
 printf '%s\n' 40 > "$test_root/candidate-version"
 
-printf '%s\n' 40 > "$test_root/final-version"
-if check devtool-reassert "$test_root/changed.json" "$test_root/final-version" "$test_root/final-id"; then
-  echo 'Dev Tool mode accepted a changed service Spec' >&2
-  exit 1
-fi
-if check devtool-reassert "$test_root/final.json" "$test_root/final-version" "$test_root/changed-id"; then
-  echo 'Dev Tool mode accepted a changed service ID' >&2
-  exit 1
-fi
+printf '%s\n' 41 > "$test_root/final-version"
+for mode in normal devtool-reassert; do
+  if check "$mode" "$test_root/changed.json" "$test_root/final-version" "$test_root/final-id"; then
+    echo "mode accepted a changed service Spec: $mode" >&2
+    exit 1
+  fi
+  if check "$mode" "$test_root/final.json" "$test_root/final-version" "$test_root/changed-id"; then
+    echo "mode accepted a changed service ID: $mode" >&2
+    exit 1
+  fi
+done
 
-echo 'staging terminal candidate check: PASS (4 exact, 1 monotonic Dev Tool, 10 adversarial cases)'
+# Every rejection must name the comparison and both values; run 33814328644
+# failed with no output at all and cost a whole deploy cycle to attribute.
+printf '%s\n' 39 > "$test_root/final-version"
+diagnostic=$(check normal "$test_root/final.json" "$test_root/final-version" \
+  "$test_root/final-id" 2>&1 >/dev/null || true)
+case "$diagnostic" in
+  *'Version.Index went backwards'*'final=39'*'candidate=40'*) ;;
+  *) echo "version rejection was not diagnostic: $diagnostic" >&2; exit 1 ;;
+esac
+
+printf '%s\n' 41 > "$test_root/final-version"
+diagnostic=$(check normal "$test_root/changed.json" "$test_root/final-version" \
+  "$test_root/final-id" 2>&1 >/dev/null || true)
+case "$diagnostic" in
+  *'not the submitted candidate Spec'*sha256=[0-9a-f]*) ;;
+  *) echo "spec rejection was not diagnostic: $diagnostic" >&2; exit 1 ;;
+esac
+case "$diagnostic" in
+  *'"Name":"other"'*|*Image*) echo 'spec rejection leaked Spec content' >&2; exit 1 ;;
+esac
+
+diagnostic=$(check normal "$test_root/final.json" "$test_root/final-version" \
+  "$test_root/changed-id" 2>&1 >/dev/null || true)
+case "$diagnostic" in
+  *'Service.ID drifted'*other-id*service-id*) ;;
+  *) echo "service ID rejection was not diagnostic: $diagnostic" >&2; exit 1 ;;
+esac
+
+diagnostic=$(bash "$subject" normal 2>&1 || true)
+case "$diagnostic" in *'expected 7 arguments'*) ;;
+  *) echo "arity rejection was not diagnostic: $diagnostic" >&2; exit 1 ;;
+esac
+diagnostic=$(check bogus-mode "$test_root/final.json" "$test_root/final-version" \
+  "$test_root/final-id" 2>&1 >/dev/null || true)
+case "$diagnostic" in *'unsupported deployment mode'*bogus-mode*) ;;
+  *) echo "mode rejection was not diagnostic: $diagnostic" >&2; exit 1 ;;
+esac
+
+echo 'staging terminal candidate check: PASS (6 accepted, 21 adversarial, 5 diagnostic cases)'

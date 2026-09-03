@@ -1,7 +1,15 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-[ "$#" -eq 7 ] || exit 64
+fail() {
+  echo "RED: terminal candidate check failed: $*" >&2
+  exit 1
+}
+
+if [ "$#" -ne 7 ]; then
+  echo "RED: terminal candidate check usage: expected 7 arguments, got $#" >&2
+  exit 64
+fi
 deployment_mode=$1
 final_spec=$2
 final_version=$3
@@ -12,27 +20,54 @@ candidate_id=$7
 
 case "$deployment_mode" in
   normal|security-cutover|otp-cutover|devtool-reassert) ;;
-  *) exit 64 ;;
+  *)
+    echo "RED: terminal candidate check: unsupported deployment mode '$deployment_mode'" >&2
+    exit 64
+    ;;
 esac
 
 script_root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=staging-gateway-spec-canonicalization.sh disable=SC1091
 source "$script_root/staging-gateway-spec-canonicalization.sh"
 
-staging_gateway_specs_equal "$final_spec" "$candidate_spec" || exit 1
-cmp -s "$final_id" "$candidate_id" || exit 1
+# Specs carry the service environment, so identity is reported as a canonical
+# digest. An unreadable Spec reports the empty digest and still fails closed.
+spec_digest() {
+  local source=$1 canonical
+  canonical=$(mktemp) || return 0
+  if staging_gateway_canonicalize_spec_file "$source" "$canonical"; then
+    sha256sum < "$canonical" | awk '{print $1}'
+  fi
+  rm -f -- "$canonical"
+}
 
-if [ "$deployment_mode" != devtool-reassert ]; then
-  cmp -s "$final_version" "$candidate_version" || exit 1
-  exit 0
-fi
+staging_gateway_specs_equal "$final_spec" "$candidate_spec" || fail \
+  "final Spec is not the submitted candidate Spec" \
+  "(final sha256=$(spec_digest "$final_spec") candidate sha256=$(spec_digest "$candidate_spec"))"
+cmp -s "$final_id" "$candidate_id" || fail \
+  "Service.ID drifted (final='$(tr -d '\n' < "$final_id")'" \
+  "candidate='$(tr -d '\n' < "$candidate_id")')"
 
-# Dev Tool smoke exercises mutable staging APIs and may overlap a semantically
-# identical service-spec reassertion. Docker advances Version.Index for that
-# no-op submission even though the complete Spec, immutable digest, and service
-# identity remain exact. Accept only that monotonic counter advance here.
 final_version_index=$(<"$final_version")
 candidate_version_index=$(<"$candidate_version")
-[[ "$final_version_index" =~ ^[0-9]+$ ]] || exit 1
-[[ "$candidate_version_index" =~ ^[0-9]+$ ]] || exit 1
-[ "$final_version_index" -ge "$candidate_version_index" ]
+[[ "$final_version_index" =~ ^[0-9]+$ ]] \
+  || fail "final Version.Index is malformed (final='$final_version_index')"
+[[ "$candidate_version_index" =~ ^[0-9]+$ ]] \
+  || fail "candidate Version.Index is malformed (candidate='$candidate_version_index')"
+
+case "$deployment_mode" in
+  security-cutover|otp-cutover)
+    # These modes pin candidate_version_index into a separate remote CAS proof,
+    # so they keep the exact compare until that proof is re-reviewed with them.
+    [ "$final_version_index" = "$candidate_version_index" ] || fail \
+      "$deployment_mode requires an exact Version.Index" \
+      "(final=$final_version_index candidate=$candidate_version_index)"
+    ;;
+  *)
+    # Version.Index is a monotonic counter, not an identity: Swarm writes
+    # UpdateStatus after convergence, so it always advances past the submit.
+    [ "$final_version_index" -ge "$candidate_version_index" ] || fail \
+      "Version.Index went backwards" \
+      "(final=$final_version_index candidate=$candidate_version_index)"
+    ;;
+esac
