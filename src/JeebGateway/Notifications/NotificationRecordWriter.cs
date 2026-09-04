@@ -206,9 +206,8 @@ public sealed class NotificationRecordWriter : INotificationRecordWriter
                 return new(NotificationRecordWriteClassification.Committed, upstreamStatus);
             }
 
-            // A route that does not exist cannot have committed, so the read-back below would
-            // only turn a KNOWN "no producer" into an ambiguous Unproven the seats read as
-            // "upstream owns it". Classify it here instead. See RouteAbsent for why.
+            // 404/405 cannot have committed, so the read-back would only turn a KNOWN
+            // "no producer" into an ambiguous Unproven. See RouteAbsent.
             if (status is HttpStatusCode.NotFound or HttpStatusCode.MethodNotAllowed)
             {
                 NotificationDurableWriteTelemetry.Outcomes.Add(

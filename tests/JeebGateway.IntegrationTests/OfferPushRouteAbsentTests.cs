@@ -18,30 +18,14 @@ using Xunit;
 
 namespace JeebGateway.IntegrationTests;
 
-/// <summary>
-/// G6 (2026-09-04) — the last surviving push gap on staging, pinned: a jeeber's offer produced
-/// NO push to the client, while new-request fan-out and chat pushes worked on the same devices
-/// and the same FCM tokens.
-///
-/// <para><b>Why.</b> notification-service builds its TYPED routes
-/// (<c>POST /notifications/jeeb.offer_received</c>) from the deployment profile selected by
-/// <c>NOTIFICATION_CONFIG_PATH</c>. The staging deploy sets no profile, so the image default —
-/// which declares none of the <c>jeeb.*</c> types — is what runs, and every typed centre route
-/// 404s there. <c>POST /notifications/events</c> is a STATIC route and always exists, which is
-/// exactly why new-request and chat, which ride it, kept working.</para>
-///
-/// <para><b>The silent part.</b> A 404 used to fall into the ambiguous read-back and come back
-/// <see cref="NotificationRecordWriteClassification.Unproven"/>, which every seat reads as
-/// "upstream owns the push" — so the gateway returned without producing, and the direct client
-/// is permanently guarded anyway. Zero producers, one Error line, no user-visible signal.</para>
-///
-/// <para>Host-free and end-to-end over the REAL writer, the REAL
-/// <see cref="GenericEventDispatcher"/> and the REAL push client behind the REAL
-/// <see cref="GatewayDirectPushDispatchGuardHandler"/>, with a routing centre handler that
-/// answers 404 for the typed route and 201 for the generic one — the live staging shape.</para>
-/// </summary>
+// G6 (2026-09-04): a typed centre route the deployment profile never declared answers 404/405,
+// and the seat must fall back to the static events route instead of assuming upstream owns it.
 public class OfferPushRouteAbsentTests
 {
+    // Starlette answers 405 (partial match on PATCH /notifications/{id}), 404 without one.
+    public static TheoryData<HttpStatusCode> AbsentRoute =>
+        new() { HttpStatusCode.NotFound, HttpStatusCode.MethodNotAllowed };
+
     private const string Client = "client-nour";
     private const string Jeeber = "jeeber-karim";
     private const string RequestId = "be14d19f-c210-45d7-8769-2e558418a708";
@@ -50,10 +34,12 @@ public class OfferPushRouteAbsentTests
     private static readonly OfferReceivedNotificationContext Context = new(
         "Hamra, Beirut", "Achrafieh, Beirut", 80, DateTimeOffset.Parse("2026-09-04T01:16:26Z"));
 
-    [Fact]
-    public async Task A_404_on_the_typed_centre_route_is_route_absent_and_is_never_read_back()
+    [Theory]
+    [MemberData(nameof(AbsentRoute))]
+    public async Task An_absent_typed_centre_route_is_route_absent_and_is_never_read_back(
+        HttpStatusCode typedStatus)
     {
-        var centre = new RoutingCentreHandler(typedStatus: HttpStatusCode.NotFound);
+        var centre = new RoutingCentreHandler(typedStatus);
         var writer = Writer(centre);
 
         var outcome = await writer.WriteOfferReceivedAsync(ReceivedRecord(), CancellationToken.None);
@@ -61,15 +47,17 @@ public class OfferPushRouteAbsentTests
         outcome.Classification.Should()
             .Be(NotificationRecordWriteClassification.RouteAbsent,
                 "a route that does not exist cannot have committed a row");
-        outcome.UpstreamStatus.Should().Be(404);
+        outcome.UpstreamStatus.Should().Be((int)typedStatus);
         centre.Gets.Should().Be(
             0, "the read-back can only turn a known no-producer into an ambiguous Unproven");
     }
 
-    [Fact]
-    public async Task An_offer_still_reaches_the_client_when_the_typed_centre_route_is_absent()
+    [Theory]
+    [MemberData(nameof(AbsentRoute))]
+    public async Task An_offer_still_reaches_the_client_when_the_typed_centre_route_is_absent(
+        HttpStatusCode typedStatus)
     {
-        var centre = new RoutingCentreHandler(typedStatus: HttpStatusCode.NotFound);
+        var centre = new RoutingCentreHandler(typedStatus);
         var wire = new CountingHandler();
         var notifier = Notifier(centre, wire);
 
@@ -77,7 +65,7 @@ public class OfferPushRouteAbsentTests
             Context, Client, RequestId, OfferId, 5m, CancellationToken.None);
 
         centre.EventPosts.Should().Be(
-            1, "the static generic-event route is the only producer left when the typed one 404s");
+            1, "the static generic-event route is the only producer left when the typed one is gone");
         wire.Posts.Should().Be(0, "ADR-0013: the gateway is never a direct push producer");
 
         var body = JsonDocument.Parse(centre.EventBodies.Single()).RootElement;
@@ -110,10 +98,12 @@ public class OfferPushRouteAbsentTests
         wire.Posts.Should().Be(0);
     }
 
-    [Fact]
-    public async Task The_winner_push_survives_an_absent_offer_accepted_route_too()
+    [Theory]
+    [MemberData(nameof(AbsentRoute))]
+    public async Task The_winner_push_survives_an_absent_offer_accepted_route_too(
+        HttpStatusCode typedStatus)
     {
-        var centre = new RoutingCentreHandler(typedStatus: HttpStatusCode.NotFound);
+        var centre = new RoutingCentreHandler(typedStatus);
         var wire = new CountingHandler();
         var notifier = Notifier(centre, wire, AcceptedRequest());
 
@@ -239,7 +229,7 @@ public class OfferPushRouteAbsentTests
             }
 
             TypedPosts++;
-            return Json(_typedStatus, "{\"detail\":\"Not Found\"}", request);
+            return Json(_typedStatus, "{\"detail\":\"no such route\"}", request);
         }
 
         private static HttpResponseMessage Json(

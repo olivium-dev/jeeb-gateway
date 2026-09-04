@@ -448,14 +448,8 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
     /// anyway re-opens the duplicate window. Null (no write attempted, or the writer threw),
     /// <see cref="NotificationRecordWriteClassification.Disabled"/> and
     /// <see cref="NotificationRecordWriteClassification.RouteAbsent"/> leave no upstream producer,
-    /// so the fallback below runs — matching the sibling seats, which also fall back only when
-    /// the hand-over seam declined outright.</para>
-    ///
-    /// <para>RouteAbsent joined that list on 2026-09-04 (G6). A notification-service deployed
-    /// without the jeeb type profile 404s every typed centre route, and this predicate used to
-    /// answer TRUE for the resulting Unproven — so the client's "new offer" push had no producer
-    /// at all on staging while new-request and chat, which ride the static generic-event route,
-    /// kept working.</para>
+    /// so the generic-seam fallback below runs — matching the sibling seats, which also fall back
+    /// only when the hand-over seam declined outright.</para>
     /// </summary>
     private static bool UpstreamOwnsPush(NotificationRecordWriteOutcome? handover)
         => handover is not null
@@ -482,13 +476,8 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
     /// </summary>
     internal const string RetiredOfferLostTemplateKey = "jeeb.offer_rejected";
 
-    /// <summary>
-    /// Hand ONE offer push to notification-service over <c>POST /notifications/events</c> — the
-    /// static route that exists in every deployment, unlike the typed centre routes, which the
-    /// deployment profile declares. True when a producer took it; false only when the dispatcher
-    /// reports no producer at all, which is the one case where the (guarded) direct client is
-    /// still attempted. <see cref="GenericEventDispatcher"/> owns the logging for every outcome.
-    /// </summary>
+    // Hand ONE offer push over POST /notifications/events — the static route every deployment has.
+    // False only when no producer took it, the one case where the (guarded) direct client is tried.
     private async Task<bool> HandedOverGenericallyAsync(
         string eventType,
         string recipientId,
