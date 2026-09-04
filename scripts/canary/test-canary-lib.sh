@@ -272,6 +272,65 @@ check "canary_mask emits the directive inside GitHub Actions" "::add-mask::a-rea
 check "canary_mask prints nothing in plan mode" "" \
   "$(CANARY_MODE=plan GITHUB_ACTIONS=true bash -c ". '$SCRIPT_DIR/lib.sh'; canary_mask a-real-bearer")"
 
+# --- canary_wallet_sufficient ------------------------------------------------
+check_exit "a funded wallet clears the offer guard" 0 \
+  bash -c "printf '%s' '{\"availableBalance\":40.0}' | { . '$SCRIPT_DIR/lib.sh'; canary_wallet_sufficient 0.60; }"
+check_exit "a balance exactly at the threshold clears it" 0 \
+  bash -c "printf '%s' '{\"availableBalance\":0.60}' | { . '$SCRIPT_DIR/lib.sh'; canary_wallet_sufficient 0.60; }"
+check_exit "a balance below the threshold does not" 1 \
+  bash -c "printf '%s' '{\"availableBalance\":0.10}' | { . '$SCRIPT_DIR/lib.sh'; canary_wallet_sufficient 0.60; }"
+check_exit "an empty wallet does not" 1 \
+  bash -c "printf '%s' '{}' | { . '$SCRIPT_DIR/lib.sh'; canary_wallet_sufficient 0.60; }"
+
+# --- the canary identities must be well-formed UUIDs: ban-service rejects
+# --- anything else and [RequireActiveUser] then fails closed with 503.
+UUID_RE='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+for role in 'client id' 'jeeber id'; do
+  value="$(printf '%s' "$PLAN_OUT" | grep -E "^  $role +: " | sed 's/.*: //' | tr -d ' ')"
+  if printf '%s' "$value" | grep -qE "^$UUID_RE\$"; then
+    check "the default $role is a well-formed UUID" "uuid" "uuid"
+  else
+    check "the default $role is a well-formed UUID" "uuid" "$value"
+  fi
+done
+
+# --- the wallet pre-check must run BEFORE the lifecycle leg, or an unfunded
+# --- canary 402s on the offer and it reads like a chat outage.
+case "$PLAN_OUT" in
+  *'/v1/jeeb/wallet'*) check "the plan reads the jeeber wallet" "present" "present" ;;
+  *) check "the plan reads the jeeber wallet" "present" "MISSING" ;;
+esac
+WALLET_AT="$(printf '%s' "$PLAN_OUT" | grep -n '/v1/jeeb/wallet' | head -1 | cut -d: -f1)"
+OFFER_AT="$(printf '%s' "$PLAN_OUT" | grep -n '/offers' | head -1 | cut -d: -f1)"
+if [ -n "$WALLET_AT" ] && [ -n "$OFFER_AT" ] && [ "$WALLET_AT" -lt "$OFFER_AT" ]; then
+  check "the wallet check precedes the offer" "before" "before"
+else
+  check "the wallet check precedes the offer" "before" "wallet@${WALLET_AT:-none} offer@${OFFER_AT:-none}"
+fi
+
+# --- the funding chain is planned by ensure-canary-accounts.sh, and its
+# --- credential-bearing bodies are rendered as $VAR, never inline.
+FUND_PLAN="$(JEEB_TOKEN_MINT_KEY=super-secret-value \
+  bash "$SCRIPT_DIR/ensure-canary-accounts.sh" --base-url https://app.jeeb.fds-1.com --plan 2>&1)"
+for hop in '/dev/partner/credentials' '/v1/partner/auth/login' '/wallet/credits' '/v1/partner/wallet/transfers/predict' '/v1/partner/wallet/transfers' '/v1/jeeb/wallet'; do
+  case "$FUND_PLAN" in
+    *"$hop"*) check "the funding plan covers $hop" "covered" "covered" ;;
+    *) check "the funding plan covers $hop" "covered" "MISSING" ;;
+  esac
+done
+case "$FUND_PLAN" in
+  *'--data-binary $CANARY_PARTNER_LOGIN_BODY'*) check "the partner password is never inlined in a plan" "byvar" "byvar" ;;
+  *) check "the partner password is never inlined in a plan" "byvar" "INLINED" ;;
+esac
+case "$FUND_PLAN" in
+  *'"password"'*) check "no literal password field reaches the plan" "absent" "PRESENT" ;;
+  *) check "no literal password field reaches the plan" "absent" "absent" ;;
+esac
+case "$FUND_PLAN" in
+  *super-secret-value*) check "the funding plan never prints the mint key" "absent" "PRESENT" ;;
+  *) check "the funding plan never prints the mint key" "absent" "absent" ;;
+esac
+
 printf '\n%s case(s), %s failure(s)\n' "$CASES" "$FAILURES"
 [ "$FAILURES" -eq 0 ] || exit 1
 printf 'canary lib contract holds.\n'

@@ -13,8 +13,11 @@ TIMEOUT="${JEEB_CANARY_TIMEOUT:-150}"
 PUSH_BUDGET="${JEEB_CANARY_PUSH_BUDGET:-60}"
 CHAT_BUDGET="${JEEB_CANARY_CHAT_BUDGET:-30}"
 FIRESTORE_BUDGET="${JEEB_CANARY_FIRESTORE_BUDGET:-30}"
-CLIENT_ID="${JEEB_CANARY_CLIENT_ID:-canary-chat-push-client}"
-JEEBER_ID="${JEEB_CANARY_JEEBER_ID:-canary-chat-push-jeeber}"
+# Fixed, deterministic, clearly synthetic. They MUST be well-formed UUIDs:
+# ban-service rejects a non-UUID id and [RequireActiveUser] fails closed on 503.
+CLIENT_ID="${JEEB_CANARY_CLIENT_ID:-ca9a4100-0000-4000-8000-000000000001}"
+JEEBER_ID="${JEEB_CANARY_JEEBER_ID:-ca9a4100-0000-4000-8000-000000000002}"
+WALLET_MIN="${JEEB_CANARY_WALLET_MIN:-0.60}"
 # HARD RULE: offshore, so no real tester is ever inside the 3 km Flash fan-out
 # radius. Only the canary jeeber's own uploaded fix satisfies it.
 LAT="${JEEB_CANARY_LAT:-33.9500}"
@@ -119,6 +122,7 @@ canary_log "  jeeber id   : $JEEBER_ID"
 canary_log "  pickup      : $LAT,$LNG (fixed OFFSHORE coordinate — no real tester in radius)"
 canary_log "  budgets     : push ${PUSH_BUDGET}s, chat ${CHAT_BUDGET}s, firestore ${FIRESTORE_BUDGET}s, hard cap ${TIMEOUT}s"
 canary_log "  accept leg  : $ACCEPT_OFFER"
+canary_log "  wallet min  : $WALLET_MIN (offer-guard commission threshold)"
 canary_log "  gps stream  : ${REQUIRE_GPS_STREAM} (POST /location/update required?)"
 canary_log "  push ledger : ${PUSH_LEDGER_BASE_URL:-<unset — falling back to the durable notification inbox>}"
 if [ -n "${JEEB_FIREBASE_WEB_API_KEY:-}" ]; then
@@ -140,8 +144,8 @@ canary_expect preflight "200" "gateway liveness"
 canary_log ""
 canary_log "[1/9] identity — mint the two fixed canary bearers"
 canary_log "        X-Service-Auth-Key only; open mode is never relied on."
-canary_log "        The ids are deliberately NOT GUIDs, which keeps the offer-time"
-canary_log "        wallet-sufficiency guard out of the canary's way."
+canary_log "        The ids are fixed UUIDs: ban-service rejects a non-UUID id and"
+canary_log "        [RequireActiveUser] then fails closed with 503 on create/offer/accept."
 # Sets MINTED_TOKEN rather than echoing: a command substitution would swallow
 # the plan output instead of printing it.
 MINTED_TOKEN=""
@@ -276,6 +280,18 @@ fi
 # chat-service seats ONLY the owner at create; offer+accept is what seats the jeeber.
 canary_log ""
 canary_log "[6/9] lifecycle — jeeber offers, client accepts (this is what seats the jeeber)"
+
+# A UUID jeeber re-arms the offer-time wallet guard (it is Guid.TryParse-gated),
+# so an unfunded canary wallet turns leg 6 into a 402 that reads like an outage.
+WALLET_FILE="$(canary_tmpfile jeeber-wallet)"
+canary_http GET "$BASE_URL/v1/jeeb/wallet" --bearer-var JEEBER_TOKEN --out "$WALLET_FILE"
+canary_expect lifecycle "200" "canary jeeber wallet read"
+if [ "$CANARY_MODE" = "execute" ]; then
+  canary_wallet_sufficient "$WALLET_MIN" <"$WALLET_FILE" || canary_fail lifecycle \
+    "the canary jeeber's wallet is below the offer guard threshold ($WALLET_MIN) — run scripts/canary/ensure-canary-accounts.sh to top it up; the offer would otherwise 402 and read like a chat outage"
+  canary_note "wallet balance clears the offer guard (>= $WALLET_MIN)"
+fi
+
 OFFER_FILE="$(canary_tmpfile offer)"
 canary_http POST "$BASE_URL/v1/requests/$REQUEST_ID/offers" \
   --bearer-var JEEBER_TOKEN \
