@@ -175,20 +175,25 @@ with a message naming the remedy, and `ensure-canary-accounts.sh` tops the walle
 up through the Dev Tool's own route chain:
 
 1. mint an admin bearer for the canary admin id,
-2. `POST /dev/partner/credentials` — provision a holder-bound partner credential
+2. `PUT /dev/wallets/jeeber/{jeeberId}/ensure` — converge the **transfer target**
+   in wallet-service. `GET /v1/jeeb/wallet` projects `availableBalance: 0` for a
+   holder that does not exist at all, so the balance pre-check cannot see this;
+   without it the preview 409s `partner-wallet-precondition` — *"The jeeber has
+   no provisioned wallet for currency N"*. Idempotent (`204` either way),
+3. `POST /dev/partner/credentials` — provision a holder-bound partner credential
    with a **freshly generated password** (never committed, never printed, deleted
    at the end). The identifier is not free-form: `PartnerCredentialStore` accepts
    only `devtool-partner-<holderId without dashes>` and 409s on anything else, so
    the script derives it with `canary_runtime_partner_identifier`. A 409 here means
    a reservation for that holder is still live — it is tombstoned rather than
    deleted and carries another run's password, so it must be waited out (5 min),
-3. `POST /v1/partner/auth/login` → partner session,
-4. `POST /v1/admin/partners/{partnerId}/wallet/credits` — cash-credit the partner
+4. `POST /v1/partner/auth/login` → partner session,
+5. `POST /v1/admin/partners/{partnerId}/wallet/credits` — cash-credit the partner
    as admin, under a fixed idempotency key,
-5. `POST /v1/partner/wallet/transfers/predict` — assert `otpRequired == false`,
-6. `POST /v1/partner/wallet/transfers` — partner → canary jeeber, fixed
+6. `POST /v1/partner/wallet/transfers/predict` — assert `otpRequired == false`,
+7. `POST /v1/partner/wallet/transfers` — partner → canary jeeber, fixed
    idempotency key,
-7. delete the partner credential, then re-read the balance and assert it clears.
+8. delete the partner credential, then re-read the balance and assert it clears.
 
 **The idempotency that matters is the balance pre-check**: if the wallet already
 clears `JEEB_CANARY_WALLET_MIN`, the whole chain is skipped. Re-running the script

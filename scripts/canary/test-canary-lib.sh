@@ -312,12 +312,22 @@ fi
 # --- credential-bearing bodies are rendered as $VAR, never inline.
 FUND_PLAN="$(JEEB_TOKEN_MINT_KEY=super-secret-value \
   bash "$SCRIPT_DIR/ensure-canary-accounts.sh" --base-url https://app.jeeb.fds-1.com --plan 2>&1)"
-for hop in '/dev/partner/credentials' '/v1/partner/auth/login' '/wallet/credits' '/v1/partner/wallet/transfers/predict' '/v1/partner/wallet/transfers' '/v1/jeeb/wallet'; do
+for hop in '/dev/wallets/jeeber/' '/dev/partner/credentials' '/v1/partner/auth/login' '/wallet/credits' '/v1/partner/wallet/transfers/predict' '/v1/partner/wallet/transfers' '/v1/jeeb/wallet'; do
   case "$FUND_PLAN" in
     *"$hop"*) check "the funding plan covers $hop" "covered" "covered" ;;
     *) check "the funding plan covers $hop" "covered" "MISSING" ;;
   esac
 done
+# The transfer 409s "no provisioned wallet" unless the holder exists FIRST.
+HOLDER_AT="$(printf '%s\n' "$FUND_PLAN" | grep -n '/dev/wallets/jeeber/' | head -1 | cut -d: -f1)"
+PREDICT_AT="$(printf '%s\n' "$FUND_PLAN" | grep -n '/v1/partner/wallet/transfers/predict' | head -1 | cut -d: -f1)"
+if [ -n "$HOLDER_AT" ] && [ -n "$PREDICT_AT" ] && [ "$HOLDER_AT" -lt "$PREDICT_AT" ]; then
+  check "the jeeber wallet-holder ensure precedes the transfer preview" "before" "before"
+else
+  check "the jeeber wallet-holder ensure precedes the transfer preview" "before" \
+    "holder@${HOLDER_AT:-none} predict@${PREDICT_AT:-none}"
+fi
+
 case "$FUND_PLAN" in
   *'--data-binary $CANARY_PARTNER_LOGIN_BODY'*) check "the partner password is never inlined in a plan" "byvar" "byvar" ;;
   *) check "the partner password is never inlined in a plan" "byvar" "INLINED" ;;
