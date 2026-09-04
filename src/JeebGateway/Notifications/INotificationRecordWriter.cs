@@ -17,20 +17,8 @@ public enum NotificationRecordWriteClassification
     /// </summary>
     SkippedSilent,
 
-    /// <summary>
-    /// The upstream answered 404/405: the typed notification-centre route for this template key
-    /// does NOT EXIST in the deployed notification-service. Its type routes are built from the
-    /// deployment profile (<c>NOTIFICATION_CONFIG_PATH</c>), and a deployment that ships the
-    /// image default declares none of the <c>jeeb.*</c> types — so the POST cannot have stored a
-    /// row and no upstream push will follow.
-    ///
-    /// <para>This is deliberately NOT <see cref="Unproven"/>. Unproven means "the POST may have
-    /// committed", which every seat correctly reads as "upstream owns the push". A route that
-    /// does not exist cannot own anything, and folding the two together is how
-    /// <c>jeeb.offer_received</c> reached ZERO producers on staging while logging only a single
-    /// Error line (G6, 2026-09-04). Callers must treat this as "no producer" and hand the event
-    /// to the generic <c>POST /notifications/events</c> seam, which is a static route.</para>
-    /// </summary>
+    // 404/405 — no typed centre route (they come from NOTIFICATION_CONFIG_PATH). NOT Unproven,
+    // which seats read as "upstream owns it"; callers use POST /notifications/events. G6.
     RouteAbsent,
 }
 
