@@ -366,6 +366,45 @@ case "$FUND_PLAN" in
   *) check "the ensure script emits a READY summary line" "present" "MISSING" ;;
 esac
 
+# --- roles must be the CANONICAL {customer,driver}: capability gates canonicalize
+# --- either, but raw HasRole checks 403 the cleanup cancel and leak requests.
+for plan_name in run ensure; do
+  case "$plan_name" in
+    run) THIS_PLAN="$PLAN_OUT" ;;
+    ensure) THIS_PLAN="$FUND_PLAN" ;;
+  esac
+  case "$THIS_PLAN" in
+    *'"roles":["customer"]'*) check "the $plan_name plan mints the client as customer" "canonical" "canonical" ;;
+    *) check "the $plan_name plan mints the client as customer" "canonical" "MISSING" ;;
+  esac
+  case "$THIS_PLAN" in
+    *'"roles":["driver","customer"]'*) check "the $plan_name plan mints the jeeber as driver+customer" "canonical" "canonical" ;;
+    *) check "the $plan_name plan mints the jeeber as driver+customer" "canonical" "MISSING" ;;
+  esac
+  case "$THIS_PLAN" in
+    *'"roles":["client"]'*|*'"roles":["jeeber"]'*) check "the $plan_name plan never mints the contract vocabulary" "absent" "PRESENT" ;;
+    *) check "the $plan_name plan never mints the contract vocabulary" "absent" "absent" ;;
+  esac
+done
+# driver must lead, because TokensController takes active_role from roles[0]
+# when the user has no user-management profile yet.
+case "$PLAN_OUT" in
+  *'"roles":["driver","customer"]'*) check "driver leads so active_role resolves to driver" "driver-first" "driver-first" ;;
+  *) check "driver leads so active_role resolves to driver" "driver-first" "WRONG-ORDER" ;;
+esac
+
+# --- the cleanup must retry the legacy cancel on 403, not only 404: the V1
+# --- route reads raw roles, so a vocabulary drift refuses it there alone.
+RUNSH="$SCRIPT_DIR/run.sh"
+# The arm is the line whose body retries the legacy /requests cancel.
+FALLBACK_ARM="$(grep -B2 'canary_cancel_request "/requests/' "$RUNSH" | grep ')' | head -1)"
+for code in 403 404 405; do
+  case "${FALLBACK_ARM:-none}" in
+    *"$code"*) check "the cleanup falls back to the legacy cancel on $code" "retried" "retried" ;;
+    *) check "the cleanup falls back to the legacy cancel on $code" "retried" "MISSING (arm: ${FALLBACK_ARM:-none})" ;;
+  esac
+done
+
 printf '\n%s case(s), %s failure(s)\n' "$CASES" "$FAILURES"
 [ "$FAILURES" -eq 0 ] || exit 1
 printf 'canary lib contract holds.\n'

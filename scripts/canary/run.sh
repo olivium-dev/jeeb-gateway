@@ -18,6 +18,10 @@ FIRESTORE_BUDGET="${JEEB_CANARY_FIRESTORE_BUDGET:-30}"
 CLIENT_ID="${JEEB_CANARY_CLIENT_ID:-ca9a4100-0000-4000-8000-000000000001}"
 JEEBER_ID="${JEEB_CANARY_JEEBER_ID:-ca9a4100-0000-4000-8000-000000000002}"
 WALLET_MIN="${JEEB_CANARY_WALLET_MIN:-0.60}"
+# The OPAQUE vocabulary UM persists and OTP-verify mints ({customer,driver}), NOT
+# the {client,jeeber} contract strings: raw HasRole checks accept only these.
+CLIENT_ROLES="${JEEB_CANARY_CLIENT_ROLES:-customer}"
+JEEBER_ROLES="${JEEB_CANARY_JEEBER_ROLES:-driver,customer}"
 # HARD RULE: offshore, so no real tester is ever inside the 3 km Flash fan-out
 # radius. Only the canary jeeber's own uploaded fix satisfies it.
 LAT="${JEEB_CANARY_LAT:-33.9500}"
@@ -99,7 +103,11 @@ canary_cleanup() {
       # /v1 cancels the delivery too (needed once the offer is accepted); the
       # legacy route is the fallback when no durable delivery row exists.
       code="$(canary_cancel_request "/v1/requests/$REQUEST_ID")"
-      [ "$code" = "404" ] && code="$(canary_cancel_request "/requests/$REQUEST_ID")"
+      # 403 too: the V1 cancel reads raw roles, so a token whose vocabulary drifts
+      # is refused there while the legacy owner-cancel still accepts it.
+      case "$code" in
+        403|404|405) code="$(canary_cancel_request "/requests/$REQUEST_ID")" ;;
+      esac
       case "$code" in
         200|204|409) printf 'cleanup: request %s closed out (HTTP %s)\n' "$REQUEST_ID" "$code" ;;
         404) printf '::warning::cleanup: request %s not found on either cancel route — it may be orphaned\n' "$REQUEST_ID" ;;
@@ -144,26 +152,31 @@ canary_expect preflight "200" "gateway liveness"
 canary_log ""
 canary_log "[1/9] identity — mint the two fixed canary bearers"
 canary_log "        X-Service-Auth-Key only; open mode is never relied on."
+canary_log "        Roles are the CANONICAL {customer,driver} the OTP path mints, so raw"
+canary_log "        UserIdentity.HasRole gates (e.g. delivery cancel) see a real-shaped token."
 canary_log "        The ids are fixed UUIDs: ban-service rejects a non-UUID id and"
 canary_log "        [RequireActiveUser] then fails closed with 503 on create/offer/accept."
 # Sets MINTED_TOKEN rather than echoing: a command substitution would swallow
 # the plan output instead of printing it.
 MINTED_TOKEN=""
+# $2 is the CANONICAL role list the OTP-verify path mints, comma-separated. The
+# first entry also becomes active_role when no profile exists (TokensController).
 mint_bearer() {
-  local user="$1" role="$2" out
-  out="$(canary_tmpfile "mint-$role")"
+  local user="$1" roles="$2" label="$3" out
+  out="$(canary_tmpfile "mint-$label")"
   canary_http POST "$BASE_URL/auth/tokens" \
     --header-var "X-Service-Auth-Key:JEEB_TOKEN_MINT_KEY" \
-    --json "$(jq -nc --arg u "$user" --arg r "$role" '{userId: $u, roles: [$r]}')" \
+    --json "$(jq -nc --arg u "$user" --arg r "$roles" \
+      '{userId: $u, roles: ($r | split(","))}')" \
     --no-preview --out "$out"
-  canary_expect identity "200" "$role bearer mint"
+  canary_expect identity "200" "$label bearer mint"
   MINTED_TOKEN="$(canary_access_token <"$out")"
   [ "$CANARY_MODE" != execute ] || [ -n "$MINTED_TOKEN" ] || \
-    canary_fail identity "$role mint returned no accessToken"
+    canary_fail identity "$label mint returned no accessToken"
   canary_mask "$MINTED_TOKEN"
 }
-mint_bearer "$CLIENT_ID" client; CLIENT_TOKEN="$MINTED_TOKEN"
-mint_bearer "$JEEBER_ID" jeeber; JEEBER_TOKEN="$MINTED_TOKEN"
+mint_bearer "$CLIENT_ID" "$CLIENT_ROLES" client; CLIENT_TOKEN="$MINTED_TOKEN"
+mint_bearer "$JEEBER_ID" "$JEEBER_ROLES" jeeber; JEEBER_TOKEN="$MINTED_TOKEN"
 
 # ---------------------------------------------------------------------------
 canary_log ""

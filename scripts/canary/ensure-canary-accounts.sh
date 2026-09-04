@@ -17,6 +17,9 @@ PARTNER_HOLDER_ID="${JEEB_CANARY_PARTNER_HOLDER_ID:-ca9a4100-0000-4000-8000-0000
 ADMIN_ID="${JEEB_CANARY_ADMIN_ID:-ca9a4100-0000-4000-8000-000000000004}"
 AVAIL_PREFIX="${JEEB_CANARY_AVAILABILITY_PREFIX:-/v1}"
 WALLET_MIN="${JEEB_CANARY_WALLET_MIN:-0.60}"
+# The OPAQUE vocabulary user-management persists and the OTP-verify path mints.
+CLIENT_ROLES="${JEEB_CANARY_CLIENT_ROLES:-customer}"
+JEEBER_ROLES="${JEEB_CANARY_JEEBER_ROLES:-driver,customer}"
 # Must stay under PartnerWallet__OtpStepUpThreshold (50) or the transfer needs a
 # step-up code and this stops being a two-call, unattended top-up.
 WALLET_TOPUP="${JEEB_CANARY_WALLET_TOPUP:-40}"
@@ -49,35 +52,25 @@ canary_log "== canary account check on $BASE_URL =="
 
 # Sets MINTED_TOKEN rather than echoing, so the plan output is not swallowed.
 MINTED_TOKEN=""
+# $2 is the CANONICAL role list, comma-separated; the first entry also becomes
+# active_role when no user-management profile exists yet.
 mint_bearer_for() {
-  local user="$1" role="$2" out
-  out="$(canary_tmpfile "mint-$role")"
+  local user="$1" roles="$2" label="${3:-$2}" out
+  out="$(canary_tmpfile "mint-$label")"
   canary_http POST "$BASE_URL/auth/tokens" \
     --header-var "X-Service-Auth-Key:JEEB_TOKEN_MINT_KEY" \
-    --json "$(jq -nc --arg u "$user" --arg r "$role" '{userId: $u, roles: [$r]}')" \
+    --json "$(jq -nc --arg u "$user" --arg r "$roles" \
+      '{userId: $u, roles: ($r | split(","))}')" \
     --no-preview --out "$out"
-  canary_expect accounts "200" "$role bearer mint for $user"
+  canary_expect accounts "200" "$label bearer mint for $user"
   MINTED_TOKEN="$(canary_access_token <"$out")"
   [ "$CANARY_MODE" != execute ] || [ -n "$MINTED_TOKEN" ] || \
-    canary_fail accounts "$role mint for $user returned no accessToken"
+    canary_fail accounts "$label mint for $user returned no accessToken"
   canary_mask "$MINTED_TOKEN"
 }
 
-check_identity() {
-  local user="$1" role="$2" out
-  out="$(canary_tmpfile "mint-$role")"
-  canary_http POST "$BASE_URL/auth/tokens" \
-    --header-var "X-Service-Auth-Key:JEEB_TOKEN_MINT_KEY" \
-    --json "$(jq -nc --arg u "$user" --arg r "$role" '{userId: $u, roles: [$r]}')" \
-    --no-preview --out "$out"
-  canary_expect accounts "200" "$role bearer mint for $user"
-  MINTED_TOKEN="$(canary_access_token <"$out")"
-  [ "$CANARY_MODE" != execute ] || [ -n "$MINTED_TOKEN" ] || \
-    canary_fail accounts "$role mint for $user returned no accessToken"
-}
-
-check_identity "$CLIENT_ID" client; CLIENT_TOKEN="$MINTED_TOKEN"; export CLIENT_TOKEN
-check_identity "$JEEBER_ID" jeeber; JEEBER_TOKEN="$MINTED_TOKEN"; export JEEBER_TOKEN
+mint_bearer_for "$CLIENT_ID" "$CLIENT_ROLES" client; CLIENT_TOKEN="$MINTED_TOKEN"; export CLIENT_TOKEN
+mint_bearer_for "$JEEBER_ID" "$JEEBER_ROLES" jeeber; JEEBER_TOKEN="$MINTED_TOKEN"; export JEEBER_TOKEN
 canary_log "  both canary identities mint (values never printed)"
 
 canary_log "  jeeber — availability surface"
