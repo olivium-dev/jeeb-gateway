@@ -127,6 +127,41 @@ wallet guard. That traded a guard we can satisfy for a gate we cannot — the ba
 seam has no way to distinguish "malformed id" from "ban-service is down", and
 fixing that is a security change needing its own review, not a canary change.)*
 
+### The roles must be the CANONICAL vocabulary, not the contract one
+
+user-management persists — and the OTP-verify path mints — the **opaque** roles
+`{customer, driver}` (`Roles.Client = "customer"`, `Roles.Jeeber = "driver"`).
+The snake_case `{client, jeeber}` pair is the **client-contract** vocabulary; the
+gateway translates opaque → contract on the way *out* of a response body, and the
+token never carries it.
+
+Most gates cannot tell the difference, because the capability handler canonicalises
+each principal role through `JeebRoleTranslator.ToContract` before matching. But a
+handful of actions read the **raw** claim — `DeliveriesController.Cancel` does
+`UserIdentity.HasRole(HttpContext, Roles.Client)`, i.e. literally `"customer"`. A
+token minted with `roles:["client"]` therefore passed every capability gate the
+canary walks and then **403'd the cleanup cancel on every run**, leaking a
+broadcasting request until the Flash TTL expired.
+
+So the canary mints what a real sign-in mints:
+
+| Actor | `roles` |
+|---|---|
+| client | `["customer"]` |
+| jeeber | `["driver","customer"]` |
+
+**`driver` leads deliberately.** `TokensController` sets `active_role = roles[0]`
+when the user has no user-management profile yet, and `active_role` drives things
+like the FCM topic chosen at device registration. Keeping `customer` on the jeeber
+matches the dual-role shape UM persists (one account can be both).
+
+Overridable via `JEEB_CANARY_CLIENT_ROLES` / `JEEB_CANARY_JEEBER_ROLES`
+(comma-separated). `test-canary-lib.sh` asserts the canonical values, the ordering,
+and that the contract strings never appear — mutation-checked.
+
+The cleanup also falls back to the legacy `DELETE /requests/{id}` on **403**, not
+just 404/405, so a future vocabulary drift cannot silently leak requests again.
+
 ### The consequence: the canary jeeber needs a funded wallet
 
 A UUID jeeber re-arms the offer-time wallet-sufficiency guard, which is
@@ -154,6 +189,13 @@ up through the Dev Tool's own route chain:
 **The idempotency that matters is the balance pre-check**: if the wallet already
 clears `JEEB_CANARY_WALLET_MIN`, the whole chain is skipped. Re-running the script
 any number of times never stacks credits.
+
+**That is why the scheduled workflow runs it on every run**, as a step before
+`run.sh --execute`. It is cheap when funded (one wallet read) and it is the only
+thing standing between a drained wallet and a leg-6 402 that nobody is watching
+for. Its `READY: … (funding: funded|already|skipped)` line goes to the job
+summary, so a run that had to top up says so. `test-canary-lib.sh` asserts the
+step exists, runs before the canary, and is not in plan mode.
 
 `JEEB_CANARY_WALLET_TOPUP` defaults to **40** and must stay under
 `PartnerWallet__OtpStepUpThreshold` (50) — above it the transfer needs a step-up
@@ -282,6 +324,8 @@ hiding it. A local `--execute` run therefore prints no bearer at all.
 | `JEEB_CANARY_JEEBER_ID` | `ca9a4100-…-0002` | fixed canary jeeber — **must be a well-formed UUID** |
 | `JEEB_CANARY_PARTNER_HOLDER_ID` | `ca9a4100-…-0003` | funding partner holder (ensure script only) |
 | `JEEB_CANARY_ADMIN_ID` | `ca9a4100-…-0004` | funding admin (ensure script only) |
+| `JEEB_CANARY_CLIENT_ROLES` | `customer` | canonical roles minted for the client (comma-separated) |
+| `JEEB_CANARY_JEEBER_ROLES` | `driver,customer` | canonical roles for the jeeber; the first also becomes `active_role` |
 | `JEEB_CANARY_WALLET_MIN` | `0.60` | offer-guard commission threshold asserted before leg 6 |
 | `JEEB_CANARY_WALLET_TOPUP` | `40` | funding amount; must stay under the 50 OTP step-up threshold |
 | `JEEB_CANARY_SKIP_FUNDING` | `false` | skip the funding chain in the ensure script |
@@ -299,6 +343,24 @@ Per-leg budgets exist so a slow push leg cannot starve the chat polls down to a
 single attempt. `JEEB_CANARY_TIMEOUT` is a real ceiling, not a label: every
 `canary_deadline` is clamped to `start + JEEB_CANARY_TIMEOUT`, so the sum of the
 per-leg budgets can never overrun it.
+
+## What the scheduled run actually proves today
+
+Two legs run in a reduced mode on the current staging configuration, and it is
+worth knowing which before reading a green run as full coverage:
+
+- **Leg 8 (push) runs in `durable-inbox` mode.** `PUSH_LEDGER_BASE_URL` is unset
+  (push-notification is not reachable from a GitHub runner), so the leg proves
+  gateway → notification-service and **not** the FCM call. The run says so in its
+  own log and in the job summary.
+- **Leg 9 (Firestore) is skipped entirely.** `JEEB_FIREBASE_WEB_API_KEY` does not
+  exist at repo or `staging` level, so the `VisibleTo` query against Firestore
+  never runs. Leg 7's viewer-scoped read still proves the visibility lane through
+  chat-service; what is missing is the assertion against the datastore the app
+  actually renders from.
+
+Both are one configuration change away — see the two sections above — and neither
+is a code change.
 
 ## Hard dependencies beyond chat and push
 
@@ -370,6 +432,7 @@ name first:
 | `presence` | availability prefix wrong at the edge (404), or heart-beat service auth rejected (401). A 200 that fails the coordinate assertion means the presence store accepted the toggle but dropped `latitude`/`longitude` — fan-out and the offer radius check would then match nobody |
 | `device` | push-notification registration path down — the relay itself is unreachable |
 | `request` | delivery-service / jeeb-state-service down, or the tier catalog lost its Flash row. **503 `account-status-unavailable` means an id stopped being a well-formed UUID**: `[RequireActiveUser]` fails closed when `IBanServiceClient.GetStatusAsync` throws, and ban-service rejects a non-UUID `user_id` — so this is a canary-config fault, not a ban-service outage |
+| `cleanup` (warning, not a failure) | a **403** on `DELETE /v1/requests/{id}` means the minted roles drifted off the canonical `{customer,driver}` vocabulary — that route reads the raw claim. The legacy route is retried automatically; if both fail the request leaks until the tier TTL |
 | `lifecycle` | **offer-service is a hard dependency of this leg** — 502/503 means offer-service is unreachable, not a chat or push outage. 409 `offer-out-of-range` ⇒ the GPS fix never reached delivery-service presence (also a hard dependency, via the presence row the radius check reads); 402 ⇒ the canary jeeber's wallet fell below the guard threshold — run `ensure-canary-accounts.sh` to top it up (the pre-check before leg 6 should catch this first); accept 409 ⇒ the request left the pre-acceptance phase |
 | `push` | **the outage class this exists for** — recipient resolution, the durable dispatcher flag, notification-service `WEBHOOK_BASE_URL`, or the FCM credential |
 | `chat` | `503` ⇒ `UseUpstream__Chat` is off; a viewer-scoped miss ⇒ `VisibleTo[]` does not carry the jeeber; a uid mismatch ⇒ the Firebase mint and the app disagree on identity |

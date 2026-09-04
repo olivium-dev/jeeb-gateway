@@ -331,6 +331,80 @@ case "$FUND_PLAN" in
   *) check "the funding plan never prints the mint key" "absent" "absent" ;;
 esac
 
+# --- the scheduled workflow must FUND before it RUNS, or leg 6 402s on the
+# --- offer guard every time and only a hand-run of the ensure script fixes it.
+WORKFLOW="$SCRIPT_DIR/../../.github/workflows/jeeb-chat-push-canary.yml"
+if [ -f "$WORKFLOW" ]; then
+  ENSURE_AT="$(grep -n 'ensure-canary-accounts\.sh' "$WORKFLOW" | head -1 | cut -d: -f1)"
+  EXECUTE_AT="$(grep -n -- '--execute' "$WORKFLOW" | head -1 | cut -d: -f1)"
+  if [ -n "$ENSURE_AT" ]; then
+    check "the workflow invokes ensure-canary-accounts.sh" "invoked" "invoked"
+  else
+    check "the workflow invokes ensure-canary-accounts.sh" "invoked" "MISSING"
+  fi
+  if [ -n "$ENSURE_AT" ] && [ -n "$EXECUTE_AT" ] && [ "$ENSURE_AT" -lt "$EXECUTE_AT" ]; then
+    check "the workflow funds before it runs the canary" "before" "before"
+  else
+    check "the workflow funds before it runs the canary" "before" "ensure@${ENSURE_AT:-none} execute@${EXECUTE_AT:-none}"
+  fi
+  case "$(sed -n "${ENSURE_AT:-1}p" "$WORKFLOW")" in
+    *--plan*) check "the workflow funds for real, not in plan mode" "execute" "PLAN" ;;
+    *) check "the workflow funds for real, not in plan mode" "execute" "execute" ;;
+  esac
+  if grep -q 'GITHUB_STEP_SUMMARY' "$WORKFLOW"; then
+    check "the funding step surfaces its READY line" "surfaced" "surfaced"
+  else
+    check "the funding step surfaces its READY line" "surfaced" "MISSING"
+  fi
+else
+  check "the canary workflow is present" "found" "MISSING"
+fi
+
+# The ensure script must actually emit the line the workflow greps for.
+case "$FUND_PLAN" in
+  *'READY: client='*) check "the ensure script emits a READY summary line" "present" "present" ;;
+  *) check "the ensure script emits a READY summary line" "present" "MISSING" ;;
+esac
+
+# --- roles must be the CANONICAL {customer,driver}: capability gates canonicalize
+# --- either, but raw HasRole checks 403 the cleanup cancel and leak requests.
+for plan_name in run ensure; do
+  case "$plan_name" in
+    run) THIS_PLAN="$PLAN_OUT" ;;
+    ensure) THIS_PLAN="$FUND_PLAN" ;;
+  esac
+  case "$THIS_PLAN" in
+    *'"roles":["customer"]'*) check "the $plan_name plan mints the client as customer" "canonical" "canonical" ;;
+    *) check "the $plan_name plan mints the client as customer" "canonical" "MISSING" ;;
+  esac
+  case "$THIS_PLAN" in
+    *'"roles":["driver","customer"]'*) check "the $plan_name plan mints the jeeber as driver+customer" "canonical" "canonical" ;;
+    *) check "the $plan_name plan mints the jeeber as driver+customer" "canonical" "MISSING" ;;
+  esac
+  case "$THIS_PLAN" in
+    *'"roles":["client"]'*|*'"roles":["jeeber"]'*) check "the $plan_name plan never mints the contract vocabulary" "absent" "PRESENT" ;;
+    *) check "the $plan_name plan never mints the contract vocabulary" "absent" "absent" ;;
+  esac
+done
+# driver must lead, because TokensController takes active_role from roles[0]
+# when the user has no user-management profile yet.
+case "$PLAN_OUT" in
+  *'"roles":["driver","customer"]'*) check "driver leads so active_role resolves to driver" "driver-first" "driver-first" ;;
+  *) check "driver leads so active_role resolves to driver" "driver-first" "WRONG-ORDER" ;;
+esac
+
+# --- the cleanup must retry the legacy cancel on 403, not only 404: the V1
+# --- route reads raw roles, so a vocabulary drift refuses it there alone.
+RUNSH="$SCRIPT_DIR/run.sh"
+# The arm is the line whose body retries the legacy /requests cancel.
+FALLBACK_ARM="$(grep -B2 'canary_cancel_request "/requests/' "$RUNSH" | grep ')' | head -1)"
+for code in 403 404 405; do
+  case "${FALLBACK_ARM:-none}" in
+    *"$code"*) check "the cleanup falls back to the legacy cancel on $code" "retried" "retried" ;;
+    *) check "the cleanup falls back to the legacy cancel on $code" "retried" "MISSING (arm: ${FALLBACK_ARM:-none})" ;;
+  esac
+done
+
 printf '\n%s case(s), %s failure(s)\n' "$CASES" "$FAILURES"
 [ "$FAILURES" -eq 0 ] || exit 1
 printf 'canary lib contract holds.\n'
