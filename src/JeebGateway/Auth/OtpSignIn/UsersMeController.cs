@@ -131,11 +131,8 @@ public sealed class UsersMeController : ControllerBase
         if (!UserIdentity.TryGetUserId(HttpContext, out var userId, out var unauth))
             return unauth;
 
-        // active_role comes from the validated session token (the singular CURRENT role).
-        // G3 mitigation: at most ProfileCacheSeconds stale after a switch (the switch
-        // invalidates the cache; full access-token denylist deferred).
-        var opaqueActive = HttpContext.User?.FindFirst("active_role")?.Value;
-        var contractActive = JeebRoleTranslator.ToContract(opaqueActive);
+        // Session-claim active_role — kept only as the fallback below.
+        var tokenActive = HttpContext.User?.FindFirst("active_role")?.Value;
 
         // H-B5 — available_roles MUST be the user's FULL role set, not just the active
         // role the token currently carries. A UM token re-issued by a role/switch embeds
@@ -144,8 +141,13 @@ public sealed class UsersMeController : ControllerBase
         // from the local UM projection (same source the switch path uses), falling back to
         // the token claim only when the projection is empty. THIN: no new logic/state — the
         // user's role membership is owned by user-management; we read + translate it.
-        var opaqueRoles = await ResolveAvailableRolesAsync(userId, ct);
+        var (opaqueRoles, persistedActive) = await ResolveRoleStateAsync(userId, ct);
         var contractRoles = JeebRoleTranslator.ToContract(opaqueRoles);
+
+        // JEEBER-TAP fix: the persisted active_role is the AUTHORITY; the session claim is a
+        // mint-time snapshot that refresh re-pins, so it never sees a later role change.
+        var contractActive = JeebRoleTranslator.ToContract(
+            HoldsRole(opaqueRoles, persistedActive) ? persistedActive : tokenActive);
 
         var cacheKey = ProfileCacheKeys.ForUser(userId);
         if (!_cache.TryGetValue(cacheKey, out ProfileDisplay? display))
@@ -539,6 +541,14 @@ public sealed class UsersMeController : ControllerBase
     /// unchanged (the vocabulary the CMS shell's <c>capabilitiesFromRoles</c> understands).</para>
     /// </summary>
     private async Task<IReadOnlyList<string>> ResolveAvailableRolesAsync(string userId, CancellationToken ct)
+        => (await ResolveRoleStateAsync(userId, ct)).AvailableRoles;
+
+    /// <summary>
+    /// <see cref="ResolveAvailableRolesAsync"/> plus the OPAQUE active role the SAME
+    /// authoritative user-management read already carries (no extra upstream call).
+    /// </summary>
+    private async Task<(IReadOnlyList<string> AvailableRoles, string? ActiveRole)>
+        ResolveRoleStateAsync(string userId, CancellationToken ct)
     {
         var owner = await _dualRole.GetUserRolesAsync(userId, ct);
         if (owner is not { AvailableRoles.Count: > 0 })
@@ -552,8 +562,13 @@ public sealed class UsersMeController : ControllerBase
         if (seeded is { Count: > 0 })
             baseRoles = baseRoles.Union(seeded, StringComparer.OrdinalIgnoreCase).ToList();
 
-        return baseRoles;
+        return (baseRoles, owner.ActiveRole);
     }
+
+    /// <summary>True when <paramref name="role"/> is a non-blank member of <paramref name="roles"/>.</summary>
+    private static bool HoldsRole(IReadOnlyList<string> roles, string? role)
+        => !string.IsNullOrWhiteSpace(role)
+           && roles.Contains(role, StringComparer.OrdinalIgnoreCase);
 
     private ObjectResult UpstreamDisabled() => Problem(
         StatusCodes.Status503ServiceUnavailable, "user_management_unavailable",
