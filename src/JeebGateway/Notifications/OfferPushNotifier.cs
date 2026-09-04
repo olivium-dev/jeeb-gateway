@@ -267,6 +267,20 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
                 ["notification_id"] = notificationCorrelationId,
             };
 
+            // No typed centre route owns this event, so the generic seam is the only ADR-0013
+            // producer left. Same ncid as the typed write, so a later replay cannot duplicate.
+            if (await HandedOverGenericallyAsync(
+                    OfferReceivedNotificationRecord.TemplateKey,
+                    clientId,
+                    offerId,
+                    copy,
+                    payload,
+                    PushSilencePolicy.CategoryNewOffer,
+                    ct))
+            {
+                return;
+            }
+
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             cts.CancelAfter(PushTimeout);
 
@@ -431,15 +445,23 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
     ///
     /// <para><see cref="NotificationRecordWriteClassification.Unproven"/> is deliberately NOT a
     /// fallback: the POST went out and the read-back could not prove the row absent, so sending
-    /// anyway re-opens the duplicate window. Null (no write attempted, or the writer threw) and
-    /// <see cref="NotificationRecordWriteClassification.Disabled"/> leave no upstream producer,
-    /// so the direct client still sends — matching the sibling seats, which also fall back only
-    /// when the hand-over seam declined outright.</para>
+    /// anyway re-opens the duplicate window. Null (no write attempted, or the writer threw),
+    /// <see cref="NotificationRecordWriteClassification.Disabled"/> and
+    /// <see cref="NotificationRecordWriteClassification.RouteAbsent"/> leave no upstream producer,
+    /// so the fallback below runs — matching the sibling seats, which also fall back only when
+    /// the hand-over seam declined outright.</para>
+    ///
+    /// <para>RouteAbsent joined that list on 2026-09-04 (G6). A notification-service deployed
+    /// without the jeeb type profile 404s every typed centre route, and this predicate used to
+    /// answer TRUE for the resulting Unproven — so the client's "new offer" push had no producer
+    /// at all on staging while new-request and chat, which ride the static generic-event route,
+    /// kept working.</para>
     /// </summary>
     private static bool UpstreamOwnsPush(NotificationRecordWriteOutcome? handover)
         => handover is not null
            && handover.Classification is not (NotificationRecordWriteClassification.Disabled
-               or NotificationRecordWriteClassification.SkippedSilent);
+               or NotificationRecordWriteClassification.SkippedSilent
+               or NotificationRecordWriteClassification.RouteAbsent);
 
     // b02 step 6b — the template key is GONE from JeebNotificationCatalog (retired: the centre
     // 405s it, so no inbox row of that type can exist). Copy and deep link are therefore passed
@@ -459,6 +481,37 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
     /// <see cref="JeebNotificationCatalog"/> and must not be re-added there.
     /// </summary>
     internal const string RetiredOfferLostTemplateKey = "jeeb.offer_rejected";
+
+    /// <summary>
+    /// Hand ONE offer push to notification-service over <c>POST /notifications/events</c> — the
+    /// static route that exists in every deployment, unlike the typed centre routes, which the
+    /// deployment profile declares. True when a producer took it; false only when the dispatcher
+    /// reports no producer at all, which is the one case where the (guarded) direct client is
+    /// still attempted. <see cref="GenericEventDispatcher"/> owns the logging for every outcome.
+    /// </summary>
+    private async Task<bool> HandedOverGenericallyAsync(
+        string eventType,
+        string recipientId,
+        string offerId,
+        NotificationTemplate copy,
+        IReadOnlyDictionary<string, object?> payload,
+        string refreshCategory,
+        CancellationToken ct)
+    {
+        var handover = await _events.DispatchAsync(
+            eventType,
+            recipientId,
+            offerId,
+            copy.Title,
+            copy.Body,
+            payload.ToDictionary(
+                kv => kv.Key, kv => kv.Value?.ToString() ?? string.Empty, StringComparer.Ordinal),
+            refreshCategory,
+            ct);
+
+        return handover.Classification
+               != GenericEventDispatchClassification.SkippedDirectDispatchArmed;
+    }
 
     private async Task SendLifecycleAsync(
         string recipientId,
@@ -506,26 +559,21 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
                 payload["notification_id"] = notificationCorrelationId;
             }
 
-            // offer_lost has no notification-centre route, so the generic seam is the only way
-            // it survives the gateway ceasing to be a push producer.
-            if (string.Equals(templateKey, RetiredOfferLostTemplateKey, StringComparison.Ordinal))
-            {
-                var handover = await _events.DispatchAsync(
-                    JeebGenericEventTypes.OfferLostEventType,
+            // offer_lost never had a centre route; offer_accepted reaches here only when no
+            // upstream owns it. Either way the generic seam is the last ADR-0013 producer.
+            var isOfferLost = string.Equals(
+                templateKey, RetiredOfferLostTemplateKey, StringComparison.Ordinal);
+            if (await HandedOverGenericallyAsync(
+                    isOfferLost ? JeebGenericEventTypes.OfferLostEventType : templateKey,
                     recipientId,
                     offerId,
-                    template.Title,
-                    template.Body,
-                    payload.ToDictionary(
-                        kv => kv.Key, kv => kv.Value?.ToString() ?? string.Empty, StringComparer.Ordinal),
-                    PushSilencePolicy.CategoryOfferLost,
-                    ct);
-
-                if (handover.Classification
-                    != GenericEventDispatchClassification.SkippedDirectDispatchArmed)
-                {
-                    return;
-                }
+                    template,
+                    payload,
+                    PushSilencePolicy.CategoryForTemplateKey(templateKey)
+                        ?? PushSilencePolicy.CategoryOfferLost,
+                    ct))
+            {
+                return;
             }
 
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
