@@ -112,7 +112,19 @@ else
 
   mint_bearer_for "$ADMIN_ID" admin; ADMIN_TOKEN="$MINTED_TOKEN"; export ADMIN_TOKEN
 
-  canary_log "  1/5 provision the demo partner credential (holder-bound, removed at the end)"
+  # The transfer target must EXIST in wallet-service first. GET /v1/jeeb/wallet
+  # projects an empty balance for an unprovisioned holder, so it cannot see this.
+  canary_log "  1/6 ensure the canary jeeber has a provisioned wallet holder"
+  canary_http PUT "$BASE_URL/dev/wallets/jeeber/$JEEBER_ID/ensure"
+  if [ "$CANARY_MODE" = execute ]; then
+    case "$CANARY_LAST_CODE" in
+      404) canary_fail accounts "PUT /dev/wallets/jeeber/{id}/ensure is 404 — the [DevOnly] seam is disabled on this gateway, so the canary cannot provision its own funding target" ;;
+      502) canary_fail accounts "wallet-service could not converge a holder for $JEEBER_ID (502) — the top-up target does not exist and the transfer would 409 'no provisioned wallet'" ;;
+    esac
+  fi
+  canary_expect accounts "200 204" "canary jeeber wallet-holder provisioning"
+
+  canary_log "  2/6 provision the demo partner credential (holder-bound, removed at the end)"
   CANARY_PARTNER_PROVISION_BODY="$(jq -nc --arg i "$PARTNER_IDENTIFIER" --arg h "$PARTNER_HOLDER_ID" \
     --arg p "$PARTNER_PASSWORD" \
     '{identifier: $i, holderId: $h, displayName: "Jeeb canary funding partner", password: $p}')"
@@ -131,7 +143,7 @@ else
   fi
   canary_expect accounts "200 201 204" "partner credential provisioning"
 
-  canary_log "  2/5 sign the partner in"
+  canary_log "  3/6 sign the partner in"
   LOGIN_FILE="$(canary_tmpfile partner-login)"
   canary_http POST "$BASE_URL/v1/partner/auth/login" \
     --json-var CANARY_PARTNER_LOGIN_BODY \
@@ -148,14 +160,14 @@ else
     PARTNER_ID='<partner_id>'
   fi
 
-  canary_log "  3/5 cash-credit the partner as admin (fixed idempotency key)"
+  canary_log "  4/6 cash-credit the partner as admin (fixed idempotency key)"
   canary_http POST "$BASE_URL/v1/admin/partners/$PARTNER_ID/wallet/credits" \
     --bearer-var ADMIN_TOKEN \
     --json "$(jq -nc --argjson a "$WALLET_TOPUP" --arg k "jeeb-canary-partner-credit-$PARTNER_HOLDER_ID" \
       '{amount: $a, evidenceNote: "Jeeb chat+push canary funding", idempotencyKey: $k}')"
   canary_expect accounts "200 201 409" "partner cash credit"
 
-  canary_log "  4/5 preview the top-up — it must NOT require a step-up code"
+  canary_log "  5/6 preview the top-up — it must NOT require a step-up code"
   PREVIEW_FILE="$(canary_tmpfile topup-preview)"
   canary_http POST "$BASE_URL/v1/partner/wallet/transfers/predict" \
     --bearer-var PARTNER_TOKEN \
@@ -166,7 +178,7 @@ else
     canary_fail accounts "the top-up of $WALLET_TOPUP is above PartnerWallet__OtpStepUpThreshold and would need a step-up code — lower JEEB_CANARY_WALLET_TOPUP"
   fi
 
-  canary_log "  5/5 transfer to the canary jeeber (fixed idempotency key)"
+  canary_log "  6/6 transfer to the canary jeeber (fixed idempotency key)"
   canary_http POST "$BASE_URL/v1/partner/wallet/transfers" \
     --bearer-var PARTNER_TOKEN \
     --json "$(jq -nc --arg j "$JEEBER_ID" --argjson a "$WALLET_TOPUP" \
