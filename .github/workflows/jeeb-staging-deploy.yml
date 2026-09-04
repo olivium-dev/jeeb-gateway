@@ -1316,14 +1316,26 @@ jobs:
                 | select(test("^[a-z0-9]+$"))
               ')
           [ "$candidate_network_id" = "$observed_network_id" ]
-          jq -e \
-            --arg image "$IMAGE" \
-            --arg network_id "$observed_network_id" \
-            --argjson published "$published" \
-            --arg deployment_mode "$DEPLOYMENT_MODE" \
-            --slurpfile incumbent "$incumbent_spec" \
-            -f scripts/staging-gateway-candidate-contract.jq \
-            "$candidate_spec" >/dev/null
+          # jq -e ... >/dev/null exits 1 with ZERO stderr, so a rejected candidate used to
+          # kill the deploy with no diagnostic at all (runs 33821087895 and before).
+          candidate_contract() {
+            jq "$1" \
+              --arg image "$IMAGE" \
+              --arg network_id "$observed_network_id" \
+              --argjson published "$published" \
+              --arg deployment_mode "$DEPLOYMENT_MODE" \
+              --arg chat_upstream_enabled "$chat_upstream_enabled" \
+              --arg explain "$2" \
+              --slurpfile incumbent "$incumbent_spec" \
+              -f scripts/staging-gateway-candidate-contract.jq \
+              "$candidate_spec"
+          }
+          if ! candidate_contract -e '' >/dev/null; then
+            echo "RED: candidate contract rejected (mode=$DEPLOYMENT_MODE" \
+              "chat=$chat_upstream_enabled). Failing expectation(s):" >&2
+            candidate_contract -r true >&2 || echo '  <explain failed to run>' >&2
+            exit 1
+          fi
           if [ "$DEPLOYMENT_MODE" = devtool-reassert ]; then
             jq -e --arg image "$IMAGE" --slurpfile incumbent "$incumbent_spec" \
               --slurpfile firebase_secret "$secret_additions_json" \

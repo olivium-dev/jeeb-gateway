@@ -126,8 +126,12 @@ assert_row() {
 
 assert_row 'chat on + Healthy row passes' true \
   "$(row Healthy 'chat-service api/Health/firebase passed (Firestore reachable)')" 0
-assert_row 'chat on + legacy 204 row passes' true \
-  "$(row Healthy 'chat-service api/Health/firebase returned 204; Firestore round-trip UNVERIFIED (legacy 204)')" 0
+# Healthy is not proof: the 204 branch is Healthy but says UNVERIFIED. The deploy gate
+# must demand the HTTP-200 branch, which is the only real Firestore round-trip.
+assert_row 'chat on + legacy 204 (Healthy but UNVERIFIED) is rejected' true \
+  "$(row Healthy 'chat-service api/Health/firebase returned 204; Firestore round-trip UNVERIFIED (legacy 204)')" 1
+assert_row 'chat off tolerates an UNVERIFIED description it never reaches' false \
+  "$(row Degraded 'chat disabled by flag (FeatureFlags:UseUpstream:Chat=false)')" 0
 assert_row 'chat on but silently disabled is rejected' true \
   "$(row Degraded 'chat disabled by flag (FeatureFlags:UseUpstream:Chat=false)')" 1
 assert_row 'chat on but Firestore UNVERIFIED is rejected' true \

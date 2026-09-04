@@ -85,8 +85,10 @@ ratchet is fixed on the deploy side where it lived.
   cannot see a chat-off deploy; `verify_chat_readiness_row` (after `verify_bootstrap_flags`, and
   skipped in `devtool-reassert`) reads the JSON and requires `chat-upstream-readiness` to be
   `Healthy` when the resolved flag is `true`, or `Degraded` with `disabled by flag` when it is
-  `false`. A chat-off deploy — or a chat-on deploy whose Firestore probe is UNVERIFIED — now fails
-  the gate instead of passing silently.
+  `false`. With `expected=true` it requires `Healthy` **and** a description without `UNVERIFIED`:
+  `ChatUpstreamHealthCheck` returns Healthy for any 2xx, so only the HTTP-200 branch ("Firestore
+  reachable") is a proven round-trip. A chat-off deploy — or a chat-on deploy whose Firestore probe
+  is UNVERIFIED — now fails the gate instead of passing silently.
 
 ### Rung 2 fails open, loudly
 
