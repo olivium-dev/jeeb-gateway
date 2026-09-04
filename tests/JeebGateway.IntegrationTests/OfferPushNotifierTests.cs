@@ -6,6 +6,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Json;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
@@ -236,6 +237,9 @@ public class OfferPushNotifierTests
         record.Payload.ClientName.Should().BeEmpty();
         record.Payload.PickupLocation.Should().Be("Hamra, Beirut");
         record.Payload.DeliveryLocation.Should().Be("Achrafieh, Beirut");
+        record.Payload.RequestId.Should().Be(RequestId,
+            "the only offer-review screen is keyed by request id, so a typed offer push "
+            + "without it cannot deep-link (measured on device, G9/T3b)");
         fieldAbsentCount.Should().Be(1);
 
         // Copy + correlation parity is only observable where the centre declines to produce and
@@ -416,6 +420,37 @@ public class OfferPushNotifierTests
             }
             Sends.Enqueue(new SendRecord(user_id, body.Payload));
             return Task.FromResult(new SentPayloadResponse { Message = "ok", Timestamp = DateTimeOffset.UtcNow });
+        }
+    }
+
+    [Fact]
+    public void TypedOfferPayloadsSerializeTheOwningRequestIdForTheDeepLink()
+    {
+        var received = JsonSerializer.SerializeToNode(new OfferReceivedNotificationPayload
+        {
+            UserId = Client,
+            OfferId = OfferId,
+            RequestId = RequestId,
+            OfferAmount = 7m,
+            DeliveryFee = 7m,
+            EstimatedDuration = "30",
+            CreatedAt = DateTimeOffset.UnixEpoch,
+        })!.AsObject();
+        var accepted = JsonSerializer.SerializeToNode(new OfferAcceptedNotificationPayload
+        {
+            UserId = Client,
+            OfferId = OfferId,
+            RequestId = RequestId,
+            AcceptedAmount = 7m,
+            JeeberId = "jeeber-1",
+            CreatedAt = DateTimeOffset.UnixEpoch,
+        })!.AsObject();
+
+        foreach (var payload in new[] { received, accepted })
+        {
+            payload.Should().ContainKey("request_id");
+            payload["request_id"]!.GetValue<string>().Should().Be(RequestId);
+            payload.Should().ContainKey("offer_id");
         }
     }
 

@@ -175,6 +175,7 @@ public class OfferPushRouteAbsentTests
         {
             UserId = Client,
             OfferId = OfferId,
+            RequestId = "req-1",
             OfferAmount = 5m,
             DeliveryFee = 5m,
             EstimatedDuration = "80",

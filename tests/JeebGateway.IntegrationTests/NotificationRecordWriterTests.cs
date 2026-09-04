@@ -426,6 +426,7 @@ public sealed class NotificationRecordWriterTests
         {
             UserId = "client-1",
             OfferId = "offer-1",
+            RequestId = "req-1",
             ClientName = string.Empty,
             PickupLocation = "Hamra, Beirut",
             DeliveryLocation = "Achrafieh, Beirut",
@@ -447,6 +448,7 @@ public sealed class NotificationRecordWriterTests
         {
             UserId = "client-1",
             OfferId = "offer-1",
+            RequestId = "req-1",
             ClientName = string.Empty,
             PickupLocation = "A",
             DeliveryLocation = "B",
