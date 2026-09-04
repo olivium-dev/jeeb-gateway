@@ -393,6 +393,23 @@ case "$PLAN_OUT" in
   *) check "driver leads so active_role resolves to driver" "driver-first" "WRONG-ORDER" ;;
 esac
 
+# --- canary_runtime_partner_identifier ---------------------------------------
+# PartnerCredentialStore.RuntimeIdentifier is prefix + holderId.ToString("N").
+check "the runtime partner identifier is prefix + dashless holder" \
+  "devtool-partner-ca9a4100000040008000000000000003" \
+  "$(canary_runtime_partner_identifier ca9a4100-0000-4000-8000-000000000003)"
+check "an upper-case holder still lowercases, as ToString(\"N\") does" \
+  "devtool-partner-ca9a4100000040008000000000000003" \
+  "$(canary_runtime_partner_identifier CA9A4100-0000-4000-8000-000000000003)"
+
+# The default must be derived, not a literal: a free-form identifier 409s in
+# ValidateRuntimeIdentity before the wallet is ever touched.
+ENSURE_SH="$SCRIPT_DIR/ensure-canary-accounts.sh"
+case "$(grep -m1 '^PARTNER_IDENTIFIER=' "$ENSURE_SH")" in
+  *canary_runtime_partner_identifier*) check "the partner identifier default is derived from the holder" "derived" "derived" ;;
+  *) check "the partner identifier default is derived from the holder" "derived" "LITERAL" ;;
+esac
+
 # --- the cleanup must retry the legacy cancel on 403, not only 404: the V1
 # --- route reads raw roles, so a vocabulary drift refuses it there alone.
 RUNSH="$SCRIPT_DIR/run.sh"

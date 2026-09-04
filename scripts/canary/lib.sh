@@ -256,6 +256,12 @@ canary_message_visible() {
   ' >/dev/null 2>&1
 }
 
+# PartnerCredentialStore accepts ONE identifier shape and derives it from the
+# holder itself; any other string 409s in ValidateRuntimeIdentity before the wallet.
+canary_runtime_partner_identifier() {
+  printf 'devtool-partner-%s' "$(printf '%s' "$1" | tr -d '-' | tr '[:upper:]' '[:lower:]')"
+}
+
 # A fresh password per run: the credential is provisioned, used, then deleted,
 # so nothing durable is derived from it and nothing is committed.
 canary_partner_password() {
