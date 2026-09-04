@@ -331,6 +331,41 @@ case "$FUND_PLAN" in
   *) check "the funding plan never prints the mint key" "absent" "absent" ;;
 esac
 
+# --- the scheduled workflow must FUND before it RUNS, or leg 6 402s on the
+# --- offer guard every time and only a hand-run of the ensure script fixes it.
+WORKFLOW="$SCRIPT_DIR/../../.github/workflows/jeeb-chat-push-canary.yml"
+if [ -f "$WORKFLOW" ]; then
+  ENSURE_AT="$(grep -n 'ensure-canary-accounts\.sh' "$WORKFLOW" | head -1 | cut -d: -f1)"
+  EXECUTE_AT="$(grep -n -- '--execute' "$WORKFLOW" | head -1 | cut -d: -f1)"
+  if [ -n "$ENSURE_AT" ]; then
+    check "the workflow invokes ensure-canary-accounts.sh" "invoked" "invoked"
+  else
+    check "the workflow invokes ensure-canary-accounts.sh" "invoked" "MISSING"
+  fi
+  if [ -n "$ENSURE_AT" ] && [ -n "$EXECUTE_AT" ] && [ "$ENSURE_AT" -lt "$EXECUTE_AT" ]; then
+    check "the workflow funds before it runs the canary" "before" "before"
+  else
+    check "the workflow funds before it runs the canary" "before" "ensure@${ENSURE_AT:-none} execute@${EXECUTE_AT:-none}"
+  fi
+  case "$(sed -n "${ENSURE_AT:-1}p" "$WORKFLOW")" in
+    *--plan*) check "the workflow funds for real, not in plan mode" "execute" "PLAN" ;;
+    *) check "the workflow funds for real, not in plan mode" "execute" "execute" ;;
+  esac
+  if grep -q 'GITHUB_STEP_SUMMARY' "$WORKFLOW"; then
+    check "the funding step surfaces its READY line" "surfaced" "surfaced"
+  else
+    check "the funding step surfaces its READY line" "surfaced" "MISSING"
+  fi
+else
+  check "the canary workflow is present" "found" "MISSING"
+fi
+
+# The ensure script must actually emit the line the workflow greps for.
+case "$FUND_PLAN" in
+  *'READY: client='*) check "the ensure script emits a READY summary line" "present" "present" ;;
+  *) check "the ensure script emits a READY summary line" "present" "MISSING" ;;
+esac
+
 printf '\n%s case(s), %s failure(s)\n' "$CASES" "$FAILURES"
 [ "$FAILURES" -eq 0 ] || exit 1
 printf 'canary lib contract holds.\n'

@@ -155,6 +155,13 @@ up through the Dev Tool's own route chain:
 clears `JEEB_CANARY_WALLET_MIN`, the whole chain is skipped. Re-running the script
 any number of times never stacks credits.
 
+**That is why the scheduled workflow runs it on every run**, as a step before
+`run.sh --execute`. It is cheap when funded (one wallet read) and it is the only
+thing standing between a drained wallet and a leg-6 402 that nobody is watching
+for. Its `READY: … (funding: funded|already|skipped)` line goes to the job
+summary, so a run that had to top up says so. `test-canary-lib.sh` asserts the
+step exists, runs before the canary, and is not in plan mode.
+
 `JEEB_CANARY_WALLET_TOPUP` defaults to **40** and must stay under
 `PartnerWallet__OtpStepUpThreshold` (50) — above it the transfer needs a step-up
 code and this stops being an unattended top-up. The script fails with that exact
