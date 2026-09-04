@@ -23,7 +23,9 @@ JEEBER_ROLES="${JEEB_CANARY_JEEBER_ROLES:-driver,customer}"
 # Must stay under PartnerWallet__OtpStepUpThreshold (50) or the transfer needs a
 # step-up code and this stops being a two-call, unattended top-up.
 WALLET_TOPUP="${JEEB_CANARY_WALLET_TOPUP:-40}"
-PARTNER_IDENTIFIER="${JEEB_CANARY_PARTNER_IDENTIFIER:-jeeb-canary-partner}"
+# Derived, never invented: the store keys the reservation by holder and rejects
+# any identifier that is not devtool-partner-<holderId without dashes>.
+PARTNER_IDENTIFIER="${JEEB_CANARY_PARTNER_IDENTIFIER:-$(canary_runtime_partner_identifier "$PARTNER_HOLDER_ID")}"
 PARTNER_PASSWORD="${JEEB_CANARY_PARTNER_PASSWORD:-}"
 SKIP_FUNDING="${JEEB_CANARY_SKIP_FUNDING:-false}"
 CANARY_MODE=execute
@@ -122,12 +124,10 @@ else
       --json-var CANARY_PARTNER_PROVISION_BODY
   }
   provision_partner_credential
-  # 409 means a previous run died before its cleanup; the DELETE is holder-bound,
-  # so reclaiming our own identifier cannot touch anyone else's credential.
+  # A live reservation is tombstoned, not deleted, and holds a different random
+  # password, so it cannot be reclaimed — only waited out.
   if [ "$CANARY_MODE" = execute ] && [ "$CANARY_LAST_CODE" = "409" ]; then
-    canary_note "identifier already taken — reclaiming the canary's own credential"
-    canary_http DELETE "$BASE_URL/dev/partner/credentials/$PARTNER_IDENTIFIER?holderId=$PARTNER_HOLDER_ID"
-    provision_partner_credential
+    canary_fail accounts "a runtime partner reservation for $PARTNER_HOLDER_ID is still live — retry after its 5-minute lifetime, or point JEEB_CANARY_PARTNER_HOLDER_ID at a fresh UUID"
   fi
   canary_expect accounts "200 201 204" "partner credential provisioning"
 

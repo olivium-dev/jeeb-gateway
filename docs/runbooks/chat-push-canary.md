@@ -177,7 +177,11 @@ up through the Dev Tool's own route chain:
 1. mint an admin bearer for the canary admin id,
 2. `POST /dev/partner/credentials` — provision a holder-bound partner credential
    with a **freshly generated password** (never committed, never printed, deleted
-   at the end; a 409 from a crashed earlier run is reclaimed and retried),
+   at the end). The identifier is not free-form: `PartnerCredentialStore` accepts
+   only `devtool-partner-<holderId without dashes>` and 409s on anything else, so
+   the script derives it with `canary_runtime_partner_identifier`. A 409 here means
+   a reservation for that holder is still live — it is tombstoned rather than
+   deleted and carries another run's password, so it must be waited out (5 min),
 3. `POST /v1/partner/auth/login` → partner session,
 4. `POST /v1/admin/partners/{partnerId}/wallet/credits` — cash-credit the partner
    as admin, under a fixed idempotency key,
