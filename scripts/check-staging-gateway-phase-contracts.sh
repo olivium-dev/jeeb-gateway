@@ -47,6 +47,9 @@ expected_a1 = {
     "DemoUsers__Enabled": "true",
     "Features__DevEndpoints__Enabled": "true",
     "Features__Swagger__Enabled": "true",
+    # A1/B are the two PHASE DOCUMENTS (deploy/staging-gateway/*.env): A1 describes chat off,
+    # B describes chat on. Neither is a deploy-time pin — the workflow and the candidate
+    # contract both bind the RESOLVED state, asserted below.
     "FeatureFlags__UseUpstream__Chat": "false",
     "FeatureFlags__UseUpstream__Otp": "true",
     "FeatureFlags__UseUpstream__Realtime": "false",
@@ -169,6 +172,26 @@ expected_deltas = {
 }
 if deltas != expected_deltas:
     raise SystemExit(f"FAIL: B activation delta is not flag-only: {sorted(deltas)}")
+
+# The deploy-time candidate contract must ACCEPT whichever chat state the deploy resolved.
+# A literal pin here is a gate no activated candidate can pass: it rejected the Spec with a
+# silent `jq -e` exit 1 and killed run 33821087895 with zero diagnostic output.
+candidate_contract = Path("scripts/staging-gateway-candidate-contract.jq").read_text()
+if '"featureflags__useupstream__chat": $chat_upstream_enabled,' not in candidate_contract:
+    raise SystemExit(
+        "FAIL: the candidate contract does not bind chat to the resolved $chat_upstream_enabled")
+for literal in ('"false"', '"true"'):
+    if f'"featureflags__useupstream__chat": {literal}' in candidate_contract:
+        raise SystemExit(f"FAIL: the candidate contract pins chat to the literal {literal}")
+if '$environment["featureflags__useupstream__chat"] ==' in candidate_contract:
+    raise SystemExit("FAIL: the candidate contract compares chat outside the expectation table")
+for marker in (
+    '--arg chat_upstream_enabled "$chat_upstream_enabled"',
+    'RED: candidate contract rejected',
+    'candidate_contract -r true >&2',
+):
+    if marker not in workflow:
+        raise SystemExit(f"FAIL: candidate-contract diagnostic marker missing: {marker}")
 
 print("Staging gateway A1 bootstrap and separate B activation contracts are exact.")
 PY
