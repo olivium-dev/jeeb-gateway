@@ -204,6 +204,12 @@ public sealed class KycAdminReviewComposer
         try
         {
             var grant = await _userManagement.AppendAvailableRoleAsync(subjectUserId, opaqueRole, ct);
+
+            // The grant makes the role AVAILABLE; this makes it the ACTIVE one, so the
+            // approved jeeber's next session is jeeber-scoped without a client-side switch.
+            await JeeberActiveRolePromotion.PromoteAsync(
+                _userManagement, subjectUserId, opaqueRole, grant, _log, ct);
+
             return grant.Added || grant.AvailableRoles.Any(
                 r => string.Equals(r, opaqueRole, StringComparison.OrdinalIgnoreCase));
         }

@@ -165,6 +165,71 @@ public class DualRoleBffTests
     }
 
     /// <summary>
+    /// JEEBER-TAP regression lock. <c>active_role</c> MUST come from the role record
+    /// user-management persists, NOT from the session claim.
+    ///
+    /// <para>The claim is a MINT-TIME snapshot: a session minted before a role change keeps the
+    /// stale value for its whole life, because refresh re-pins the same snapshot
+    /// (<c>SessionActiveRoleSnapshot</c>, PR #562). A KYC-approved jeeber therefore kept reading
+    /// <c>active_role: client</c>, the mobile <c>RoleSync</c> put them on the client surface, and
+    /// the client guard rewrote every <c>jeeb://jeeber/deliveries/&lt;id&gt;/active</c> push tap
+    /// to <c>/</c> — measured on the A33 against live staging while UM held <c>driver</c>.</para>
+    /// </summary>
+    [Fact]
+    public async Task FB_GetMe_ActiveRole_Comes_From_UserManagement_Not_The_Stale_Session_Claim()
+    {
+        var um = new StubUm
+        {
+            UserRoles = new UserRolesResult(
+                KamalId, new[] { Roles.Client, Roles.Jeeber }, Roles.Jeeber)
+        };
+        using var factory = MakeFactory(new StubOtp(), um, umEnabled: true);
+        var http = factory.CreateClient();
+        // The bearer's active_role claim is the STALE 'customer' (mint order = roles[0]).
+        http.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue(
+                "Bearer", MintGatewayBearer(factory, KamalId, Roles.Client, Roles.Jeeber));
+
+        var resp = await http.GetAsync("/v1/users/me");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        doc.RootElement.GetProperty("active_role").GetString().Should().Be("jeeber",
+            "the persisted active role is the authority; the session claim cannot see a later change");
+        doc.RootElement.GetProperty("available_roles").EnumerateArray().Select(e => e.GetString())
+            .Should().BeEquivalentTo(new[] { "client", "jeeber" });
+    }
+
+    /// <summary>
+    /// The authority never INVENTS a role: a persisted active role the user does not hold, or none
+    /// at all, still falls back to the validated session claim rather than emitting an unheld role.
+    /// </summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("admin")]
+    public async Task FB_GetMe_ActiveRole_FallsBack_To_The_Session_Claim(string? persistedActive)
+    {
+        var um = new StubUm
+        {
+            UserRoles = new UserRolesResult(
+                SamiId, new[] { Roles.Client, Roles.Jeeber }, persistedActive)
+        };
+        using var factory = MakeFactory(new StubOtp(), um, umEnabled: true);
+        var http = factory.CreateClient();
+        http.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue(
+                "Bearer", MintGatewayBearer(factory, SamiId, Roles.Jeeber, Roles.Client));
+
+        var resp = await http.GetAsync("/v1/users/me");
+
+        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
+        doc.RootElement.GetProperty("active_role").GetString().Should().Be("jeeber",
+            "an absent or unheld persisted active role leaves the session claim in charge");
+    }
+
+    /// <summary>
     /// S02 H-A2 regression lock (companion to FC_Verify_NewIdentity_Defaults_To_Client).
     /// When UM's phone find-or-create returns a single-role client identity (the intended
     /// state for a never-KYC'd phone like Sami's), OTP verify MUST surface exactly ["client"]
@@ -425,8 +490,11 @@ public class DualRoleBffTests
         public Task<RoleGrantResult> RemoveAvailableRoleAsync(string userId, string opaqueRole, CancellationToken ct)
             => throw new UserManagementCallException("role/revoke", 404);
 
+        /// <summary>Overrides the persisted role record GET /v1/users/me reads as its authority.</summary>
+        public UserRolesResult? UserRoles { get; init; }
+
         public Task<UserRolesResult?> GetUserRolesAsync(string userId, CancellationToken ct)
-            => Task.FromResult<UserRolesResult?>(new UserRolesResult(
+            => Task.FromResult(UserRoles ?? new UserRolesResult(
                 FindOrCreate.UserId,
                 FindOrCreate.AvailableRoles,
                 FindOrCreate.ActiveRole));

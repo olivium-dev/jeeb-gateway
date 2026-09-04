@@ -426,9 +426,15 @@ public sealed class KycSubmissionBffController : ControllerBase
         try
         {
             var grant = await _userManagement.AppendAvailableRoleAsync(subjectUserId, opaqueRole, ct);
+
+            // The grant makes the role AVAILABLE; this makes it the ACTIVE one, so the
+            // approved jeeber's next session is jeeber-scoped without a client-side switch.
+            var promoted = await JeeberActiveRolePromotion.PromoteAsync(
+                _userManagement, subjectUserId, opaqueRole, grant, _log, ct);
+
             _log.LogInformation(
-                "kyc auto-approve {SubmissionId}: granted opaque role '{Role}' (added={Added})",
-                submissionId, opaqueRole, grant.Added);
+                "kyc auto-approve {SubmissionId}: granted opaque role '{Role}' (added={Added}, activePromoted={Promoted})",
+                submissionId, opaqueRole, grant.Added, promoted);
         }
         catch (UserManagementCallException ex)
         {
