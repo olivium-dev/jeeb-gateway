@@ -229,6 +229,7 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
                     {
                         UserId = clientId,
                         OfferId = offerId,
+                        RequestId = requestId,
                         ClientName = string.Empty,
                         PickupLocation = context.PickupAddress ?? string.Empty,
                         DeliveryLocation = context.DropoffAddress ?? string.Empty,
@@ -371,6 +372,7 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
                     {
                         UserId = request.ClientId,
                         OfferId = offerId,
+                        RequestId = requestId,
                         ClientName = string.Empty,
                         PickupLocation = request.PickupAddress ?? string.Empty,
                         DeliveryLocation = request.DropoffAddress ?? string.Empty,

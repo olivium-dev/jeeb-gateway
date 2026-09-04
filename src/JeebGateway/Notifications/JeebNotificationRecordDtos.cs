@@ -50,6 +50,13 @@ public sealed record OfferReceivedNotificationPayload
     [JsonPropertyName("offer_id")]
     public required string OfferId { get; init; }
 
+    /// <summary>
+    /// The owning request. The only offer-review screen is keyed by REQUEST id, so a
+    /// notification without this cannot deep-link (measured on device, G9/T3b).
+    /// </summary>
+    [JsonPropertyName("request_id")]
+    public required string RequestId { get; init; }
+
     [JsonPropertyName("client_name")]
     public string ClientName { get; init; } = string.Empty;
 
@@ -108,6 +115,10 @@ public sealed record OfferAcceptedNotificationPayload
 
     [JsonPropertyName("offer_id")]
     public required string OfferId { get; init; }
+
+    /// <summary>The owning request; the offer-review screen is keyed by request id.</summary>
+    [JsonPropertyName("request_id")]
+    public required string RequestId { get; init; }
 
     [JsonPropertyName("client_name")]
     public string ClientName { get; init; } = string.Empty;
