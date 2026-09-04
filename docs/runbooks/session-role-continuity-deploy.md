@@ -39,6 +39,47 @@ replaces an unrecoverable 403 brick.
    then leave the app idle >15 minutes and confirm both still succeed after the rotation. That last
    step is the actual regression check — the bug only appears *after* a rotation.
 
+## Recognising this class in 30 seconds (added after the deploy above)
+
+Two signals now exist. Before them the class was invisible: `/health/ready` read green while every
+`[RequireCapability]` route 403'd (D2 §4).
+
+**1. The readiness row `refresh-role-continuity`** on `/health/ready` (declared roster 27 → 28):
+
+```json
+"refresh-role-continuity": {
+  "status": "Degraded",
+  "description": "usersStoreProfiles=0 refreshFamiliesActive=412 rolesEmptyRefreshes=37 lastRolesEmptyAt=2026-09-04T09:12:31.0000000Z"
+}
+```
+
+**Degraded when `usersStoreProfiles == 0` while `refreshFamiliesActive > 0`** — the users store
+holds nothing while live sessions rotate against it. Healthy otherwise, including a cold boot with
+nothing rotating yet. It is `Degraded`, never `Unhealthy`, so it cannot restart-loop the container
+via the Dockerfile `HEALTHCHECK`.
+
+`refreshFamiliesActive` counts distinct sessions *this process has served a rotation for* since
+boot — a lower bound on live families, not an inventory. The durable refresh store is a
+key-addressed KV with no enumeration, so no process can count live sessions outright; what it can
+observe is that real sessions depend on it, which is the population an empty users store harms.
+The row therefore trips on the first rotation after a restart, i.e. on the first user, not after
+the fleet is gone.
+
+**2. The grep-able log line**, `Error` level, emitted at the exact point a roles-less token would
+have been minted (now the fail-closed 401):
+
+```
+token_mint.roles_empty path=refresh source=users_store_miss activeRole=client snapshot=absent
+```
+
+```bash
+journalctl -u jeeb-gateway | grep -c token_mint.roles_empty     # MSI
+```
+
+`snapshot=absent` is a pre-G5 record (expected during the one-time drain above);
+`snapshot=rejected` means a record carried a snapshot that failed validation — that one is a minter
+regression, not a drain, and should be investigated. No user id, token or role list is ever logged.
+
 ## Rolling / mixed-version window
 
 If two gateway versions ever serve simultaneously, an old-code replica that wins a rotation writes a

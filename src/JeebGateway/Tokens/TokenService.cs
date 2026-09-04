@@ -28,19 +28,22 @@ public class TokenService : ITokenService
     private readonly JwtOptions _options;
     private readonly SigningCredentials _signingCredentials;
     private readonly ILogger<TokenService> _log;
+    private readonly IRefreshSessionCensus _census;
 
     public TokenService(
         IRefreshTokenStore store,
         IUsersStoreAdapter users,
         IOptions<JwtOptions> options,
         TimeProvider clock,
-        ILogger<TokenService>? log = null)
+        ILogger<TokenService>? log = null,
+        IRefreshSessionCensus? census = null)
     {
         _store = store;
         _users = users;
         _clock = clock;
         _options = options.Value;
         _log = log ?? NullLogger<TokenService>.Instance;
+        _census = census ?? new InProcessRefreshSessionCensus();
 
         var keyBytes = Encoding.UTF8.GetBytes(_options.SigningKey);
         if (keyBytes.Length < 32)
@@ -206,6 +209,10 @@ public class TokenService : ITokenService
             return new RefreshResult { Outcome = RefreshOutcome.Expired };
         }
 
+        // The record is active and about to rotate: this process now has proof that live
+        // sessions depend on it, which is the readiness row's other input (D2 sec 4a).
+        _census.RecordRotation(existing.BoundedSessionFamilyId ?? existing.UserId);
+
         TokenRoleContext roleContext;
         VerifiedAuthenticationContext? persistedAuthentication;
         if (existing.AbsoluteSessionExpiresAt is not null)
@@ -247,8 +254,13 @@ public class TokenService : ITokenService
         // L2 then 403s on EVERY capability route — a silent, unrecoverable session brick.
         if (!roleContext.Roles.Any(static role => !string.IsNullOrWhiteSpace(role)))
         {
-            _log.LogWarning(
-                "auth.refresh role resolution yielded no roles — refusing to mint a capability-less session");
+            _census.RecordRolesEmptyRefresh(now);
+            // D2 §4b: the one grep-able line. Never log the user id or the token.
+            _log.LogError(
+                "token_mint.roles_empty path=refresh source={Source} activeRole={ActiveRole} snapshot={Snapshot}",
+                "users_store_miss",
+                roleContext.ActiveRole,
+                existing.SessionRoleSnapshot is null ? "absent" : "rejected");
             return new RefreshResult { Outcome = RefreshOutcome.RoleResolutionFailed };
         }
 
