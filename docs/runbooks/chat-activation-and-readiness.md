@@ -28,6 +28,13 @@ onto the Swarm service, and the next deploy carries that value forward instead o
 Rung 3 means a fresh service comes up with chat **on** — a deploy is never the thing that
 turns chat off.
 
+`chat_upstream_enabled` is consumed in three places, and the third has a trap: the candidate-Spec
+builder pipes a **quoted** `REMOTE` heredoc to the staging host, so the name is expanded *there*,
+not on the runner. It must therefore appear in the `for variable in …` forwarding list — the remote
+runs `set -euo pipefail`, so an unforwarded name aborts the deploy with `unbound variable` (run
+`33819016720`). `scripts/check-remote-heredoc-variable-forwarding.sh` now enforces this for every
+name, not just this one.
+
 ### Day 0 — this PR does NOT turn chat on
 
 **The first staging deploy after merging this lands `Chat=false` and chat stays off.** Rung 1 is
@@ -70,6 +77,10 @@ ratchet is fixed on the deploy side where it lived.
   `add_env FeatureFlags__UseUpstream__Chat <literal>`.
 - `scripts/test-staging-chat-flag-resolution.sh` (CI) **extracts** the resolver from the
   workflow and executes it against a stubbed `ssh`/`docker` across all six resolution cases.
+- `scripts/check-remote-heredoc-variable-forwarding.sh` (CI) rejects any variable expanded
+  inside the quoted `REMOTE` heredoc that the deploy does not forward to the staging host.
+  `scripts/test-remote-heredoc-variable-forwarding.sh` proves it against four mutants, one of
+  which is the exact regression of run `33819016720`.
 - The deploy asserts what it declared. Degraded is HTTP 200, so `curl -fsS` on `/health/ready`
   cannot see a chat-off deploy; `verify_chat_readiness_row` (after `verify_bootstrap_flags`, and
   skipped in `devtool-reassert`) reads the JSON and requires `chat-upstream-readiness` to be
@@ -85,13 +96,21 @@ incumbent; defaulting true` versus `::warning::could not read the incumbent chat
 true` — so the log never claims "absent" when it means "unreadable". The only durable *off* is the
 declared variable.
 
-## `/health/ready` roster: 20 -> 27 declared (19 -> 26 staging, 18 -> 25 MSI on the wire)
+## `/health/ready` roster
 
-`GatewayHealthRoster.ExpectedReadyCount` counts the **declared** roster. `whisper` and
-`push-relay-scoped-readiness` register conditionally, which is why live staging reads 19 rows today
-against a constant of 20, and MSI reads 18 (it is also missing `push-relay-scoped-readiness` — gap
-G5). That skew is pre-existing and unchanged here; this PR adds 7 rows to both the declared roster
-and the wire, so expect **26 on staging and 25 on MSI**, not 27.
+**`GatewayHealthRoster.ExpectedReadyCount` is 27.** That is the DECLARED roster and the number the
+roster tests assert. It is not what a live host serves: `whisper` and `push-relay-scoped-readiness`
+register conditionally, so each environment reads fewer rows.
+
+| | declared | staging wire | MSI wire |
+|---|---|---|---|
+| before | 20 | 19 (no `whisper`) | 18 (no `whisper`, no `push-relay-scoped-readiness` — gap G5) |
+| after | **27** | **26** | **25** |
+
+The skew is pre-existing and unchanged here; this change adds the same 7 rows to the declared roster
+and to both wires. Measured baseline (2026-09-03, before this landed): staging `/health/ready` = 200
+with 19 rows, all Healthy, no chat row. When comparing a live host against the constant, subtract
+the conditional rows before calling it a drift.
 
 ### `chat-upstream-readiness`
 

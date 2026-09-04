@@ -26,6 +26,8 @@ jobs:
           python3 scripts/test-smoke-jeeb-firebase-token-exchange.py
           bash scripts/test-chat-b-activation-preflight.sh
           bash scripts/test-staging-chat-flag-resolution.sh
+          bash scripts/check-remote-heredoc-variable-forwarding.sh
+          bash scripts/test-remote-heredoc-variable-forwarding.sh
       - name: Reject gateway provider-secret drift
         run: bash scripts/check-provider-secret-boundaries.sh
       - name: Lock staging authorized-WSS probe contract
