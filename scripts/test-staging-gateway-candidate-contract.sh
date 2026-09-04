@@ -73,10 +73,22 @@ jq '[.TaskTemplate.ContainerSpec.Secrets[] | select(.File.Name == "firebase_admi
 
 validate() {
   local document=$1 mode=${2:-normal} incumbent_document=${3:-$candidate}
+  local chat=${4:-false}
   jq -e --arg image "$image" --arg network_id "$network_id" \
     --argjson published 10000 --arg deployment_mode "$mode" \
+    --arg chat_upstream_enabled "$chat" --arg explain "" \
     --slurpfile incumbent "$incumbent_document" \
     -f "$contract" "$document" >/dev/null
+}
+
+explain() {
+  local document=$1 mode=${2:-normal} incumbent_document=${3:-$candidate}
+  local chat=${4:-false}
+  jq -r --arg image "$image" --arg network_id "$network_id" \
+    --argjson published 10000 --arg deployment_mode "$mode" \
+    --arg chat_upstream_enabled "$chat" --arg explain true \
+    --slurpfile incumbent "$incumbent_document" \
+    -f "$contract" "$document"
 }
 
 reject_mutant() {
@@ -189,7 +201,9 @@ reject_mutant 'host-port OTP endpoint' \
   '(.TaskTemplate.ContainerSpec.Env[0]) = "Services__ServiceOTP__BaseUrl=http://192.168.2.20:10037"'
 reject_mutant 'host-port realtime endpoint' \
   '(.TaskTemplate.ContainerSpec.Env[8]) = "Services__Realtime__BaseUrl=http://192.168.2.20:10069"'
-reject_mutant 'Chat activated in A1' \
+# Chat is no longer pinned: the candidate's chat state must EQUAL the resolved value.
+# Run 33821087895 died because a literal "false" here rejected every activated candidate.
+reject_mutant 'chat activated while the deploy resolved false' \
   '(.TaskTemplate.ContainerSpec.Env[3]) = "FeatureFlags__UseUpstream__Chat=true"'
 reject_mutant 'Realtime activated in A1' \
   '(.TaskTemplate.ContainerSpec.Env[4]) = "FeatureFlags__UseUpstream__Realtime=true"'
@@ -375,4 +389,55 @@ if jq -e --arg image "$image" --slurpfile incumbent "$mutant" \
   exit 1
 fi
 
-echo 'staging gateway candidate semantic contract tests: PASS (mode flags preserved; exact Dev Tool delta with 19 negative controls)'
+# --- Chat state must EQUAL the resolved value, in BOTH directions -------------
+# The class this closes: a gate no candidate can pass. Run 33821087895 resolved chat=true,
+# the contract pinned "false", jq -e exited 1 with zero stderr, set -e killed the deploy.
+chat_on="$test_root/chat-on.json"
+jq '(.TaskTemplate.ContainerSpec.Env[] | select(startswith("FeatureFlags__UseUpstream__Chat="))) =
+    "FeatureFlags__UseUpstream__Chat=true"' "$candidate" > "$chat_on"
+
+validate "$candidate" normal "$candidate" false \
+  || { echo 'resolved false + candidate false was rejected' >&2; exit 1; }
+validate "$chat_on" normal "$candidate" true \
+  || { echo 'resolved true + candidate true was rejected — this is run 33821087895' >&2; exit 1; }
+! validate "$chat_on" normal "$candidate" false \
+  || { echo 'resolved false accepted an activated candidate' >&2; exit 1; }
+! validate "$candidate" normal "$candidate" true \
+  || { echo 'resolved true accepted a deactivated candidate' >&2; exit 1; }
+
+for bad_state in '' true1 TRUE yes 1; do
+  if jq -e --arg image "$image" --arg network_id "$network_id" \
+    --argjson published 10000 --arg deployment_mode normal \
+    --arg chat_upstream_enabled "$bad_state" --arg explain "" \
+    --slurpfile incumbent "$candidate" \
+    -f "$contract" "$candidate" >/dev/null 2>&1; then
+    echo "candidate contract accepted a malformed resolved chat state: '$bad_state'" >&2
+    exit 1
+  fi
+done
+
+# --- The rejection must SAY WHY: three deploys died on a silent jq -e exit 1 ---
+mismatch=$(explain "$chat_on" normal "$candidate" false)
+case "$mismatch" in
+  *featureflags__useupstream__chat*'expected "false"'*'candidate has "true"'*) ;;
+  *) echo "explain did not name the chat mismatch: $mismatch" >&2; exit 1 ;;
+esac
+mismatch=$(explain "$candidate" normal "$candidate" true)
+case "$mismatch" in
+  *featureflags__useupstream__chat*'expected "true"'*'candidate has "false"'*) ;;
+  *) echo "explain did not name the inverse chat mismatch: $mismatch" >&2; exit 1 ;;
+esac
+jq 'del(.TaskTemplate.ContainerSpec.Env[] | select(startswith("Auth__Otp__Phone__AllowedRegion=")))' \
+  "$candidate" > "$mutant"
+case "$(explain "$mutant")" in
+  *auth__otp__phone__allowedregion*'<unset>'*) ;;
+  *) echo 'explain did not report an unset expectation' >&2; exit 1 ;;
+esac
+jq '.EndpointSpec.Ports[0].PublishedPort = 10001' "$candidate" > "$mutant"
+! validate "$mutant" || { echo 'a structural mutant was accepted' >&2; exit 1; }
+case "$(explain "$mutant")" in
+  *'structural clause failed'*) ;;
+  *) echo 'explain did not fall back to the structural-clause message' >&2; exit 1 ;;
+esac
+
+echo 'staging gateway candidate semantic contract tests: PASS (mode flags preserved; resolved chat state asserted in both directions; explain names the failing expectation; exact Dev Tool delta with 19 negative controls)'
