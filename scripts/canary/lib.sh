@@ -57,7 +57,7 @@ canary_require_tools() {
 
 # --- Secret-safe transport. Plan mode prints the exact call and executes nothing.
 
-# canary_http METHOD URL [--bearer-var N] [--header H] [--header-var K:V] [--json B] [--out F] [--no-preview]
+# canary_http METHOD URL [--bearer-var N|--header H|--header-var K:V|--json B|--json-var NAME|--out F|--no-preview]
 # Sets CANARY_LAST_CODE / CANARY_LAST_BODY_FILE. Never asserts; callers do.
 canary_http() {
   local method="$1" url="$2"; shift 2
@@ -83,6 +83,13 @@ canary_http() {
         body="$2"
         args+=(-H "Content-Type: application/json" --data-binary "$2")
         shown+=("-H" "'Content-Type: application/json'" "--data-binary" "'$2'")
+        shift 2 ;;
+      --json-var)
+        # Body read from an env var and rendered as $NAME: for payloads carrying
+        # a credential, which must never reach a plan or a log.
+        body="${!2:-}"
+        args+=(-H "Content-Type: application/json" --data-binary "${!2:-}")
+        shown+=("-H" "'Content-Type: application/json'" "--data-binary" "\$$2")
         shift 2 ;;
       --out)
         out="$2"; shift 2 ;;
@@ -246,6 +253,22 @@ canary_message_visible() {
   jq -e --arg id "$id" --arg viewer "$viewer" '
     ((.viewer_id // .viewerId // "") == $viewer)
     and (((.messages // .items // []) | map(.message_id // .messageId // "")) | index($id) != null)
+  ' >/dev/null 2>&1
+}
+
+# A fresh password per run: the credential is provisioned, used, then deleted,
+# so nothing durable is derived from it and nothing is committed.
+canary_partner_password() {
+  local raw
+  raw="$(head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c 24)"
+  printf 'Jc!%s' "${raw:-CanaryFallback12345678}"
+}
+
+# 0 when GET /v1/jeeb/wallet reports at least $minimum available.
+canary_wallet_sufficient() {
+  local minimum="$1"
+  jq -e --argjson min "$minimum" '
+    ((.availableBalance // .available_balance // .balance // 0) | tonumber) >= $min
   ' >/dev/null 2>&1
 }
 

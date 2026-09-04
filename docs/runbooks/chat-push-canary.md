@@ -100,12 +100,65 @@ Two further consequences, both load-bearing:
   trail becomes a problem; the default (`true`) walks the full real path and
   exercises the offer and accept push events too.
 
-### Why the canary ids are not GUIDs
+### The canary ids MUST be well-formed UUIDs
 
-`canary-chat-push-client` / `canary-chat-push-jeeber` do not parse as GUIDs, and
-the offer route's wallet-sufficiency guard only runs when the caller id does
-(`Guid.TryParse`). A GUID-shaped canary jeeber would need a funded wallet to
-place its offer. Keep these ids non-GUID.
+`[RequireActiveUser]` guards request create, offer submit and accept. It calls
+`IBanServiceClient.GetStatusAsync` and **fails closed on any exception** — by
+design, so a ban-owner outage can never be read as "active". ban-service rejects
+a non-UUID `user_id`, so a non-UUID canary id can never clear the gate: every
+create returns `503 account-status-unavailable` while ban-service is perfectly
+healthy and serving GUID callers.
+
+The defaults are therefore fixed, deterministic, obviously synthetic UUIDs:
+
+| Actor | Id |
+|---|---|
+| client | `ca9a4100-0000-4000-8000-000000000001` |
+| jeeber | `ca9a4100-0000-4000-8000-000000000002` |
+| funding partner holder | `ca9a4100-0000-4000-8000-000000000003` |
+| funding admin | `ca9a4100-0000-4000-8000-000000000004` |
+
+They share the `ca9a4100-0000-4000-8000-0000000000NN` prefix so any one of them
+is recognisable as canary traffic at a glance, and they are stable across runs so
+the trail stays bounded. `test-canary-lib.sh` asserts the shape offline.
+
+*(An earlier revision deliberately used non-UUID ids to dodge the offer-time
+wallet guard. That traded a guard we can satisfy for a gate we cannot — the ban
+seam has no way to distinguish "malformed id" from "ban-service is down", and
+fixing that is a security change needing its own review, not a canary change.)*
+
+### The consequence: the canary jeeber needs a funded wallet
+
+A UUID jeeber re-arms the offer-time wallet-sufficiency guard, which is
+`Guid.TryParse`-gated. The guard needs
+`RequiredCommission(fee) = round(fee × CommissionCalculator.FlatRate, 2)` — at
+the canary's `fee: 6` that is **$0.60**. An unfunded wallet 402s the offer, which
+reads like a chat outage if you do not know to look.
+
+So `run.sh` reads `GET /v1/jeeb/wallet` immediately **before** leg 6 and fails
+with a message naming the remedy, and `ensure-canary-accounts.sh` tops the wallet
+up through the Dev Tool's own route chain:
+
+1. mint an admin bearer for the canary admin id,
+2. `POST /dev/partner/credentials` — provision a holder-bound partner credential
+   with a **freshly generated password** (never committed, never printed, deleted
+   at the end; a 409 from a crashed earlier run is reclaimed and retried),
+3. `POST /v1/partner/auth/login` → partner session,
+4. `POST /v1/admin/partners/{partnerId}/wallet/credits` — cash-credit the partner
+   as admin, under a fixed idempotency key,
+5. `POST /v1/partner/wallet/transfers/predict` — assert `otpRequired == false`,
+6. `POST /v1/partner/wallet/transfers` — partner → canary jeeber, fixed
+   idempotency key,
+7. delete the partner credential, then re-read the balance and assert it clears.
+
+**The idempotency that matters is the balance pre-check**: if the wallet already
+clears `JEEB_CANARY_WALLET_MIN`, the whole chain is skipped. Re-running the script
+any number of times never stacks credits.
+
+`JEEB_CANARY_WALLET_TOPUP` defaults to **40** and must stay under
+`PartnerWallet__OtpStepUpThreshold` (50) — above it the transfer needs a step-up
+code and this stops being an unattended top-up. The script fails with that exact
+message rather than silently trying.
 
 ### The fixed coordinate is offshore, and that is a hard rule
 
@@ -198,9 +251,12 @@ scripts/canary/run.sh --base-url https://app.jeeb.fds-1.com --plan
 JEEB_TOKEN_MINT_KEY=… scripts/canary/run.sh \
   --base-url https://app.jeeb.fds-1.com --timeout 150 --execute
 
-# one-time identity check (idempotent; nothing is created)
+# identity check + idempotent wallet top-up (skips funding when already funded)
 JEEB_TOKEN_MINT_KEY=… scripts/canary/ensure-canary-accounts.sh \
   --base-url https://app.jeeb.fds-1.com
+
+# print the funding chain without executing it
+scripts/canary/ensure-canary-accounts.sh --base-url https://app.jeeb.fds-1.com --plan
 
 # offline self-test of the jq/bash logic and the plan-mode contract
 bash scripts/canary/test-canary-lib.sh
@@ -222,8 +278,13 @@ hiding it. A local `--execute` run therefore prints no bearer at all.
 | `JEEB_CANARY_CHAT_BUDGET` | `30` | budget for the recipient-visibility poll |
 | `JEEB_CANARY_FIRESTORE_BUDGET` | `30` | budget for the Firestore poll |
 | `JEEB_TOKEN_MINT_KEY` | — | **required for `--execute`**; the run refuses to start without it |
-| `JEEB_CANARY_CLIENT_ID` | `canary-chat-push-client` | fixed canary client (keep it non-GUID) |
-| `JEEB_CANARY_JEEBER_ID` | `canary-chat-push-jeeber` | fixed canary jeeber (keep it non-GUID) |
+| `JEEB_CANARY_CLIENT_ID` | `ca9a4100-…-0001` | fixed canary client — **must be a well-formed UUID** |
+| `JEEB_CANARY_JEEBER_ID` | `ca9a4100-…-0002` | fixed canary jeeber — **must be a well-formed UUID** |
+| `JEEB_CANARY_PARTNER_HOLDER_ID` | `ca9a4100-…-0003` | funding partner holder (ensure script only) |
+| `JEEB_CANARY_ADMIN_ID` | `ca9a4100-…-0004` | funding admin (ensure script only) |
+| `JEEB_CANARY_WALLET_MIN` | `0.60` | offer-guard commission threshold asserted before leg 6 |
+| `JEEB_CANARY_WALLET_TOPUP` | `40` | funding amount; must stay under the 50 OTP step-up threshold |
+| `JEEB_CANARY_SKIP_FUNDING` | `false` | skip the funding chain in the ensure script |
 | `JEEB_CANARY_LAT` / `_LNG` | `33.9500` / `35.2000` | fixed **offshore** pickup — see the hard rule above |
 | `JEEB_CANARY_ACCEPT_OFFER` | `true` | `false` stops after the offer, creating no accepted delivery |
 | `JEEB_CANARY_AVAILABILITY_PREFIX` | `/v1` | edge prefix for the availability surface |
@@ -308,7 +369,7 @@ name first:
 | `identity` | `JEEB_TOKEN_MINT_KEY` rotated, or the mint route moved |
 | `presence` | availability prefix wrong at the edge (404), or heart-beat service auth rejected (401). A 200 that fails the coordinate assertion means the presence store accepted the toggle but dropped `latitude`/`longitude` — fan-out and the offer radius check would then match nobody |
 | `device` | push-notification registration path down — the relay itself is unreachable |
-| `request` | delivery-service / jeeb-state-service down, or the tier catalog lost its Flash row. **503 `account-status-unavailable` is the non-GUID id class**: `[RequireActiveUser]` fails closed when `IBanServiceClient.GetStatusAsync` throws, and ban-service rejects a non-UUID `user_id` — the same body with a GUID client id returns 201, so ban-service is up, not down. `[RequireActiveUser]` also guards offer submit and accept, so a GUID-shaped client alone does not clear it, and GUID-shaping the jeeber re-arms the wallet guard this canary avoids |
-| `lifecycle` | **offer-service is a hard dependency of this leg** — 502/503 means offer-service is unreachable, not a chat or push outage. 409 `offer-out-of-range` ⇒ the GPS fix never reached delivery-service presence (also a hard dependency, via the presence row the radius check reads); 402 ⇒ the canary id became GUID-shaped and hit the wallet guard; accept 409 ⇒ the request left the pre-acceptance phase |
+| `request` | delivery-service / jeeb-state-service down, or the tier catalog lost its Flash row. **503 `account-status-unavailable` means an id stopped being a well-formed UUID**: `[RequireActiveUser]` fails closed when `IBanServiceClient.GetStatusAsync` throws, and ban-service rejects a non-UUID `user_id` — so this is a canary-config fault, not a ban-service outage |
+| `lifecycle` | **offer-service is a hard dependency of this leg** — 502/503 means offer-service is unreachable, not a chat or push outage. 409 `offer-out-of-range` ⇒ the GPS fix never reached delivery-service presence (also a hard dependency, via the presence row the radius check reads); 402 ⇒ the canary jeeber's wallet fell below the guard threshold — run `ensure-canary-accounts.sh` to top it up (the pre-check before leg 6 should catch this first); accept 409 ⇒ the request left the pre-acceptance phase |
 | `push` | **the outage class this exists for** — recipient resolution, the durable dispatcher flag, notification-service `WEBHOOK_BASE_URL`, or the FCM credential |
 | `chat` | `503` ⇒ `UseUpstream__Chat` is off; a viewer-scoped miss ⇒ `VisibleTo[]` does not carry the jeeber; a uid mismatch ⇒ the Firebase mint and the app disagree on identity |
