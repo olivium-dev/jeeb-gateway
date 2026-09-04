@@ -518,6 +518,12 @@ builder.Services.AddHealthChecks()
     .AddCheck<JeebGateway.Notifications.PushRelayCredentialHealthCheck>(
         JeebGateway.Notifications.PushRelayCredentialHealthCheck.Name,
         failureStatus: HealthStatus.Unhealthy,
+        tags: new[] { "ready" })
+    // G5/D2: the roles-loss class had no signal at all — /health/ready stayed green while
+    // every capability route 403'd. Degraded, never Unhealthy: it must not restart-loop.
+    .AddCheck<JeebGateway.Health.RefreshRoleContinuityHealthCheck>(
+        JeebGateway.Health.RefreshRoleContinuityHealthCheck.Name,
+        failureStatus: HealthStatus.Degraded,
         tags: new[] { "ready" });
 
 // 608debf outage: a credential chain failed closed while every health surface stayed green.
@@ -2504,6 +2510,9 @@ if (!JeebGateway.Migration.GwdbxMigrationOptions.RequiresUpstream(
     builder.Services.AddSingleton<IRefreshTokenStore, InMemoryRefreshTokenStore>();
 }
 builder.Services.AddSingleton<IUsersStoreAdapter, UsersStoreRolesAdapter>();
+// Feeds the refresh-role-continuity readiness row; TokenService writes it on every rotation.
+builder.Services.AddSingleton<IRefreshSessionCensus, InProcessRefreshSessionCensus>();
+builder.Services.AddSingleton<JeebGateway.Health.IUsersStoreCensus, JeebGateway.Health.UsersStoreCensus>();
 builder.Services.AddSingleton<ITokenService, TokenService>();
 builder.Services.AddSingleton<IUmAuthenticationContextValidator, UmAuthenticationContextValidator>();
 

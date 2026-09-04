@@ -43,6 +43,9 @@ public static class GatewayHealthRoster
         JeebGateway.Notifications.PushRelayCredentialHealthCheck.Name,
         "whisper",
         "jeeb-state-service",
+        // 2026-09-04 (G5/D2): the roles-loss class had no health row, no counter and no log —
+        // /health/ready read 19/19 green while every [RequireCapability] route 403'd.
+        JeebGateway.Health.RefreshRoleContinuityHealthCheck.Name,
     }
     // 2026-09-04: one row per declared credential; notification-credential (2026-08-23)
     // covered exactly one of the seven the 608debf class can silently break.
@@ -62,7 +65,8 @@ public static class GatewayHealthRoster
     /// retired role-service outright — that probe was the aggregate's only Degraded entry,
     /// verified against a real /health/ready read before and after. 19 from 2026-08-23:
     /// notification-credential joined after the 608debf silent push outage; 20 from
-    /// 2026-08-29 when relay scoped-readiness became a deployment gate; 27 from 2026-09-04.
+    /// 2026-08-29 when relay scoped-readiness became a deployment gate; 27 from 2026-09-04;
+    /// 28 later the same day when refresh-role-continuity joined after the G5 outage class.
     /// DECLARED, not wire — see docs/runbooks/chat-activation-and-readiness.md.</summary>
-    public const int ExpectedReadyCount = 27;
+    public const int ExpectedReadyCount = 28;
 }

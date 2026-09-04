@@ -149,13 +149,15 @@ public class SettlementServiceCutoverW2R11Tests
     {
         // W2-R11 pre-announced 19 -> 20 (A9); W5 retirements took it to 18, D1 added role-service
         // (19), O8 retired role-service (18), 2026-08-23 added notification-credential (19),
-        // 2026-08-29 added scoped push-relay readiness (20), and 2026-09-04 added
-        // chat-upstream-readiness plus one row per declared credential (27).
+        // 2026-08-29 added scoped push-relay readiness (20), 2026-09-04 added
+        // chat-upstream-readiness plus one row per declared credential (27) and then
+        // refresh-role-continuity after the G5 roles-loss outage class (28).
         // C4 is the positive control that the declared list still matches what the code registers.
-        GatewayHealthRoster.ExpectedReadyCount.Should().Be(27,
+        GatewayHealthRoster.ExpectedReadyCount.Should().Be(28,
             "A9 added settlement-service, W5 retired two probes, O8 retired role-service, "
             + "the 608debf outage added notification-credential, scoped relay readiness is required, "
-            + "and chat plus the six remaining declared credentials became visible");
+            + "chat plus the six remaining declared credentials became visible, and the G5 "
+            + "roles-loss class got the readiness row it had been missing");
         GatewayHealthRoster.Ready.Should().HaveCount(GatewayHealthRoster.ExpectedReadyCount);
         GatewayHealthRoster.Ready.Should().Contain("settlement-service");
         GatewayHealthRoster.Ready.Should().NotContain("role-service");

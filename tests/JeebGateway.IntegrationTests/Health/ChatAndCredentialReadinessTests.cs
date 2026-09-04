@@ -112,7 +112,7 @@ public sealed class ChatAndCredentialReadinessTests
     {
         GatewayHealthRoster.Ready.Should().Contain(ChatUpstreamHealthCheck.Name);
         GatewayHealthRoster.Ready.Should().HaveCount(GatewayHealthRoster.ExpectedReadyCount);
-        GatewayHealthRoster.ExpectedReadyCount.Should().Be(27);
+        GatewayHealthRoster.ExpectedReadyCount.Should().Be(28);
     }
 
     // --------------------------------------------------------- credentials
