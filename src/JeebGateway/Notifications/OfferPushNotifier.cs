@@ -61,11 +61,8 @@ public interface IOfferPushNotifier
         CancellationToken ct);
 
     /// <summary>
-    /// sprint-009 Lane E — best-effort: push the "your offer was accepted" notification
-    /// to the WINNING jeeber (<paramref name="winnerJeeberId"/>) after the client closes
-    /// the auction. Renders the existing <c>jeeb.offer_accepted</c> catalog template and
-    /// carries a <c>jeeb://offers/{offerId}</c> deep link. Never throws; a blank recipient
-    /// is a no-op.
+    /// Best-effort: push "your offer was accepted" to the WINNING jeeber after the client
+    /// closes the auction. Never throws; a blank recipient is a no-op.
     /// </summary>
     Task NotifyOfferAcceptedAsync(
         string winnerJeeberId,
@@ -335,11 +332,8 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
             : "You received a new offer. Tap to review.");
 
     // sprint-009 Lane E — the winner/loser accept-lifecycle pushes. Both mirror the
-    // NotifyNewOfferAsync contract exactly (PushSendBudget CTS, flat top-level payload, never-throws)
-    // and differ only in recipient, template, and the `type` discriminator the mobile
-    // client routes on (offer_accepted vs offer_lost). The title/body come from the
-    // gateway-owned JeebNotificationCatalog (jeeb.offer_accepted / jeeb.offer_rejected)
-    // and a jeeb://offers/{offerId} deep link is carried flat so the client can navigate.
+    // NotifyNewOfferAsync contract exactly, differing only in recipient, template and the
+    // `type` discriminator; the deep link is resolved per template, not fixed here.
     public async Task NotifyOfferAcceptedAsync(
         string winnerJeeberId, string requestId, string offerId, CancellationToken ct)
     {
