@@ -27,7 +27,15 @@ if [ "$expected" = true ]; then
     echo "::error::chat was deployed ON but chat-upstream-readiness is $status: $description" >&2
     exit 1
   }
-  echo "chat-upstream-readiness=Healthy as declared (chat on)"
+  # Healthy alone is not proof: ChatUpstreamHealthCheck returns Healthy for any 2xx, and a
+  # legacy bodiless 204 says "Firestore round-trip UNVERIFIED". Only the HTTP-200 branch
+  # proves a real round-trip, so the deploy gate demands that branch.
+  case "$description" in
+    *UNVERIFIED*)
+      echo "::error::chat is ON but the Firestore round-trip is UNPROVEN: $description" >&2
+      exit 1 ;;
+  esac
+  echo "chat-upstream-readiness=Healthy with a proven Firestore round-trip (chat on)"
 else
   case "$status:$description" in
     Degraded:*"disabled by flag"*)
