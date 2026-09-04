@@ -224,9 +224,14 @@ public class TokenService : ITokenService
         {
             if (roleResolver is null)
             {
-                var roles = await _users.GetRolesAsync(existing.UserId, ct);
-                var activeRole = await _users.GetActiveRoleAsync(existing.UserId, ct);
-                roleContext = new TokenRoleContext(roles, activeRole);
+                // G5: prefer the role context this session was minted with. The store fallback
+                // is process RAM the super-login mints never populate (see SessionRoleSnapshot).
+                if (!TryMintedSessionRoles(existing, out roleContext))
+                {
+                    var roles = await _users.GetRolesAsync(existing.UserId, ct);
+                    var activeRole = await _users.GetActiveRoleAsync(existing.UserId, ct);
+                    roleContext = new TokenRoleContext(roles, activeRole);
+                }
             }
             else
             {
@@ -236,6 +241,15 @@ public class TokenService : ITokenService
                 roleContext = resolved;
             }
             persistedAuthentication = AuthenticationFrom(existing);
+        }
+
+        // G5 fail-closed: a roles-less mint is a valid, correctly-audienced token that
+        // L2 then 403s on EVERY capability route — a silent, unrecoverable session brick.
+        if (!roleContext.Roles.Any(static role => !string.IsNullOrWhiteSpace(role)))
+        {
+            _log.LogWarning(
+                "auth.refresh role resolution yielded no roles — refusing to mint a capability-less session");
+            return new RefreshResult { Outcome = RefreshOutcome.RoleResolutionFailed };
         }
 
         // External records reach this point only with the complete, verified
@@ -466,6 +480,14 @@ public class TokenService : ITokenService
                 || absoluteSessionExpiresAt is not null
                 ? activeRole
                 : null,
+            // G5: recorded on EVERY record so rotation carries the minted role context
+            // instead of re-deriving it from a process-RAM profile that may not exist.
+            SessionRoleSnapshot = roles
+                .Where(static role => !string.IsNullOrWhiteSpace(role))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Take(16)
+                .ToArray(),
+            SessionActiveRoleSnapshot = activeRole,
         };
         return (raw, record);
     }
@@ -490,6 +512,39 @@ public class TokenService : ITokenService
                 token.DisplayName,
                 token.Email,
                 token.RoleSnapshot is { Count: > 0 });
+    }
+
+    /// <summary>G5 — reads the minted role context off an ordinary record, bounded like the
+    /// external/bounded snapshots. False (legacy or malformed) keeps the store resolution.</summary>
+    private bool TryMintedSessionRoles(
+        RefreshToken token,
+        out TokenRoleContext roleContext)
+    {
+        roleContext = null!;
+        var rawRoles = token.SessionRoleSnapshot;
+        if (rawRoles is null)
+        {
+            return false;
+        }
+
+        var roles = rawRoles
+            .Where(static role => !string.IsNullOrWhiteSpace(role) && role.Length <= 128)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Take(17)
+            .ToArray();
+        if (rawRoles.Count != roles.Length
+            || roles.Length is 0 or > 16
+            || string.IsNullOrWhiteSpace(token.SessionActiveRoleSnapshot)
+            || token.SessionActiveRoleSnapshot.Length > 128
+            || !roles.Contains(token.SessionActiveRoleSnapshot, StringComparer.OrdinalIgnoreCase))
+        {
+            // Present but malformed: log it, else a minter regression looks like random logouts.
+            _log.LogWarning("auth.refresh session role snapshot failed validation — falling back to the users store");
+            return false;
+        }
+
+        roleContext = new TokenRoleContext(roles, token.SessionActiveRoleSnapshot);
+        return true;
     }
 
     private static bool HasExternalSessionFields(RefreshToken token) =>

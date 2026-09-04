@@ -49,6 +49,14 @@ public class RefreshToken
     public IReadOnlyList<string>? RoleSnapshot { get; init; }
     public string? ActiveRoleSnapshot { get; init; }
 
+    /// <summary>G5 — the roles the session was minted with, so rotation never re-derives them
+    /// from the process-RAM store. Distinct from <see cref="RoleSnapshot"/> (external/bounded
+    /// marker); null on pre-G5 records, which keep the store lookup.</summary>
+    public IReadOnlyList<string>? SessionRoleSnapshot { get; init; }
+
+    /// <summary>The <c>active_role</c> the session was minted with. See <see cref="SessionRoleSnapshot"/>.</summary>
+    public string? SessionActiveRoleSnapshot { get; init; }
+
     public DateTimeOffset? RevokedAt { get; set; }
     public string? RevokedReason { get; set; }
     public string? ReplacedByTokenId { get; set; }

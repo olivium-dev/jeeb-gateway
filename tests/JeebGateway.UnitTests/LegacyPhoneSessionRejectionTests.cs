@@ -119,6 +119,28 @@ public sealed class LegacyPhoneSessionRejectionTests
 
         var result = await service.RefreshAsync(issued.RefreshToken, CancellationToken.None);
 
+        // A canonical-GUID subject is never legacy-rejected: it rotates normally.
+        result.Outcome.Should().Be(RefreshOutcome.Ok);
+        result.Tokens.Should().NotBeNull();
+        // G5: the record carries the minted role context, so the store is not consulted.
+        users.RoleLookups.Should().Be(0);
+        users.ActiveRoleLookups.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task Refresh_CanonicalGuid_LegacyRecordWithoutSnapshot_StillConsultsTheStore()
+    {
+        // Sibling of the above for records written before the snapshot existed.
+        const string canonicalSubject = "11111111-2222-3333-4444-555555555555";
+        var store = new SnapshotStrippingRefreshStore();
+        var users = new RecordingUsersStoreAdapter();
+        var service = NewService(store, users);
+        var issued = await service.IssueAsync(
+            canonicalSubject, ["client"], "client", authentication: null,
+            CancellationToken.None);
+
+        var result = await service.RefreshAsync(issued.RefreshToken, CancellationToken.None);
+
         result.Outcome.Should().Be(RefreshOutcome.Ok);
         result.Tokens.Should().NotBeNull();
         users.RoleLookups.Should().Be(1);
@@ -201,6 +223,44 @@ public sealed class LegacyPhoneSessionRejectionTests
             ActiveRoleLookups++;
             return Task.FromResult("client");
         }
+    }
+
+    /// <summary>Models records written before SessionRoleSnapshot existed.</summary>
+    private sealed class SnapshotStrippingRefreshStore : IRefreshTokenStore
+    {
+        private readonly InMemoryRefreshTokenStore _inner = new();
+
+        public Task AddAsync(RefreshToken token, CancellationToken ct) => _inner.AddAsync(token, ct);
+
+        public async Task<RefreshToken?> FindByHashAsync(string tokenHash, CancellationToken ct)
+        {
+            var current = await _inner.FindByHashAsync(tokenHash, ct);
+            return current is null
+                ? null
+                : new RefreshToken
+                {
+                    TokenId = current.TokenId,
+                    UserId = current.UserId,
+                    TokenHash = current.TokenHash,
+                    IssuedAt = current.IssuedAt,
+                    ExpiresAt = current.ExpiresAt,
+                    RevokedAt = current.RevokedAt,
+                    RevokedReason = current.RevokedReason,
+                    ReplacedByTokenId = current.ReplacedByTokenId,
+                };
+        }
+
+        public Task<bool> RotateAsync(string oldTokenId, RefreshToken replacement, CancellationToken ct) =>
+            _inner.RotateAsync(oldTokenId, replacement, ct);
+
+        public Task RevokeAsync(string tokenId, RevocationReason reason, CancellationToken ct) =>
+            _inner.RevokeAsync(tokenId, reason, ct);
+
+        public Task<int> RevokeAllForUserAsync(string userId, RevocationReason reason, CancellationToken ct) =>
+            _inner.RevokeAllForUserAsync(userId, reason, ct);
+
+        public Task<int> RevokeChainAsync(string startTokenId, RevocationReason reason, CancellationToken ct) =>
+            _inner.RevokeChainAsync(startTokenId, reason, ct);
     }
 
     private sealed class RecordingRefreshStore(RefreshToken record) : IRefreshTokenStore
