@@ -23,7 +23,7 @@ questions instead:
 |---|---|---|
 | 0 preflight | `GET /health/live` | reachable (the **only** health read; it gates nothing else) |
 | 1 identity | `POST /auth/tokens` ×2 with `X-Service-Auth-Key` | both fixed canary bearers mint |
-| 2 presence | `PUT {prefix}/jeebers/me/availability`, `POST /location/update` | jeeber online with a GPS fix at the pickup point |
+| 2 presence | `PUT {prefix}/jeebers/me/availability` **carrying `latitude`/`longitude`**; `POST /location/update` probed, not required | the returned presence row echoes the pickup coordinate — a 200 with `latitude: null` FAILS |
 | 3 device | `PUT /api/PushNotification/register` | the jeeber has an FCM seat, so a dispatch row can exist |
 | 4 request | `GET /tiers`, `POST /v1/requests` | a Flash request at the fixed offshore coordinate |
 | 5 chat gate | `GET /v1/chat/jeeb/conversations/by-request/{id}` (create on 404) | the conversation resolves — **a 503 here is `UseUpstream__Chat=false`** |
@@ -39,6 +39,35 @@ top-ranked cause of chat outages. If the push leg ran first, a simultaneously
 broken push would consume the budget and the run would never reach — and never
 name — the flag. The chat gate therefore comes first, so the likeliest root
 cause is always reported by name.
+
+### Presence rides the availability body, not `POST /location/update`
+
+The GPS fix is sent **on the availability call**, because that is the app's only
+location upload: the phone calls `PATCH /jeebers/me/availability` with
+`latitude` + `longitude` and never calls `POST /location/update` at all (verified
+against A33 logcat, 2026-09-04). `PatchCore` forwards those coordinates to
+`delivery-service.SetAvailability`, which is the same presence row that
+`NewRequestPushNotifier.ResolveRecipientsAsync` and the offer route's
+`TierRadiusPolicy` read — so one call seats presence for both geo gates.
+
+The leg then asserts the **echoed** `latitude`/`longitude`, not just the 200.
+Until 2026-09-04 the canary sent availability with no coordinates and leaned on
+`POST /location/update` for the fix; live staging answered that availability call
+`200 {"latitude":null,"longitude":null}`, which is a presence row fan-out can
+never match. `canary_presence_fix_landed` fails on exactly that body, and
+`test-canary-lib.sh` pins it with the live shape as a fixture.
+
+`POST /location/update` is still called, but **warn-only** (`canary_warn`), because
+it is a geolocation-service batch-ingest path the app does not use and its outage
+cannot invalidate the presence row above. On staging it currently answers
+Cloudflare `502 origin_bad_gateway` for **every** caller and body shape (single
+point, batch, GUID id, non-GUID id) while the identical call answers
+`200 {"accepted":1}` on MSI — an origin-side staging fault, not a code defect and
+not an id-shape defect. Everything that returns before `_store.RecordAsync`
+(`{}` → 400, unknown `deliveryId` → 404, oversized batch → 400) answers clean
+JSON through the same edge, so the fault is in the gateway's
+geolocation-service ingest hop specifically. Set
+`JEEB_CANARY_REQUIRE_GPS_STREAM=true` to make it fatal again once that is fixed.
 
 ### The create MUST be `POST /v1/requests`
 
@@ -198,6 +227,7 @@ hiding it. A local `--execute` run therefore prints no bearer at all.
 | `JEEB_CANARY_LAT` / `_LNG` | `33.9500` / `35.2000` | fixed **offshore** pickup — see the hard rule above |
 | `JEEB_CANARY_ACCEPT_OFFER` | `true` | `false` stops after the offer, creating no accepted delivery |
 | `JEEB_CANARY_AVAILABILITY_PREFIX` | `/v1` | edge prefix for the availability surface |
+| `JEEB_CANARY_REQUIRE_GPS_STREAM` | `false` | make a non-200 from `POST /location/update` fatal instead of a warning |
 | `PUSH_LEDGER_BASE_URL` | unset | push-notification origin; enables the full push leg |
 | `JEEB_PUSH_INTERNAL_API_KEY` | — | `X-Api-Key` for the ledger read |
 | `JEEB_PUSH_CALLER_ID` | `jeeb-gateway` | `X-Caller-Id` for the ledger read |
@@ -276,9 +306,9 @@ name first:
 | Leg | Most likely cause |
 |---|---|
 | `identity` | `JEEB_TOKEN_MINT_KEY` rotated, or the mint route moved |
-| `presence` | availability prefix wrong at the edge (404), or heart-beat service auth rejected (401) |
+| `presence` | availability prefix wrong at the edge (404), or heart-beat service auth rejected (401). A 200 that fails the coordinate assertion means the presence store accepted the toggle but dropped `latitude`/`longitude` — fan-out and the offer radius check would then match nobody |
 | `device` | push-notification registration path down — the relay itself is unreachable |
-| `request` | delivery-service / jeeb-state-service down, or the tier catalog lost its Flash row |
+| `request` | delivery-service / jeeb-state-service down, or the tier catalog lost its Flash row. **503 `account-status-unavailable` is the non-GUID id class**: `[RequireActiveUser]` fails closed when `IBanServiceClient.GetStatusAsync` throws, and ban-service rejects a non-UUID `user_id` — the same body with a GUID client id returns 201, so ban-service is up, not down. `[RequireActiveUser]` also guards offer submit and accept, so a GUID-shaped client alone does not clear it, and GUID-shaping the jeeber re-arms the wallet guard this canary avoids |
 | `lifecycle` | **offer-service is a hard dependency of this leg** — 502/503 means offer-service is unreachable, not a chat or push outage. 409 `offer-out-of-range` ⇒ the GPS fix never reached delivery-service presence (also a hard dependency, via the presence row the radius check reads); 402 ⇒ the canary id became GUID-shaped and hit the wallet guard; accept 409 ⇒ the request left the pre-acceptance phase |
 | `push` | **the outage class this exists for** — recipient resolution, the durable dispatcher flag, notification-service `WEBHOOK_BASE_URL`, or the FCM credential |
 | `chat` | `503` ⇒ `UseUpstream__Chat` is off; a viewer-scoped miss ⇒ `VisibleTo[]` does not carry the jeeber; a uid mismatch ⇒ the Firebase mint and the app disagree on identity |

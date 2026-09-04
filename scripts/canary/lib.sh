@@ -39,6 +39,14 @@ canary_fail() {
   exit 1
 }
 
+# A finding that must be SEEN but must not stop the run: annotated in Actions,
+# kept in the evidence, exit status untouched.
+canary_warn() {
+  printf '::warning::%s\n' "$*" >&2
+  canary_log "  WARN $*"
+  return 0
+}
+
 canary_require_tools() {
   local missing=""
   for tool in curl jq; do
@@ -216,6 +224,20 @@ canary_conversation_id() {
 # message_id out of the append response.
 canary_message_id() {
   jq -r '(.message_id // .messageId // "")' 2>/dev/null || printf ''
+}
+
+# 0 when the availability row echoes coordinates within ~11 m of the requested fix.
+# The fan-out and the offer radius policy read THIS row, so `latitude: null` on a
+# 200 is a vacuous pass, not a cosmetic gap — that is the shape this catches.
+canary_presence_fix_landed() {
+  local lat="$1" lng="$2"
+  jq -e --argjson lat "$lat" --argjson lng "$lng" '
+    def abs: if . < 0 then -. else . end;
+    (.latitude // .lat) as $rlat | (.longitude // .lng) as $rlng
+    | ($rlat != null) and ($rlng != null)
+      and ((($rlat - $lat) | abs) < 0.0001)
+      and ((($rlng - $lng) | abs) < 0.0001)
+  ' >/dev/null 2>&1
 }
 
 # 0 when the viewer-scoped message page contains $id AND names $viewer as viewer.

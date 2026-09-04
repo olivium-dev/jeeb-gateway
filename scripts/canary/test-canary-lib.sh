@@ -79,6 +79,27 @@ check_exit "a page scoped to a different viewer fails" 1 \
 check_exit "an empty plan-mode body fails" 1 \
   bash -c "printf '{}' | { . '$SCRIPT_DIR/lib.sh'; canary_message_visible m1 jeeber-1; }"
 
+# --- canary_presence_fix_landed ---------------------------------------------
+# NULL_ROW is the byte shape live staging returned to the pre-fix canary: HTTP 200,
+# online true, and no coordinates at all — a presence row fan-out can never match.
+NULL_ROW='{"userId":"canary-chat-push-jeeber","online":true,"vehicleType":"car","zone":"beirut-central","longitude":null,"latitude":null}'
+FIXED_ROW='{"userId":"canary-chat-push-jeeber","online":true,"longitude":35.2,"latitude":33.95}'
+ELSEWHERE_ROW='{"userId":"canary-chat-push-jeeber","online":true,"longitude":35.5018,"latitude":33.8938}'
+check_exit "a row echoing the requested fix passes" 0 \
+  bash -c "printf '%s' '$FIXED_ROW' | { . '$SCRIPT_DIR/lib.sh'; canary_presence_fix_landed 33.9500 35.2000; }"
+check_exit "a 200 row with null coordinates FAILS — the vacuous-pass shape" 1 \
+  bash -c "printf '%s' '$NULL_ROW' | { . '$SCRIPT_DIR/lib.sh'; canary_presence_fix_landed 33.9500 35.2000; }"
+check_exit "a row at a different coordinate fails" 1 \
+  bash -c "printf '%s' '$ELSEWHERE_ROW' | { . '$SCRIPT_DIR/lib.sh'; canary_presence_fix_landed 33.9500 35.2000; }"
+check_exit "an empty plan-mode body fails the presence assertion" 1 \
+  bash -c "printf '{}' | { . '$SCRIPT_DIR/lib.sh'; canary_presence_fix_landed 33.9500 35.2000; }"
+
+# --- canary_warn is non-fatal by construction -------------------------------
+check "canary_warn emits an Actions annotation" "::warning::ingest is down" \
+  "$(CANARY_MODE=execute bash -c ". '$SCRIPT_DIR/lib.sh'; canary_warn 'ingest is down'" 2>&1 >/dev/null)"
+check_exit "canary_warn returns 0 so the run continues" 0 \
+  bash -c "CANARY_MODE=execute; . '$SCRIPT_DIR/lib.sh'; canary_warn 'ingest is down'"
+
 # --- canary_dispatch_terminal ----------------------------------------------
 SUCCEEDED='{"items":[{"target_user_id":"jeeber-1","state":"succeeded"}]}'
 CLAIMED='{"items":[{"target_user_id":"jeeber-1","state":"claimed"}]}'
@@ -214,6 +235,23 @@ esac
 case "$PLAN_OUT" in
   *"'https://app.jeeb.fds-1.com/requests'"*) check "the plan never uses the legacy create route" "absent" "PRESENT" ;;
   *) check "the plan never uses the legacy create route" "absent" "absent" ;;
+esac
+
+# Presence asserted BY VALUE: the app's only location upload is the availability
+# body, and a body without coordinates leaves fan-out nothing to match.
+case "$PLAN_OUT" in
+  *'"latitude":33.95'*'"longitude":35.2'*) check "the availability body carries the GPS fix" "carried" "carried" ;;
+  *) check "the availability body carries the GPS fix" "carried" "MISSING" ;;
+esac
+case "$PLAN_OUT" in
+  *'gps stream  : false'*) check "the GPS batch ingest is probed, not required, by default" "false" "false" ;;
+  *) check "the GPS batch ingest is probed, not required, by default" "false" "MISSING" ;;
+esac
+PLAN_REQUIRED="$(JEEB_TOKEN_MINT_KEY=super-secret-value JEEB_CANARY_REQUIRE_GPS_STREAM=true \
+  bash "$SCRIPT_DIR/run.sh" --base-url https://app.jeeb.fds-1.com --plan 2>&1)"
+case "$PLAN_REQUIRED" in
+  *'gps stream  : true'*) check "the GPS batch ingest can be made required again" "true" "true" ;;
+  *) check "the GPS batch ingest can be made required again" "true" "MISSING" ;;
 esac
 
 # --- canary_deadline is clamped by the whole-run cap, so --timeout is enforced
