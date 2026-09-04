@@ -523,7 +523,8 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
             r.Message.Contains("handover.verified") && r.Message.Contains(seed.Id));
 
         // AC5 / B5: the submitted code must NEVER appear in any log line
-        logCapture.Records.Should().NotContain(r => r.Message.Contains(doorCode));
+        logCapture.Records.Should().NotContain(r =>
+            AuthOtpIdentityAuthorityFailClosedTests.LeaksSecret(r.Message, doorCode));
     }
 
     [Fact]
@@ -549,7 +550,8 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         delivery.StatusTransitionCalls.Should().BeEmpty();
 
         // AC5: the wrong code must NEVER appear in a log line
-        logCapture.Records.Should().NotContain(r => r.Message.Contains("9999"));
+        logCapture.Records.Should().NotContain(r =>
+            AuthOtpIdentityAuthorityFailClosedTests.LeaksSecret(r.Message, "9999"));
     }
 
     [Fact]
@@ -781,7 +783,8 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
             r.Message.Contains("handover.verified") && r.Message.Contains(seed.Id));
 
         // AC5: the code never appears in any log line.
-        logCapture.Records.Should().NotContain(r => r.Message.Contains(doorCode));
+        logCapture.Records.Should().NotContain(r =>
+            AuthOtpIdentityAuthorityFailClosedTests.LeaksSecret(r.Message, doorCode));
     }
 
     [Fact]
@@ -814,7 +817,8 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         delivery.VerifyCalls[0].Success.Should().BeFalse();
 
         // AC5: wrong code never logged.
-        logCapture.Records.Should().NotContain(r => r.Message.Contains("9999"));
+        logCapture.Records.Should().NotContain(r =>
+            AuthOtpIdentityAuthorityFailClosedTests.LeaksSecret(r.Message, "9999"));
     }
 
     [Fact]
@@ -840,7 +844,8 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
         var locked = await resp.Content.ReadFromJsonAsync<OtpLockedResponseDto>();
         locked!.EscalationId.Should().Be("esc-abc-123");
 
-        logCapture.Records.Should().NotContain(r => r.Message.Contains("1111"));
+        logCapture.Records.Should().NotContain(r =>
+            AuthOtpIdentityAuthorityFailClosedTests.LeaksSecret(r.Message, "1111"));
     }
 
     [Fact]
@@ -1235,7 +1240,21 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
     /// </summary>
     private sealed class CapturingLoggerProvider : ILoggerProvider
     {
-        public List<(LogLevel Level, string Message)> Records { get; } = new();
+        private readonly List<(LogLevel Level, string Message)> _records = new();
+
+        /// <summary>A SNAPSHOT taken under the write lock. Enumerating the live list raced any
+        /// background logger and threw "Collection was modified" mid-assertion.</summary>
+        public IReadOnlyList<(LogLevel Level, string Message)> Records
+        {
+            get
+            {
+                lock (_records)
+                {
+                    return _records.ToArray();
+                }
+            }
+        }
+
         public ILogger CreateLogger(string categoryName) => new CapturingLogger(this);
         public void Dispose() { }
 
@@ -1248,9 +1267,9 @@ public class DeliveriesEndpointTests : IClassFixture<WebApplicationFactory<Progr
             public void Log<TState>(LogLevel logLevel, EventId eventId, TState state,
                 Exception? exception, Func<TState, Exception?, string> formatter)
             {
-                lock (_parent.Records)
+                lock (_parent._records)
                 {
-                    _parent.Records.Add((logLevel, formatter(state, exception)));
+                    _parent._records.Add((logLevel, formatter(state, exception)));
                 }
             }
         }

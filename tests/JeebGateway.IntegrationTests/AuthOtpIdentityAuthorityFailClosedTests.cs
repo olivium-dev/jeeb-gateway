@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using FluentAssertions;
 using JeebGateway.Auth.OtpSignIn;
 using JeebGateway.Services;
@@ -44,6 +45,35 @@ public sealed class AuthOtpIdentityAuthorityFailClosedTests
                     cases.Add(route, scenario);
             return cases;
         }
+    }
+
+    [Theory]
+    // Every shape a leak actually takes must still fail the pack.
+    [InlineData("otp code=2468 issued")]
+    [InlineData("verifying \"2468\"")]
+    [InlineData("2468")]
+    [InlineData("submitted 2468, rejected")]
+    [InlineData("(2468)")]
+    [InlineData("code: 2468\nnext line")]
+    public void TheSecretDetector_StillCatchesARealLeak(string message) =>
+        LeaksSecret(message, Code).Should().BeTrue();
+
+    [Theory]
+    // ...and none of these is a leak. The first is the exact line that failed run 33819353561.
+    [InlineData("GET /deliveries/expired?since=2026-09-03T17:53:02.1882468+00:00&limit=1000")]
+    [InlineData("traceId 00-79071847ea19d01e5d0411ad2468a985-c215eda51427d76e-01")]
+    [InlineData("request 3f1c8a90-2468-4c11-9a02-0878df34ff07 completed")]
+    [InlineData("elapsed 12468 ms")]
+    [InlineData("port 24680 open")]
+    public void TheSecretDetector_DoesNotTripOnTimestampsIdsOrMeasurements(string message) =>
+        LeaksSecret(message, Code).Should().BeFalse();
+
+    [Fact]
+    public void TheSecretDetector_StillCatchesTheOtherFixtures()
+    {
+        LeaksSecret($"sending to {Phone} now", Phone).Should().BeTrue();
+        LeaksSecret($"resolved {UserId}", UserId).Should().BeTrue();
+        LeaksSecret("bearer access-test-token", "access-test-token").Should().BeTrue();
     }
 
     [Theory]
@@ -253,11 +283,11 @@ public sealed class AuthOtpIdentityAuthorityFailClosedTests
     private static void AssertNoSensitiveLog(CapturingLoggerProvider logs)
     {
         var messages = string.Join("\n", logs.Messages);
-        messages.Should().NotContain(Phone);
-        messages.Should().NotContain(Code);
-        messages.Should().NotContain(UserId);
-        messages.Should().NotContain("access-test-token");
-        messages.Should().NotContain("refresh-test-token");
+        AssertNotLeaked(messages, Phone);
+        AssertNotLeaked(messages, Code);
+        AssertNotLeaked(messages, UserId);
+        AssertNotLeaked(messages, "access-test-token");
+        AssertNotLeaked(messages, "refresh-test-token");
         var normalized = messages.ToLowerInvariant();
         normalized.Should().NotContain("phone");
         normalized.Should().NotContain("code");
@@ -270,6 +300,29 @@ public sealed class AuthOtpIdentityAuthorityFailClosedTests
         normalized.Should().NotContain("digest");
         normalized.Should().NotContain("fingerprint");
     }
+
+    /// <summary>
+    /// A secret leaks only when it appears as a DISCRETE token. A bare substring match made this
+    /// pack flaky: <c>Code</c> is four digits, and the capture spans every logger in the process,
+    /// so an unrelated background line carrying a timestamp (<c>...T17:53:02.1882468+00:00</c>) or
+    /// a GUID group (<c>...-2468-...</c>) failed the run with no leak present.
+    /// </summary>
+    /// <remarks>
+    /// The security meaning is unchanged. Boundaries exclude alphanumerics AND <c>-</c>, so digits
+    /// embedded in a longer run, a hex blob or a GUID group no longer count, while every shape a
+    /// leak actually takes — <c>code=2468</c>, <c>"2468"</c>, <c>otp 2468</c>, <c>2468,</c> —
+    /// still does. Any leak that also carries its label is caught a second time by the
+    /// vocabulary assertions below ("code", "phone", "token", "userid", ...), which are untouched.
+    /// </remarks>
+    internal static bool LeaksSecret(string messages, string secret) =>
+        Regex.IsMatch(
+            messages,
+            $"(?<![0-9A-Za-z-]){Regex.Escape(secret)}(?![0-9A-Za-z-])",
+            RegexOptions.CultureInvariant);
+
+    private static void AssertNotLeaked(string messages, string secret) =>
+        LeaksSecret(messages, secret).Should().BeFalse(
+            "the log must never carry {0} as a discrete token", secret);
 
     private static StringContent JsonBody(string json) =>
         new(json, Encoding.UTF8, "application/json");
