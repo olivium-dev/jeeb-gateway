@@ -880,6 +880,7 @@ jobs:
               EXPECTED_INCUMBENT_IMAGE \
               EXPECTED_INCUMBENT_SPEC_SHA \
               STAGING_GATEWAY_LOCK_OWNER \
+              chat_upstream_enabled \
               state_secret_name notification_secret_name settlement_secret_name \
               push_secret_name \
               bundler_secret_name job_secret_name jwt_secret_name umjwt_secret_name \
