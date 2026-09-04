@@ -27,6 +27,9 @@ PUSH_CALLER_ID="${JEEB_PUSH_CALLER_ID:-jeeb-gateway}"
 FIREBASE_PROJECT_ID="${JEEB_FIREBASE_PROJECT_ID:-jeeb-5a293}"
 FIREBASE_DATABASE_ID="${JEEB_FIREBASE_DATABASE_ID:-(default)}"
 ALLOW_FCM_TOKEN_REJECT="${JEEB_CANARY_ALLOW_FCM_TOKEN_REJECT:-true}"
+# POST /location/update is the batch ingest the app never calls; it is probed but
+# not required. See the presence leg and the runbook for why.
+REQUIRE_GPS_STREAM="${JEEB_CANARY_REQUIRE_GPS_STREAM:-false}"
 ACCEPT_OFFER="${JEEB_CANARY_ACCEPT_OFFER:-true}"
 CANARY_MODE=plan
 
@@ -116,6 +119,7 @@ canary_log "  jeeber id   : $JEEBER_ID"
 canary_log "  pickup      : $LAT,$LNG (fixed OFFSHORE coordinate — no real tester in radius)"
 canary_log "  budgets     : push ${PUSH_BUDGET}s, chat ${CHAT_BUDGET}s, firestore ${FIRESTORE_BUDGET}s, hard cap ${TIMEOUT}s"
 canary_log "  accept leg  : $ACCEPT_OFFER"
+canary_log "  gps stream  : ${REQUIRE_GPS_STREAM} (POST /location/update required?)"
 canary_log "  push ledger : ${PUSH_LEDGER_BASE_URL:-<unset — falling back to the durable notification inbox>}"
 if [ -n "${JEEB_FIREBASE_WEB_API_KEY:-}" ]; then
   canary_log "  firestore   : enabled (web API key present)"
@@ -159,18 +163,38 @@ mint_bearer "$JEEBER_ID" jeeber; JEEBER_TOKEN="$MINTED_TOKEN"
 
 # ---------------------------------------------------------------------------
 canary_log ""
-canary_log "[2/9] presence — availability ON + a GPS fix at the pickup coordinate"
-canary_log "        Fan-out AND the offer route are geo-filtered fail-closed, so"
-canary_log "        without this the canary would pass vacuously."
+canary_log "[2/9] presence — availability ON, CARRYING the GPS fix at the pickup coordinate"
+canary_log "        Fan-out AND the offer route are geo-filtered fail-closed against the"
+canary_log "        delivery-service presence row, so without coordinates on that row the"
+canary_log "        canary would pass vacuously."
+canary_log "        The fix rides the availability body because that is what the APP does:"
+canary_log "        the phone's only location upload is PATCH/PUT .../availability with"
+canary_log "        latitude+longitude. It never calls POST /location/update."
+AVAIL_FILE="$(canary_tmpfile availability)"
 canary_http PUT "$BASE_URL$AVAIL_PREFIX/jeebers/me/availability" \
   --bearer-var JEEBER_TOKEN \
-  --json "$(jq -nc '{online: true, vehicleType: "car", zone: "beirut-central"}')"
-canary_expect presence "200" "jeeber go-online"
+  --json "$(jq -nc --argjson lat "$LAT" --argjson lng "$LNG" \
+    '{online: true, vehicleType: "car", zone: "beirut-central", latitude: $lat, longitude: $lng}')" \
+  --out "$AVAIL_FILE"
+canary_expect presence "200" "jeeber go-online with a GPS fix"
 
+# A 200 whose row has no coordinates is the vacuous pass this leg exists to stop.
+if [ "$CANARY_MODE" = "execute" ]; then
+  canary_presence_fix_landed "$LAT" "$LNG" <"$AVAIL_FILE" || canary_fail presence \
+    "the availability row came back without the canary's coordinates ($(canary_body_preview "$AVAIL_FILE")) — fan-out and the offer radius policy read THIS row, so legs 4-6 would pass vacuously"
+  canary_note "presence row carries the pickup fix $LAT,$LNG"
+fi
+
+# Probed, not required: the batch ingest is a geolocation-service path the app
+# never uses, and its outage cannot invalidate the presence row asserted above.
 canary_http POST "$BASE_URL/location/update" \
   --bearer-var JEEBER_TOKEN \
   --json "$(jq -nc --argjson lat "$LAT" --argjson lng "$LNG" '{lat: $lat, lng: $lng, accuracy: 10}')"
-canary_expect presence "200" "jeeber GPS fix"
+if [ "$REQUIRE_GPS_STREAM" = "true" ]; then
+  canary_expect presence "200" "jeeber GPS batch ingest"
+elif [ "$CANARY_MODE" = "execute" ] && ! canary_status_accepted "$CANARY_LAST_CODE" "200"; then
+  canary_warn "POST /location/update returned HTTP $CANARY_LAST_CODE — the geolocation-service batch ingest is unhealthy on this edge. Presence is UNAFFECTED (the availability row above carries the fix, which is what the app uploads and what fan-out reads). Set JEEB_CANARY_REQUIRE_GPS_STREAM=true to make this fatal again."
+fi
 
 # ---------------------------------------------------------------------------
 canary_log ""
