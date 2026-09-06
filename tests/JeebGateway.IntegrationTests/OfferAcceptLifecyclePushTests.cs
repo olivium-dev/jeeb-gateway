@@ -49,7 +49,7 @@ public class OfferAcceptLifecyclePushTests
     // ---------------------------------------------------------------------
 
     [Fact]
-    public async Task OfferAccepted_NotifiesWinner_WithAcceptedTemplate_AndOffersDeepLink()
+    public async Task OfferAccepted_NotifiesWinner_WithAcceptedTemplate_AndRequestKeyedDeepLink()
     {
         var push = new RecordingUserPushClient();
         var notifier = new OfferPushNotifier(push, NullLogger<OfferPushNotifier>.Instance);
@@ -67,7 +67,9 @@ public class OfferAcceptLifecyclePushTests
         payload["requestId"].Should().Be("req-1");
         payload["request_id"].Should().Be("req-1");
         payload["offerId"].Should().Be("offer-win");
-        payload["deepLink"].Should().Be("jeeb://offers/offer-win");
+        // P02: the accepted push lands on the request's chat, keyed by the request ref —
+        // an offer id in that slot routes mobile to a conversation that cannot load.
+        payload["deepLink"].Should().Be("jeeb://chat/req-1");
         payload.Should().NotContainKey("data", "routing fields are flat top-level entries");
     }
 

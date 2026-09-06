@@ -7,6 +7,7 @@ using System.Linq;
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Availability;
 using JeebGateway.JeebNotifications;
+using JeebGateway.Notifications;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
@@ -52,8 +53,8 @@ namespace JeebGateway.Controllers;
 /// Coverage note: unlike the wallet/reviews families (PR #196/#197), the generic
 /// <see cref="ServiceNotificationClient"/> DOES expose both primitives this needs, so
 /// these routes are wired to the real upstream — no fabricated state. The
-/// mobile-tolerated fallback is only the COLD-START EMPTY page when the upstream
-/// returns no rows / a null payload, and a 200 on a successful mark-read.
+/// empty page requires an explicit upstream list. Malformed successful payloads
+/// return a sanitized dependency-contract failure.
 /// </para>
 /// </summary>
 [ApiController]
@@ -176,6 +177,12 @@ public sealed class JeebNotificationsInboxController : ControllerBase
         {
             return UpstreamProblem(ex);
         }
+        catch (NotificationContractException)
+        {
+            return Problem(title: "The notifications response could not be verified.",
+                statusCode: StatusCodes.Status502BadGateway,
+                type: "https://jeeb.dev/errors/notification-contract-invalid");
+        }
     }
 
     private void ResolveOfferRequestRefs(
@@ -208,9 +215,7 @@ public sealed class JeebNotificationsInboxController : ControllerBase
                 resolved[candidate.OfferId] = requestId;
             }
 
-            candidate.Row.Ref = string.IsNullOrWhiteSpace(requestId)
-                ? null
-                : requestId.Trim();
+            candidate.Row.Ref = NotificationDeepLinkResolver.ValidateEntityId(requestId);
         }
     }
 
@@ -263,6 +268,12 @@ public sealed class JeebNotificationsInboxController : ControllerBase
         catch (NotificationApiException ex)
         {
             return UpstreamProblem(ex);
+        }
+        catch (NotificationContractException)
+        {
+            return Problem(title: "The notifications response could not be verified.",
+                statusCode: StatusCodes.Status502BadGateway,
+                type: "https://jeeb.dev/errors/notification-contract-invalid");
         }
     }
 
@@ -353,8 +364,8 @@ public sealed class JeebNotificationsInboxController : ControllerBase
     /// <summary>
     /// Pull the normalized inbox rows + the upstream total out of the (Newtonsoft
     /// <c>JObject</c>) receiver-list payload. Tolerant of the upstream field-name
-    /// variants (snake/Pascal) and of a missing <c>items</c>/<c>total</c> — a shape it
-    /// doesn't recognise yields an empty list (cold-start), never an exception. Mirrors
+    /// variants and an optional total. Unknown envelopes and malformed rows fail
+    /// explicitly instead of being interpreted as a successful empty inbox. Mirrors
     /// the dynamic-extraction <see cref="NotificationController"/> already does, but
     /// returns the transport-free <see cref="UpstreamNotificationRow"/> the pure
     /// projection is tested against.
@@ -370,18 +381,22 @@ public sealed class JeebNotificationsInboxController : ControllerBase
             // round-trip it so the same extraction path applies.
             if (response is null)
             {
-                return (
-                    Array.Empty<UpstreamNotificationRow>(),
-                    null,
-                    Array.Empty<OfferRouteCandidate>());
+                throw new NotificationContractException();
             }
             token = JToken.FromObject(response);
         }
 
         var root = token as JObject;
         var itemsToken = root? ["items"] ?? root? ["notifications"] ?? root? ["messages"];
-        int? total = (root? ["total"] ?? root? ["totalCount"] ?? root? ["count"])?.Value<int?>();
-        total ??= root? ["total_messages"]?.Value<int?>();
+        var totalToken = root? ["total"] ?? root? ["totalCount"] ?? root? ["count"] ?? root? ["total_messages"];
+        int? total = null;
+        if (totalToken is not null && totalToken.Type != JTokenType.Null)
+        {
+            if (totalToken.Type != JTokenType.Integer || !int.TryParse(totalToken.ToString(), out var parsedTotal)
+                || parsedTotal < 0)
+                throw new NotificationContractException();
+            total = parsedTotal;
+        }
 
         // Some upstreams return a bare array rather than an envelope.
         if (itemsToken is not JArray && token is JArray bareArray)
@@ -391,21 +406,16 @@ public sealed class JeebNotificationsInboxController : ControllerBase
 
         var rows = new List<UpstreamNotificationRow>();
         var offerRouteCandidates = new List<OfferRouteCandidate>();
-        if (itemsToken is JArray array)
+        if (itemsToken is not JArray array || total < array.Count)
+            throw new NotificationContractException();
+        foreach (var node in array)
         {
-            foreach (var node in array)
-            {
-                if (node is JObject obj)
-                {
-                    var row = MapRow(obj);
-                    rows.Add(row);
-                    var payloadOfferId = NormalizeMappedRow(row, obj);
-                    if (payloadOfferId is not null)
-                    {
-                        offerRouteCandidates.Add(new OfferRouteCandidate(row, payloadOfferId));
-                    }
-                }
-            }
+            if (node is not JObject obj) throw new NotificationContractException();
+            var row = MapRow(obj);
+            rows.Add(row);
+            var payloadOfferId = NormalizeMappedRow(row, obj);
+            if (payloadOfferId is not null)
+                offerRouteCandidates.Add(new OfferRouteCandidate(row, payloadOfferId));
         }
 
         DeduplicateByNotificationId(rows);
@@ -423,7 +433,7 @@ public sealed class JeebNotificationsInboxController : ControllerBase
         Body = Str(obj, "body", "message", "description", "subtitle"),
         Timestamp = Str(obj, "ts", "timestamp", "createdAt", "created_at"),
         Status = Str(obj, "status", "read_status", "readStatus"),
-        Ref = Str(obj, "ref", "targetId", "target_id", "deliveryId", "delivery_id",
+        Ref = TargetScalar(obj, "ref", "targetId", "target_id", "deliveryId", "delivery_id",
             "entityId", "entity_id", "referenceId", "reference_id", "caseId", "case_id"),
     };
 
@@ -436,8 +446,8 @@ public sealed class JeebNotificationsInboxController : ControllerBase
 
     private static string? NormalizeMappedRow(UpstreamNotificationRow row, JObject obj)
     {
-        var payload = obj["payload"] as JObject;
-        var metadata = obj["metadata"] as JObject;
+        var payload = OptionalObject(obj["payload"]);
+        var metadata = OptionalObject(obj["metadata"]);
         if (string.Equals(row.Type?.Trim(), "text_message", StringComparison.OrdinalIgnoreCase))
         {
             row.Type = StrScalar(metadata, "event_type", "business_type", "notification_type")
@@ -446,20 +456,27 @@ public sealed class JeebNotificationsInboxController : ControllerBase
                 ?? row.Type;
         }
         row.Type = NormalizeType(row.Type);
-        row.DeepLink = StrScalar(metadata, "deep_link", "deepLink")
-            ?? StrScalar(payload, "deepLink", "deep_link");
+        row.DeepLink = ExplicitLink(metadata, "deep_link", "deepLink")
+            ?? ExplicitLink(payload, "deepLink", "deep_link");
         row.Timestamp ??= StrScalar(payload, "created_at");
+        row.Timestamp ??= StrScalar(obj, "at");
+        row.Timestamp ??= ObjectIdTimestamp(StrScalar(obj, "_id"));
         if (row.Type?.StartsWith("jeeb.dispute.", StringComparison.OrdinalIgnoreCase) == true
             || row.Type?.StartsWith("jeeb.support.", StringComparison.OrdinalIgnoreCase) == true)
-            row.Ref ??= StrScalar(metadata, "case_id", "caseId");
-        if (row.Ref is null && string.Equals(row.Type, "offer", StringComparison.Ordinal))
+            row.Ref ??= TargetScalar(metadata, "case_id", "caseId");
+        if (string.Equals(row.Type, "offer", StringComparison.OrdinalIgnoreCase))
         {
-            var payloadOfferId = StrScalar(payload, "offer_id");
+            row.Ref = TargetScalar(payload, "request_id", "requestId")
+                ?? TargetScalar(obj, "requestId", "request_id") ?? row.Ref;
+            if (row.Ref is not null) return null;
+            var payloadOfferId = TargetScalar(payload, "offer_id");
             row.Ref = payloadOfferId;
             return payloadOfferId;
         }
 
-        row.Ref ??= PayloadRef(payload, row.Type);
+        // A typed request/delivery destination has stronger provenance than a
+        // generic legacy ref alias. Never let a conversation/offer alias win it.
+        row.Ref = TargetRef(obj, payload, row.Type) ?? row.Ref;
         return null;
     }
 
@@ -496,18 +513,63 @@ public sealed class JeebNotificationsInboxController : ControllerBase
         return jeebType == "offer_received" ? "offer" : jeebType;
     }
 
-    private static string? PayloadRef(JObject? payload, string? type)
-        => type switch
+    // Request-addressed routes never hoist an offer_id or conversationId into ref.
+    private static string? TargetRef(JObject obj, JObject? payload, string? type)
+        => type?.ToLowerInvariant() switch
         {
-            "delivery_status_updated" => StrScalar(payload, "delivery_id", "order_id"),
-            "dispute_resolved" => StrScalar(payload, "dispute_id"),
-            "settlement_paid" => StrScalar(payload, "settlement_id"),
-            "kyc_approved" or "kyc_rejected" => StrScalar(payload, "kyc_id"),
+            "offer_accepted" => TargetScalar(payload, "request_id", "requestId")
+                ?? TargetScalar(obj, "requestId", "request_id"),
+            "new_request" or "chat" or "chat_message" or "request.try_expand_tier"
+                or "request.expired" or "request_expired" or "request_expiry" or "request_expiring" or "offer_lost"
+                => TargetScalar(obj, "requestId", "request_id") ?? TargetScalar(payload, "requestId", "request_id"),
+            "delivery" or "delivery_status_updated" or "cancellation_decision"
+                => TargetScalar(obj, "delivery_id", "deliveryId", "order_id")
+                    ?? TargetScalar(payload, "delivery_id", "deliveryId", "order_id")
+                    ?? TargetScalar(obj, "requestId", "request_id") ?? TargetScalar(payload, "requestId", "request_id"),
+            "dispute_resolved" => TargetScalar(payload, "dispute_id"),
+            "settlement_paid" => TargetScalar(payload, "settlement_id"),
+            "kyc_approved" or "kyc_rejected" => TargetScalar(payload, "kyc_id"),
             _ when type?.StartsWith("jeeb.dispute.", StringComparison.OrdinalIgnoreCase) == true
                 || type?.StartsWith("jeeb.support.", StringComparison.OrdinalIgnoreCase) == true
-                => StrScalar(payload, "caseId", "case_id", "member_id"),
+                => TargetScalar(payload, "caseId", "case_id", "member_id"),
             _ => null,
         };
+
+    private static JObject? OptionalObject(JToken? token) => token is null || token.Type == JTokenType.Null
+        ? null : token as JObject ?? throw new NotificationContractException();
+
+    private static string? TargetScalar(JObject? obj, params string[] keys)
+    {
+        foreach (var key in keys)
+        {
+            var token = obj?[key];
+            if (token is null || token.Type == JTokenType.Null) continue;
+            if (token.Type != JTokenType.String) throw new NotificationContractException();
+            var value = NotificationDeepLinkResolver.ValidateEntityId(token.Value<string>());
+            if (value is not null) return value;
+        }
+        return null;
+    }
+
+    private static string? ExplicitLink(JObject? obj, params string[] keys)
+    {
+        foreach (var key in keys)
+        {
+            var token = obj?[key];
+            if (token is null || token.Type == JTokenType.Null) continue;
+            if (token.Type != JTokenType.String) throw new NotificationContractException();
+            return NotificationDeepLinkResolver.ValidateExplicitLink(token.Value<string>()!);
+        }
+        return null;
+    }
+
+    private static string? ObjectIdTimestamp(string? id)
+    {
+        if (id is null || id.Length != 24 || !id.All(Uri.IsHexDigit)
+            || !uint.TryParse(id[..8], NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var seconds))
+            return null;
+        return DateTimeOffset.FromUnixTimeSeconds(seconds).ToString("o", CultureInfo.InvariantCulture);
+    }
 
     private sealed record OfferRouteCandidate(
         UpstreamNotificationRow Row,

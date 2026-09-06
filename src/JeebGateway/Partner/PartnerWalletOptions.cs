@@ -45,7 +45,7 @@ public sealed class PartnerWalletOptions
     /// any wallet-service call — a cheap guardrail against fat-finger amounts, NOT a fee rule. The
     /// authoritative limits (balance, fees, BR caps) remain wallet-service's.
     /// </summary>
-    [Range(typeof(decimal), "0.01", "79228162514264337593543950335")]
+    [Range(typeof(decimal), "0.01", "79228162514264337593543950335", ParseLimitsInInvariantCulture = true)]
     public decimal MaxTransferAmount { get; init; } = 100_000m;
 
     /// <summary>
@@ -58,7 +58,7 @@ public sealed class PartnerWalletOptions
     /// fail-fast style as <see cref="MaxTransferAmount"/> so a mis-configured threshold fails the host
     /// loudly at startup rather than at first high-value move (dotnet-options-pattern skill).
     /// </summary>
-    [Range(typeof(decimal), "0.01", "79228162514264337593543950335")]
+    [Range(typeof(decimal), "0.01", "79228162514264337593543950335", ParseLimitsInInvariantCulture = true)]
     public decimal OtpStepUpThreshold { get; init; } = 50m;
 
     // ── BOPLA / target-type guard (OWASP API3) ──────────────────────────────────────────────

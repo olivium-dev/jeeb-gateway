@@ -29,6 +29,97 @@ public class JeebNotificationsInboxUpstreamSanitizationTests
     private const string Canary =
         "System.InvalidOperationException: SECRET_CANARY_notif88 at NotificationService.Receiver.Load() line 7";
 
+    [Theory]
+    [InlineData("null")]
+    [InlineData("{}")]
+    [InlineData("{\"items\":{}}")]
+    [InlineData("{\"items\":[null]}")]
+    [InlineData("{\"items\":[42]}")]
+    [InlineData("{\"items\":[],\"total\":-1}")]
+    [InlineData("{\"items\":[],\"total\":\"10\"}")]
+    [InlineData("{\"items\":[{\"id\":\"n\",\"type\":\"chat\",\"requestId\":\"/\"}]}")]
+    [InlineData("{\"items\":[{\"id\":\"n\",\"type\":\"chat\",\"requestId\":42}]}")]
+    [InlineData("{\"items\":[{\"id\":\"n\",\"type\":\"chat\",\"requestId\":\"valid\",\"payload\":{\"deepLink\":\"https://secret.invalid/SECRET_CANARY_notif88\"}}]}")]
+    public async Task Malformed_Upstream_Success_Is_502_Not_An_Empty_Inbox(string wire)
+    {
+        var stub = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(wire, Encoding.UTF8, "application/json")
+        });
+        using var factory = NewFactoryWithNotificationStub(stub);
+        using var client = MintBearerClient(factory, "notif-contract-user");
+        var response = await client.GetAsync("/v1/notifications");
+        response.StatusCode.Should().Be(HttpStatusCode.BadGateway);
+        var problem = await response.Content.ReadFromJsonAsync<Microsoft.AspNetCore.Mvc.ProblemDetails>();
+        problem!.Status.Should().Be(502);
+        var body = await response.Content.ReadAsStringAsync();
+        body.Should().NotContain("SECRET_CANARY_notif88").And.NotContain("\"items\"");
+    }
+
+    [Theory]
+    [InlineData("[]")]
+    [InlineData("{\"items\":[],\"total\":0}")]
+    public async Task Explicit_Empty_Upstream_List_Remains_A_Valid_Empty_Page(string wire)
+    {
+        var stub = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(wire, Encoding.UTF8, "application/json")
+        });
+        using var factory = NewFactoryWithNotificationStub(stub);
+        using var client = MintBearerClient(factory, "notif-contract-user");
+        var response = await client.GetAsync("/v1/notifications");
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var page = await response.Content.ReadFromJsonAsync<JeebGateway.JeebNotifications.JeebNotificationsPageResponse>();
+        page!.Items.Should().BeEmpty();
+        page.TotalCount.Should().Be(0);
+    }
+
+    [Theory]
+    [InlineData("/chat/req-1/?source=inbox")]
+    [InlineData("jeeb://orders/req-1/receipt/?source=inbox")]
+    [InlineData("jeeb://wallet/")]
+    [InlineData("/")]
+    public async Task Supported_Explicit_Link_Forms_Remain_200_Through_Real_Client_And_Host(string link)
+    {
+        var wire = new Newtonsoft.Json.Linq.JObject
+        {
+            ["items"] = new Newtonsoft.Json.Linq.JArray(new Newtonsoft.Json.Linq.JObject
+            {
+                ["id"] = "n-1", ["type"] = "chat", ["requestId"] = "req-1",
+                ["payload"] = new Newtonsoft.Json.Linq.JObject { ["deepLink"] = link }
+            })
+        };
+        var stub = new StubHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(wire.ToString(), Encoding.UTF8, "application/json")
+        });
+        using var factory = NewFactoryWithNotificationStub(stub);
+        using var client = MintBearerClient(factory, "notif-contract-user");
+        var response = await client.GetAsync("/v1/notifications");
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var page = await response.Content.ReadFromJsonAsync<JeebGateway.JeebNotifications.JeebNotificationsPageResponse>();
+        page!.Items.Should().ContainSingle().Which.DeepLink.Should().Be(link);
+    }
+
+    [Fact]
+    public async Task MarkRead_Malformed_Ownership_List_Is_502_Without_Mutation()
+    {
+        var methods = new List<HttpMethod>();
+        var stub = new StubHttpMessageHandler(request =>
+        {
+            methods.Add(request.Method);
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent("{}", Encoding.UTF8, "application/json")
+            };
+        });
+        using var factory = NewFactoryWithNotificationStub(stub);
+        using var client = MintBearerClient(factory, "notif-contract-user");
+        var response = await client.PatchAsync("/v1/notifications/n-1/read", null);
+        response.StatusCode.Should().Be(HttpStatusCode.BadGateway);
+        methods.Should().Equal(HttpMethod.Get);
+    }
+
     [Fact]
     public async Task ListNotifications_UpstreamServerError_Is_Sanitized_ProblemDetails_Not_Leaked_Message()
     {

@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Text.Json;
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Notifications;
@@ -179,6 +180,17 @@ public sealed class ServiceCallbacksController : ControllerBase
         if (string.IsNullOrEmpty(recipientUserId))
         {
             return Invalid("recipientUserId is required.");
+        }
+
+        // A present-but-malformed routing id is a caller contract failure, not a link to
+        // fabricate: reject it here, before the reservation, rather than 500 out of BuildPayload.
+        try
+        {
+            NotificationDeepLinkResolver.ValidateEntityId(ResolveRouteEntityId(body.Data));
+        }
+        catch (NotificationContractException)
+        {
+            return Invalid("data carries a malformed routing id.");
         }
 
         // REQUIRED, not optional. Callbacks retry, and a retry without a stable key is
@@ -425,7 +437,8 @@ public sealed class ServiceCallbacksController : ControllerBase
         payload["body"] = template.Body;
         payload["type"] = notificationType;
         payload["category"] = "notification";
-        payload["deepLink"] = NotificationDeepLinkResolver.Resolve(notificationType, entityId);
+        payload["deepLink"] = NotificationDeepLinkResolver.Resolve(
+            notificationType, ResolveRouteEntityId(body.Data));
 
         // `silent` is forwarded as the transport-level request field the push microservice will read
         // once the data-only path lands (target doc §5.4). TODAY every sent-payload endpoint attaches
@@ -491,23 +504,36 @@ public sealed class ServiceCallbacksController : ControllerBase
         }
     }
 
+    private static readonly string[] EntityIdKeys =
+    [
+        "entityId", "entity_id",
+        "offerId", "offer_id",
+        "deliveryId", "delivery_id",
+        "requestId", "request_id",
+        "settlementId", "settlement_id",
+        "disputeId", "dispute_id",
+        "id",
+    ];
+
+    // The resolver's {id} slot is the request/delivery ref; an offer id in it yields a route
+    // mobile navigates to but cannot load, so the offer keys are omitted from route resolution.
+    private static readonly string[] RouteEntityIdKeys =
+        [.. EntityIdKeys.Where(key => key is not ("offerId" or "offer_id"))];
+
     private static string? ResolveEntityId(IReadOnlyDictionary<string, string>? data)
+        => FirstNonBlank(data, EntityIdKeys);
+
+    private static string? ResolveRouteEntityId(IReadOnlyDictionary<string, string>? data)
+        => FirstNonBlank(data, RouteEntityIdKeys);
+
+    private static string? FirstNonBlank(IReadOnlyDictionary<string, string>? data, string[] candidates)
     {
         if (data is null)
         {
             return null;
         }
 
-        foreach (var candidate in new[]
-                 {
-                     "entityId", "entity_id",
-                     "offerId", "offer_id",
-                     "deliveryId", "delivery_id",
-                     "requestId", "request_id",
-                     "settlementId", "settlement_id",
-                     "disputeId", "dispute_id",
-                     "id",
-                 })
+        foreach (var candidate in candidates)
         {
             if (data.TryGetValue(candidate, out var value) && !string.IsNullOrWhiteSpace(value))
             {

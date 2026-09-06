@@ -26,9 +26,8 @@ namespace JeebGateway.JeebNotifications;
 /// Coverage note: the generic <see cref="JeebGateway.service.ServiceNotification.ServiceNotificationClient"/>
 /// DOES expose the receiver list (<c>Get_messages_by_receiver…</c>) and a single
 /// mark-read (<c>Mark_notification_read…</c>), so these routes are wired to the real
-/// primitive — no fabricated state. When the upstream is cold (no rows / null payload)
-/// the list projects to the correctly-shaped EMPTY page the mobile parser tolerates,
-/// rather than erroring.
+/// primitive — no fabricated state. An explicitly empty list produces an empty page;
+/// absent or malformed upstream data is a contract failure.
 /// </para>
 /// </summary>
 public static class JeebNotificationsProjection
@@ -40,7 +39,7 @@ public static class JeebNotificationsProjection
     /// Project the generic receiver-list rows into the mobile inbox envelope. Pure:
     /// the controller extracts <paramref name="rows"/> from the (Newtonsoft) upstream
     /// payload and this method shapes them — newest-first ordering is preserved from
-    /// upstream. A null/empty <paramref name="rows"/> yields the cold-start empty page.
+    /// upstream. An empty <paramref name="rows"/> yields the cold-start empty page.
     /// </summary>
     public static JeebNotificationsPageResponse ProjectPage(
         IEnumerable<UpstreamNotificationRow>? rows,
@@ -51,12 +50,14 @@ public static class JeebNotificationsProjection
         var safePage = page < 1 ? 1 : page;
         var safeSize = pageSize < 1 ? 20 : pageSize;
 
-        var items = (rows ?? Array.Empty<UpstreamNotificationRow>())
-            .Where(r => r is not null)
+        if (rows is null) throw new NotificationContractException();
+        var items = rows
             .Select(ProjectItem)
             .ToList();
 
-        var total = upstreamTotal is > 0 ? upstreamTotal.Value : items.Count;
+        if (upstreamTotal is < 0 || upstreamTotal < items.Count)
+            throw new NotificationContractException();
+        var total = upstreamTotal ?? items.Count;
         var totalPages = total <= 0 ? 1 : (int)Math.Ceiling(total / (double)safeSize);
 
         return new JeebNotificationsPageResponse
@@ -87,9 +88,10 @@ public static class JeebNotificationsProjection
             Body = row.Body ?? string.Empty,
             Ts = row.Timestamp ?? string.Empty,
             Read = IsRead(row.Status),
-            Ref = NullIfBlank(row.Ref),
-            DeepLink = NullIfBlank(row.DeepLink)
-                ?? NotificationDeepLinkResolver.Resolve(row.Type, row.Ref),
+            Ref = NotificationDeepLinkResolver.ValidateEntityId(row.Ref),
+            DeepLink = row.DeepLink is null
+                ? NotificationDeepLinkResolver.Resolve(row.Type, row.Ref)
+                : NotificationDeepLinkResolver.ValidateExplicitLink(row.DeepLink),
         };
     }
 
