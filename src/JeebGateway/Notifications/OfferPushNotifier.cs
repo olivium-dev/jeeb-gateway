@@ -521,9 +521,9 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
             // deepLinkOverride carries the link for a notification whose taxonomy is no longer in
             // the resolver (b02 step 6b retired jeeb.offer_rejected). Without it the resolver would
             // return the inbox root for that type and the loser push would lose its destination.
-            // The resolver's {id} slot is the REQUEST ref, never an offer id (P02): passing
-            // offerId here produced jeeb://chat/{offerId}, a route mobile navigates to.
             var deepLink = deepLinkOverride
+                           // The resolver's {id} slot is the REQUEST ref, never an offer id (P02):
+                           // offerId there produced jeeb://chat/{offerId}, a route mobile navigates to.
                            ?? NotificationDeepLinkResolver.Resolve(templateKey, requestId);
 
             var payload = new Dictionary<string, object?>

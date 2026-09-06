@@ -38,9 +38,8 @@ public static class NotificationDeepLinkResolver
         var isJeebUri = value.StartsWith("jeeb://", StringComparison.OrdinalIgnoreCase);
         if (!isPath && !isJeebUri)
             throw new NotificationContractException();
-        // URI parsing validates query/fragment syntax only; route validation
-        // below deliberately uses the original path, before normalization.
-        // The temporary authority lets System.Uri parse an app-relative path.
+        // Uri parsing checks query/fragment syntax only; the temporary authority lets
+        // System.Uri accept an app-relative path. Route checks below use the original.
         var parseable = isPath ? "jeeb://route-validation" + value : value;
         if (!Uri.TryCreate(parseable, UriKind.Absolute, out var parsed) || !parsed.IsWellFormedOriginalString())
             throw new NotificationContractException();
@@ -50,9 +49,8 @@ public static class NotificationDeepLinkResolver
         // Mobile strips one optional trailing slash, and supports '/' itself.
         if (route.EndsWith('/')) route = route[..^1];
         if (isPath && route.Length == 0) return value;
-        // Match the original route segments before URI normalization could
-        // conceal traversal or escaped separators. The route graph is finite;
-        // it does not need a regex automaton or backtracking budget.
+        // Match the original segments, before URI normalization could conceal traversal
+        // or escaped separators. The route graph is finite; no regex automaton needed.
         var segments = route.Split('/');
         if (segments.Any(segment => ValidateEntityId(segment) is null))
             throw new NotificationContractException();
