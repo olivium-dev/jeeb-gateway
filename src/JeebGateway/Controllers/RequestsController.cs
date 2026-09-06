@@ -132,6 +132,9 @@ public class RequestsController : ControllerBase
             return BadRequest(RequestCreateValidation.DescriptionRequiredProblem());
         }
 
+        if (RequestCreateValidation.ValidateDescriptionLength(body.Description) is { } lengthProblem)
+            return BadRequest(lengthProblem);
+
         // JEB-45 (S05 N5): create-time initial-transition guard. The status is
         // server-authoritative — a client may not seed the row into an arbitrary
         // lifecycle state. A supplied status that is not a legal INITIAL state

@@ -136,6 +136,9 @@ public sealed class JeebRequestsController : ControllerBase
             return BadRequest(RequestCreateValidation.DescriptionRequiredProblem());
         }
 
+        if (RequestCreateValidation.ValidateDescriptionLength(body.Description) is { } lengthProblem)
+            return BadRequest(lengthProblem);
+
         // JEBV4-212 (E17): gateway-owned create-time prohibited-items moderation gate.
         // The mobile app creates via THIS route (POST /v1/requests), so the gate — which
         // previously ran only on the legacy /requests path — must run here too, else a

@@ -9,4 +9,5 @@ namespace JeebGateway.ProhibitedItems.Scanner;
 public interface IProhibitedItemSynonymRegistry
 {
     IReadOnlyList<string> GetSynonyms(string itemName);
+    IReadOnlyList<string> ExpandToken(string token) => GetSynonyms(token);
 }

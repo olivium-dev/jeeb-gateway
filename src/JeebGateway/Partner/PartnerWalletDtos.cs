@@ -16,7 +16,7 @@ public sealed class PartnerTopupPredictRequest
     public Guid JeeberId { get; init; }
 
     /// <summary>The net amount the partner intends to credit into the jeeber wallet.</summary>
-    [Range(typeof(decimal), "0.01", "79228162514264337593543950335"), MoneyAmount]
+    [Range(typeof(decimal), "0.01", "79228162514264337593543950335", ParseLimitsInInvariantCulture = true), MoneyAmount]
     public decimal Amount { get; init; }
 }
 
@@ -28,7 +28,7 @@ public sealed class PartnerTopupExecuteRequest
     public Guid JeeberId { get; init; }
 
     /// <summary>The net amount to move from the partner wallet into the jeeber wallet.</summary>
-    [Range(typeof(decimal), "0.01", "79228162514264337593543950335"), MoneyAmount]
+    [Range(typeof(decimal), "0.01", "79228162514264337593543950335", ParseLimitsInInvariantCulture = true), MoneyAmount]
     public decimal Amount { get; init; }
 
     /// <summary>
@@ -72,7 +72,7 @@ public sealed class PartnerOtpChallengeRequest
     public Guid JeeberId { get; init; }
 
     /// <summary>The net amount the code will authorize (must match the confirm's Amount exactly).</summary>
-    [Range(typeof(decimal), "0.01", "79228162514264337593543950335"), MoneyAmount]
+    [Range(typeof(decimal), "0.01", "79228162514264337593543950335", ParseLimitsInInvariantCulture = true), MoneyAmount]
     public decimal Amount { get; init; }
 }
 
@@ -83,7 +83,7 @@ public sealed class PartnerOtpChallengeRequest
 public sealed class PartnerCashCreditRequest
 {
     /// <summary>The cash amount received from the partner, to credit into the partner wallet.</summary>
-    [Range(typeof(decimal), "0.01", "79228162514264337593543950335"), MoneyAmount]
+    [Range(typeof(decimal), "0.01", "79228162514264337593543950335", ParseLimitsInInvariantCulture = true), MoneyAmount]
     public decimal Amount { get; init; }
 
     /// <summary>

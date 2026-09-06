@@ -26,6 +26,32 @@ namespace JeebGateway.Requests;
 /// </summary>
 public static class RequestCreateValidation
 {
+    public const int MinDescriptionLength = 5;
+    public const int MaxDescriptionLength = 500;
+
+    public static ProblemDetails? ValidateDescriptionLength(string description)
+    {
+        var length = Regex.Replace(description.Trim(), @"\s+", " ").Length;
+        if (length >= MinDescriptionLength && length <= MaxDescriptionLength) return null;
+        var tooShort = length < MinDescriptionLength;
+        var problem = new ValidationProblemDetails(new Dictionary<string, string[]>
+        {
+            ["description"] = new[] { tooShort ? "too-short" : "too-long" }
+        })
+        {
+            Type = "https://jeeb.dev/errors/validation",
+            Title = tooShort ? "description is too short." : "description is too long.",
+            Detail = tooShort
+                ? $"description must be at least {MinDescriptionLength} characters (got {length})."
+                : $"description must be at most {MaxDescriptionLength} characters (got {length}).",
+            Status = StatusCodes.Status400BadRequest,
+        };
+        problem.Extensions["field"] = "description";
+        problem.Extensions[tooShort ? "minLength" : "maxLength"] =
+            tooShort ? MinDescriptionLength : MaxDescriptionLength;
+        return problem;
+    }
+
     /// <summary>T-backend-007: MVP cap on attached photos per request.</summary>
     public const int MaxPhotos = 10;
 
