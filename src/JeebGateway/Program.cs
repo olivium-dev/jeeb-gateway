@@ -1732,6 +1732,12 @@ if (builder.Configuration.GetValue("FeatureFlags:UseUpstream:RemoteUserPreferenc
         JeebGateway.Users.SavedLocations.RemoteUserPreferencesSavedLocationStore>();
 }
 builder.Services.AddSavedLocations();
+builder.Services.Configure<JeebGateway.FormSubmissions.JeeberOnboardingCoverageOptions>(
+    builder.Configuration.GetSection(JeebGateway.FormSubmissions.JeeberOnboardingCoverageOptions.SectionName));
+builder.Services.AddSingleton<JeebGateway.FormSubmissions.IJeeberOnboardingCoverageResolver,
+    JeebGateway.FormSubmissions.JeeberOnboardingCoverageResolver>();
+builder.Services.AddSingleton<JeebGateway.FormSubmissions.IFormSubmissionStore,
+    JeebGateway.FormSubmissions.RemoteUserPreferencesFormSubmissionStore>();
 
 // The in-gateway push stack is DELETED (durability registers #10 + #12 [push] die with it):
 // it resolved NoDevices on every send. Producers now hand over via PushHandover.
