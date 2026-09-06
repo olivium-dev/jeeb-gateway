@@ -74,6 +74,10 @@ OpenMode                                             setting - # bare *Mode-arm 
 SuperLogin:OpenMode                                  setting - # SECURITY: true mints a session token for any userId with no service key and serves the demo roster anonymously
 FailMode                                             setting - # bare *Mode-arm form of WalletGuard:FailMode; the key itself lives in appsettings.json + appsettings.Production.json
 WalletGuard:FailMode                                 setting - # fail-open vs fail-closed when wallet-service is down (was baseline; D1 restates it as a reviewed setting)
+WalletGuard:Mode                                     setting - # P15 reserved; no activation or default change in G0
+Holds:Enabled                                        setting - # P15 reserved; remains unimplemented/off in G0
+Offers:MaxLiveOffersPerJeeber                        setting - # P15 reserved; no cap introduced in G0
+CommissionCollection:CurrencyCode                    setting - # P15 reserved; no currency pin introduced in G0
 
 # ---- setting: post-program configuration reconciliation (2026-08-18) -------
 # These are current bound options or direct IConfiguration keys, not cutover

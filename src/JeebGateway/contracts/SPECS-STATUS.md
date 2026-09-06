@@ -20,7 +20,7 @@ migration ticket per service replaces it.
 | auth-service         | `auth-service.openapi.json`         | none committed upstream; service uses .NET 5 Startup-based hosting with Swashbuckle     | placeholder       |
 | chat-service         | `chat-service.openapi.json`         | committed at `olivium-services/chat-service/swagger.json` (50KB, complete)              | committed-real    |
 | user-management      | `user-management.openapi.json`      | committed at `olivium-services/user-management/swagger.json` (19KB, complete)           | committed-real    |
-| wallet-service       | `wallet-service.openapi.json`       | none committed upstream; .NET 8 service with Swashbuckle (`Program.cs` confirmed)        | placeholder       |
+| wallet-service       | `wallet-service.openapi.json`       | pinned 28-path slice; `scripts/regenerate-wallet-client.sh` with NSwag 14.2.0             | pinned-contract   |
 | matching             | `matching.openapi.json`             | REMOVED — the file is no longer in this folder                                           | removed           |
 | one-time-password    | `one-time-password.openapi.json`    | committed; generated via `nswag run nswag-otp.json`                                      | committed-real    |
 | remote-user-preferences | `remote-user-preferences.openapi.json` | committed; backs `ServiceRemoteUserPreferencesClient`                                | committed-real    |
@@ -28,6 +28,9 @@ migration ticket per service replaces it.
 | geolocation-service  | `geolocation-service.openapi.json`  | FastAPI service; no spec committed                                                       | placeholder       |
 | push-notification    | `push-notification.openapi.json`    | FastAPI service; no spec committed                                                       | placeholder       |
 | delivery-service     | `delivery-service.openapi.json`     | committed at `olivium-services/delivery-service/docs/swagger.json` (46KB, complete)     | committed-real    |
+
+The wallet's `pinned-contract` status describes the reviewed local slice, not a fresh
+byte-for-byte comparison against current published upstream swagger.
 
 ## Filling in the placeholders
 

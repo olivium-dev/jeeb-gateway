@@ -6,6 +6,8 @@ spec="$repo_root/src/JeebGateway/contracts/wallet-service.openapi.json"
 output="${1:-$repo_root/src/JeebGateway/Services/ServiceWalletClient.cs}"
 nswag_bin="${NSWAG_BIN:-nswag}"
 
+python3 -B "$repo_root/scripts/check-wallet-contract.py" "$spec"
+
 "$nswag_bin" openapi2csclient \
   "/input:$spec" \
   /classname:ServiceWalletClient \
