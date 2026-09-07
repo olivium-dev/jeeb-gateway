@@ -186,7 +186,7 @@ public sealed class ServiceCallbacksController : ControllerBase
         // fabricate: reject it here, before the reservation, rather than 500 out of BuildPayload.
         try
         {
-            NotificationDeepLinkResolver.ValidateEntityId(ResolveRouteEntityId(body.Data));
+            NotificationDeepLinkResolver.ValidateEntityId(ResolveRouteEntityId(notificationType, body.Data));
         }
         catch (NotificationContractException)
         {
@@ -438,7 +438,7 @@ public sealed class ServiceCallbacksController : ControllerBase
         payload["type"] = notificationType;
         payload["category"] = "notification";
         payload["deepLink"] = NotificationDeepLinkResolver.Resolve(
-            notificationType, ResolveRouteEntityId(body.Data));
+            notificationType, ResolveRouteEntityId(notificationType, body.Data));
 
         // `silent` is forwarded as the transport-level request field the push microservice will read
         // once the data-only path lands (target doc §5.4). TODAY every sent-payload endpoint attaches
@@ -515,16 +515,53 @@ public sealed class ServiceCallbacksController : ControllerBase
         "id",
     ];
 
-    // The resolver's {id} slot is the request/delivery ref; an offer id in it yields a route
-    // mobile navigates to but cannot load, so the offer keys are omitted from route resolution.
+    // Retain the legacy aliases for types without a typed destination.
     private static readonly string[] RouteEntityIdKeys =
         [.. EntityIdKeys.Where(key => key is not ("offerId" or "offer_id"))];
+    private static readonly string[] GenericRouteEntityIdKeys = ["entityId", "entity_id", "id"];
+    private static readonly string[] RequestRouteEntityIdKeys = ["requestId", "request_id"];
+    private static readonly string[] DeliveryRouteEntityIdKeys = ["deliveryId", "delivery_id"];
 
     private static string? ResolveEntityId(IReadOnlyDictionary<string, string>? data)
         => FirstNonBlank(data, EntityIdKeys);
 
-    private static string? ResolveRouteEntityId(IReadOnlyDictionary<string, string>? data)
-        => FirstNonBlank(data, RouteEntityIdKeys);
+    private static string? ResolveRouteEntityId(
+        string notificationType, IReadOnlyDictionary<string, string>? data)
+    {
+        var type = notificationType.Trim().ToLowerInvariant();
+        if (type.StartsWith("jeeb.", StringComparison.Ordinal)) type = type[5..];
+        var typedKeys = type switch
+        {
+            "offer" or "offer_received" or "offer_updated" or "offer_accepted" or "offer_lost"
+                or "new_request" or "chat" or "chat_message"
+                or "request.try_expand_tier" or "request.expired"
+                or "request_expiring" or "request_expiry" or "request_expired"
+                => RequestRouteEntityIdKeys,
+            "delivery" or "delivery_status_updated" or "order_status" or "cancellation_decision"
+                => DeliveryRouteEntityIdKeys,
+            _ => null,
+        };
+        if (typedKeys is null) return FirstNonBlank(data, RouteEntityIdKeys);
+
+        string? target = null;
+        if (data is not null)
+        {
+            foreach (var key in typedKeys)
+            {
+                if (!data.TryGetValue(key, out var value)) continue;
+                // Validate raw, present values: trimming/skipping them can hide a malformed
+                // typed target behind a valid generic alias or a second spelling of the key.
+                var validated = NotificationDeepLinkResolver.ValidateEntityId(value);
+                if (validated is null || (target is not null && target != validated))
+                    throw new NotificationContractException();
+                target = validated;
+            }
+        }
+
+        // A delivery/offer ID cannot fill a request slot (or vice versa). Generic aliases
+        // remain available to legacy producers only when the typed target is absent.
+        return target ?? FirstNonBlank(data, GenericRouteEntityIdKeys);
+    }
 
     private static string? FirstNonBlank(IReadOnlyDictionary<string, string>? data, string[] candidates)
     {
