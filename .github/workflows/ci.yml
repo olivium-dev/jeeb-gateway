@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
   pull_request:
-    branches: [main]
+    branches: [main, 'wgf2/**']
 
 jobs:
   provider-boundary-gates:
@@ -105,6 +105,36 @@ jobs:
             exit 1
           fi
           echo "OK: OTP service NSwag client is fresh."
+
+  wallet-contract-boundary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Test wallet contract guard
+        run: python3 -B scripts/test-wallet-contract.py
+      - name: Preserve gateway and wallet path/method contracts
+        env:
+          CONTRACT_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: bash scripts/check-wallet-boundary-compatibility.sh "$CONTRACT_BASE"
+
+  nswag-wallet-freshness:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup exact .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.404"
+      - name: Install pinned NSwag CLI
+        run: dotnet tool install -g NSwag.ConsoleCore --version 14.2.0
+      - name: Require committed wallet client before generation
+        run: git ls-files --error-unmatch -- src/JeebGateway/Services/ServiceWalletClient.cs
+      - name: Regenerate wallet client from guarded pinned contract
+        run: NSWAG_BIN="$HOME/.dotnet/tools/nswag" bash scripts/regenerate-wallet-client.sh
+      - name: Fail on wallet client drift
+        run: git diff --exit-code -- src/JeebGateway/Services/ServiceWalletClient.cs
 
   build-and-test:
     runs-on: ubuntu-latest
