@@ -124,13 +124,6 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
         "Offer Not Selected",
         "Your offer wasn't selected this time. Keep an eye out for new delivery requests.");
 
-    /// <summary>
-    /// Deep-link template for the loser push, relocated from the retired
-    /// <see cref="NotificationDeepLinkResolver"/> entry for the same reason as
-    /// <see cref="OfferLostTemplate"/>. A losing bidder lands on the (now terminal) offer.
-    /// </summary>
-    internal static string OfferLostDeepLink(string offerId) => $"jeeb://offers/{offerId}";
-
     private readonly ServicePushNotificationClient _push;
     private readonly INotificationRecordWriter _recordWriter;
     private readonly IGenericEventDispatcher _events;
@@ -453,17 +446,14 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
                or NotificationRecordWriteClassification.SkippedSilent
                or NotificationRecordWriteClassification.RouteAbsent);
 
-    // b02 step 6b — the template key is GONE from JeebNotificationCatalog (retired: the centre
-    // 405s it, so no inbox row of that type can exist). Copy and deep link are therefore passed
-    // in explicitly. There is no durable-write attempt here and never was: this is a push-only
-    // notification, which is exactly why retiring the taxonomy costs the user nothing.
+    // b02 step 6b — the key is GONE from JeebNotificationCatalog (the centre 405s it), so the copy
+    // is passed in. Push-only: no durable write here, which is why retiring the taxonomy is free.
     public Task NotifyOfferLostAsync(
         string loserJeeberId, string requestId, string offerId, CancellationToken ct)
         => SendLifecycleAsync(
             loserJeeberId, requestId, offerId,
             templateKey: RetiredOfferLostTemplateKey, type: "offer_lost", ct,
-            renderedTemplate: OfferLostTemplate,
-            deepLinkOverride: OfferLostDeepLink(offerId));
+            renderedTemplate: OfferLostTemplate);
 
     /// <summary>
     /// The retired key, kept ONLY as the log/telemetry label for this push so operator dashboards
@@ -506,8 +496,7 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
         string type,
         CancellationToken ct,
         NotificationTemplate? renderedTemplate = null,
-        string? notificationCorrelationId = null,
-        string? deepLinkOverride = null)
+        string? notificationCorrelationId = null)
     {
         try
         {
@@ -518,11 +507,9 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
 
             var template = renderedTemplate ?? JeebNotificationCatalog.Render(templateKey);
 
-            // deepLinkOverride carries the link for a notification whose taxonomy is no longer in
-            // the resolver (b02 step 6b retired jeeb.offer_rejected). Without it the resolver would
-            // return the inbox root for that type and the loser push would lose its destination.
-            var deepLink = deepLinkOverride
-                           ?? NotificationDeepLinkResolver.Resolve(templateKey, offerId);
+            // The resolver's {id} slot is the REQUEST ref, never an offer id (P02). offer_lost has
+            // no route (PLAN-P02 §4) so it resolves to the inbox root, the only link mobile opens.
+            var deepLink = NotificationDeepLinkResolver.Resolve(templateKey, requestId);
 
             var payload = new Dictionary<string, object?>
             {
@@ -534,7 +521,7 @@ public sealed class OfferPushNotifier : IOfferPushNotifier
                 ["requestId"] = requestId,
                 ["request_id"] = requestId,
                 ["offerId"] = offerId,
-                // Ready-to-navigate deep link (jeeb://offers/{offerId}); flat so the client
+                // Ready-to-navigate deep link keyed by the request ref; flat so the client
                 // needs no nested-JSON hoist. Mirrors the inbox deepLink contract.
                 ["deepLink"] = deepLink,
             };

@@ -1,3 +1,5 @@
+using JeebGateway.Tiers;
+
 namespace JeebGateway.Services.Dispatch;
 
 /// <summary>
@@ -81,10 +83,21 @@ public sealed class StaticNotificationTemplateRenderer : INotificationTemplateRe
         return new RenderedNotification(title, body);
     }
 
+    // F4a: {requestId} is copy the user reads, so it renders the ORD- handle the order card shows
+    // instead of the raw UUID; the routing payload keeps the id. Ids with no ORD- form render as-is.
     private static string ApplyParameters(string template, IReadOnlyDictionary<string, string> parameters)
     {
         foreach (var (key, value) in parameters)
-            template = template.Replace($"{{{key}}}", value, StringComparison.OrdinalIgnoreCase);
+        {
+            var text = key.Equals(RequestIdParameter, StringComparison.OrdinalIgnoreCase)
+                ? TierDisplay.OrderReference(value) ?? value
+                : value;
+            template = template.Replace($"{{{key}}}", text, StringComparison.OrdinalIgnoreCase);
+        }
+
         return template;
     }
+
+    /// <summary>The one parameter whose value is a request id and is rendered as an order reference.</summary>
+    private const string RequestIdParameter = "requestId";
 }

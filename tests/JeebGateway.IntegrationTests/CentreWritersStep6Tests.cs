@@ -321,20 +321,14 @@ public sealed class CentreWritersStep6Tests
         => NotificationDeepLinkResolver.Resolve(notificationType, "offer-1")
             .Should().Be(NotificationDeepLinkResolver.InboxRoot);
 
-    /// <summary>
-    /// The point of the retirement that is easy to get wrong: the loser-bidder PUSH keeps its exact
-    /// copy and its offer deep link. That push never needed the notification centre, so retiring an
-    /// unroutable centre taxonomy must not degrade it into the catalog's product-neutral fallback
-    /// ("You have a new notification for jeeb.offer_rejected"). The copy moved next to its only
-    /// caller; this asserts it moved intact.
-    /// </summary>
+    /// <summary>The loser-bidder PUSH keeps its exact copy after the retirement, instead of
+    /// degrading into the catalog's product-neutral "You have a new notification" fallback.</summary>
     [Fact]
-    public void Step6b_LoserPushCopyAndDeepLink_SurvivedTheRetirement()
+    public void Step6b_LoserPushCopy_SurvivedTheRetirement()
     {
         OfferPushNotifier.OfferLostTemplate.Title.Should().Be("Offer Not Selected");
         OfferPushNotifier.OfferLostTemplate.Body.Should()
             .Be("Your offer wasn't selected this time. Keep an eye out for new delivery requests.");
-        OfferPushNotifier.OfferLostDeepLink("offer-9").Should().Be("jeeb://offers/offer-9");
 
         // And it is NOT reachable via the catalog any more — which is what would have silently
         // degraded the copy if it had been left to Render().

@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Text.Json;
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Notifications;
@@ -179,6 +180,17 @@ public sealed class ServiceCallbacksController : ControllerBase
         if (string.IsNullOrEmpty(recipientUserId))
         {
             return Invalid("recipientUserId is required.");
+        }
+
+        // A present-but-malformed routing id is a caller contract failure, not a link to
+        // fabricate: reject it here, before the reservation, rather than 500 out of BuildPayload.
+        try
+        {
+            NotificationDeepLinkResolver.ValidateEntityId(ResolveRouteEntityId(notificationType, body.Data));
+        }
+        catch (NotificationContractException)
+        {
+            return Invalid("data carries a malformed routing id.");
         }
 
         // REQUIRED, not optional. Callbacks retry, and a retry without a stable key is
@@ -425,7 +437,8 @@ public sealed class ServiceCallbacksController : ControllerBase
         payload["body"] = template.Body;
         payload["type"] = notificationType;
         payload["category"] = "notification";
-        payload["deepLink"] = NotificationDeepLinkResolver.Resolve(notificationType, entityId);
+        payload["deepLink"] = NotificationDeepLinkResolver.Resolve(
+            notificationType, ResolveRouteEntityId(notificationType, body.Data));
 
         // `silent` is forwarded as the transport-level request field the push microservice will read
         // once the data-only path lands (target doc §5.4). TODAY every sent-payload endpoint attaches
@@ -491,23 +504,73 @@ public sealed class ServiceCallbacksController : ControllerBase
         }
     }
 
+    private static readonly string[] EntityIdKeys =
+    [
+        "entityId", "entity_id",
+        "offerId", "offer_id",
+        "deliveryId", "delivery_id",
+        "requestId", "request_id",
+        "settlementId", "settlement_id",
+        "disputeId", "dispute_id",
+        "id",
+    ];
+
+    // Retain the legacy aliases for types without a typed destination.
+    private static readonly string[] RouteEntityIdKeys =
+        [.. EntityIdKeys.Where(key => key is not ("offerId" or "offer_id"))];
+    private static readonly string[] GenericRouteEntityIdKeys = ["entityId", "entity_id", "id"];
+    private static readonly string[] RequestRouteEntityIdKeys = ["requestId", "request_id"];
+    private static readonly string[] DeliveryRouteEntityIdKeys = ["deliveryId", "delivery_id"];
+
     private static string? ResolveEntityId(IReadOnlyDictionary<string, string>? data)
+        => FirstNonBlank(data, EntityIdKeys);
+
+    private static string? ResolveRouteEntityId(
+        string notificationType, IReadOnlyDictionary<string, string>? data)
+    {
+        var type = notificationType.Trim().ToLowerInvariant();
+        if (type.StartsWith("jeeb.", StringComparison.Ordinal)) type = type[5..];
+        var typedKeys = type switch
+        {
+            "offer" or "offer_received" or "offer_updated" or "offer_accepted" or "offer_lost"
+                or "new_request" or "chat" or "chat_message"
+                or "request.try_expand_tier" or "request.expired"
+                or "request_expiring" or "request_expiry" or "request_expired"
+                => RequestRouteEntityIdKeys,
+            "delivery" or "delivery_status_updated" or "order_status" or "cancellation_decision"
+                => DeliveryRouteEntityIdKeys,
+            _ => null,
+        };
+        if (typedKeys is null) return FirstNonBlank(data, RouteEntityIdKeys);
+
+        string? target = null;
+        if (data is not null)
+        {
+            foreach (var key in typedKeys)
+            {
+                if (!data.TryGetValue(key, out var value)) continue;
+                // Validate raw, present values: trimming/skipping them can hide a malformed
+                // typed target behind a valid generic alias or a second spelling of the key.
+                var validated = NotificationDeepLinkResolver.ValidateEntityId(value);
+                if (validated is null || (target is not null && target != validated))
+                    throw new NotificationContractException();
+                target = validated;
+            }
+        }
+
+        // A delivery/offer ID cannot fill a request slot (or vice versa). Generic aliases
+        // remain available to legacy producers only when the typed target is absent.
+        return target ?? FirstNonBlank(data, GenericRouteEntityIdKeys);
+    }
+
+    private static string? FirstNonBlank(IReadOnlyDictionary<string, string>? data, string[] candidates)
     {
         if (data is null)
         {
             return null;
         }
 
-        foreach (var candidate in new[]
-                 {
-                     "entityId", "entity_id",
-                     "offerId", "offer_id",
-                     "deliveryId", "delivery_id",
-                     "requestId", "request_id",
-                     "settlementId", "settlement_id",
-                     "disputeId", "dispute_id",
-                     "id",
-                 })
+        foreach (var candidate in candidates)
         {
             if (data.TryGetValue(candidate, out var value) && !string.IsNullOrWhiteSpace(value))
             {
