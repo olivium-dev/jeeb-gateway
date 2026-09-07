@@ -18,8 +18,8 @@ namespace JeebGateway.Auth.OtpSignIn;
 /// pair and revokes the presented token on success, and (2) on replay of an
 /// already-rotated token, revokes the ENTIRE refresh-token family and returns
 /// <see cref="RefreshOutcome.ReuseDetected"/>. The gateway is the sole signer of
-/// the session JWT (token-authority invariant N11); this path does NOT touch
-/// user-management.</para>
+/// the session JWT (token-authority invariant N11); role continuity is revalidated
+/// against user-management and ban-service before minting.</para>
 ///
 /// <para><b>Durable store (M3).</b> The behaviour here is independent of the
 /// <see cref="IRefreshTokenStore"/> backing implementation; binding a durable

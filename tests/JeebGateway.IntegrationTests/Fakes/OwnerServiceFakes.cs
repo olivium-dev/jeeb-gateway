@@ -21,6 +21,22 @@ internal static class OwnerServiceFakes
         services.AddSingleton<InMemoryUsersStore>();
         services.AddSingleton<IUsersStore>(sp =>
             sp.GetRequiredService<InMemoryUsersStore>());
+        // These hosts explicitly fake the identity owner. Keep refresh pointed
+        // at that same fixture; real owner HTTP/absence/fault behavior is covered
+        // by OwnerRefreshRoleAuthorityTests, not an unconfigured external URL.
+        services.RemoveAll<JeebGateway.Tokens.IRefreshRoleAuthority>();
+        services.AddSingleton<JeebGateway.Tokens.IRefreshRoleAuthority, FixtureRefreshRoles>();
+    }
+
+    private sealed class FixtureRefreshRoles(IUsersStore users) : JeebGateway.Tokens.IRefreshRoleAuthority
+    {
+        public async Task<JeebGateway.Tokens.TokenRoleContext?> ResolveAsync(string userId, CancellationToken ct)
+        {
+            var profile = await users.GetByIdAsync(userId, ct);
+            return profile is not null && !profile.IsSuspended && profile.Roles.Contains(profile.ActiveRole)
+                ? new JeebGateway.Tokens.TokenRoleContext(profile.Roles, profile.ActiveRole) : null;
+        }
+        public Task<bool> ProbeAsync(CancellationToken ct) => Task.FromResult(true);
     }
 
     public static void AllowAllAccounts(IServiceCollection services)

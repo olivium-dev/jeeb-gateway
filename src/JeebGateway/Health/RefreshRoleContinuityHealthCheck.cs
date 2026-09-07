@@ -5,7 +5,9 @@ using Microsoft.Extensions.Diagnostics.HealthChecks;
 namespace JeebGateway.Health;
 
 /// <summary>
-/// G5 / D2 §4a — the pre-incident alarm for the roles-loss class. <c>IUsersStore</c> is process RAM
+/// Runtime readiness attests the same owner role and suspension paths used by
+/// refresh. The legacy constructor seam retains the original local-store alarm
+/// for isolated tests. G5 / D2 §4a: <c>IUsersStore</c> is process RAM
 /// (durability register #8 is not armed) while the refresh store is durable, so after any restart
 /// the store is empty for every user while live sessions keep rotating against it. Before G5 that
 /// silently minted roles-less tokens and 403'd every capability route with <c>/health/ready</c>
@@ -13,7 +15,8 @@ namespace JeebGateway.Health;
 /// </summary>
 public sealed class RefreshRoleContinuityHealthCheck(
     IUsersStoreCensus users,
-    IRefreshSessionCensus census) : IHealthCheck
+    IRefreshSessionCensus census,
+    IRefreshRoleAuthority? authority = null) : IHealthCheck
 {
     internal const string Name = "refresh-role-continuity";
 
@@ -21,6 +24,25 @@ public sealed class RefreshRoleContinuityHealthCheck(
         HealthCheckContext context,
         CancellationToken cancellationToken = default)
     {
+        if (authority is not null)
+        {
+            bool available;
+            try { available = await authority.ProbeAsync(cancellationToken); }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception) { available = false; }
+            var ownerData = new Dictionary<string, object>
+            {
+                ["roleSource"] = "user-management-live",
+                ["suspensionSource"] = "ban-service-live",
+                ["refreshFamiliesObserved"] = census.ActiveFamilies,
+                ["rolesEmptyRefreshes"] = census.RolesEmptyRefreshes,
+                ["lastRolesEmptyAt"] = census.LastRolesEmptyAt?.ToString("O", CultureInfo.InvariantCulture) ?? "never",
+            };
+            return available
+                ? HealthCheckResult.Healthy("authoritative refresh role and suspension read paths verified", ownerData)
+                : HealthCheckResult.Degraded("authoritative refresh role or suspension read path unavailable", data: ownerData);
+        }
+
         int profiles;
         try
         {

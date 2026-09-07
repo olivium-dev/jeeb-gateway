@@ -2516,10 +2516,20 @@ if (!JeebGateway.Migration.GwdbxMigrationOptions.RequiresUpstream(
     builder.Services.AddSingleton<IRefreshTokenStore, InMemoryRefreshTokenStore>();
 }
 builder.Services.AddSingleton<IUsersStoreAdapter, UsersStoreRolesAdapter>();
+// Refresh roles and suspension are read from their owners on every rotation.
+// Legacy profile projection remains separate and cannot authorize refresh.
+builder.Services.AddSingleton<IRefreshRoleAuthority, OwnerRefreshRoleAuthority>();
 // Feeds the refresh-role-continuity readiness row; TokenService writes it on every rotation.
 builder.Services.AddSingleton<IRefreshSessionCensus, InProcessRefreshSessionCensus>();
 builder.Services.AddSingleton<JeebGateway.Health.IUsersStoreCensus, JeebGateway.Health.UsersStoreCensus>();
-builder.Services.AddSingleton<ITokenService, TokenService>();
+builder.Services.AddSingleton<ITokenService>(sp => new TokenService(
+    sp.GetRequiredService<IRefreshTokenStore>(),
+    sp.GetRequiredService<IUsersStoreAdapter>(),
+    sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<JwtOptions>>(),
+    sp.GetRequiredService<TimeProvider>(),
+    sp.GetRequiredService<ILogger<TokenService>>(),
+    sp.GetRequiredService<IRefreshSessionCensus>(),
+    sp.GetRequiredService<IRefreshRoleAuthority>()));
 builder.Services.AddSingleton<IUmAuthenticationContextValidator, UmAuthenticationContextValidator>();
 
 // Admin portal settlement reads/reconcile over the in-gateway COD owner

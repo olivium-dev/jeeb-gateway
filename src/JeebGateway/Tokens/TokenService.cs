@@ -29,6 +29,7 @@ public class TokenService : ITokenService
     private readonly SigningCredentials _signingCredentials;
     private readonly ILogger<TokenService> _log;
     private readonly IRefreshSessionCensus _census;
+    private readonly IRefreshRoleAuthority? _roleAuthority;
 
     public TokenService(
         IRefreshTokenStore store,
@@ -36,7 +37,8 @@ public class TokenService : ITokenService
         IOptions<JwtOptions> options,
         TimeProvider clock,
         ILogger<TokenService>? log = null,
-        IRefreshSessionCensus? census = null)
+        IRefreshSessionCensus? census = null,
+        IRefreshRoleAuthority? roleAuthority = null)
     {
         _store = store;
         _users = users;
@@ -44,6 +46,7 @@ public class TokenService : ITokenService
         _options = options.Value;
         _log = log ?? NullLogger<TokenService>.Instance;
         _census = census ?? new InProcessRefreshSessionCensus();
+        _roleAuthority = roleAuthority;
 
         var keyBytes = Encoding.UTF8.GetBytes(_options.SigningKey);
         if (keyBytes.Length < 32)
@@ -213,6 +216,22 @@ public class TokenService : ITokenService
         // sessions depend on it, which is the readiness row's other input (D2 sec 4a).
         _census.RecordRotation(existing.BoundedSessionFamilyId ?? existing.UserId);
 
+        TokenRoleContext? currentOwnerRoles = null;
+        // External operator identity belongs to its verified provider tuple,
+        // not UM. Its complete tuple/deadline is validated below; no subject
+        // prefix selects this path and a partial tuple cannot become ordinary.
+        if (_roleAuthority is not null
+            && (existing.AbsoluteSessionExpiresAt is not null || !HasExternalSessionFields(existing)))
+        {
+            currentOwnerRoles = await _roleAuthority.ResolveAsync(existing.UserId, ct);
+            if (currentOwnerRoles is null)
+                return new RefreshResult { Outcome = RefreshOutcome.RoleResolutionFailed };
+            if (TryMintedSessionRoles(existing, out var mintedRoles)
+                && (mintedRoles.ActiveRole != currentOwnerRoles.ActiveRole
+                    || mintedRoles.Roles.Any(role => !currentOwnerRoles.Roles.Contains(role, StringComparer.Ordinal))))
+                return new RefreshResult { Outcome = RefreshOutcome.RoleResolutionFailed };
+        }
+
         TokenRoleContext roleContext;
         VerifiedAuthenticationContext? persistedAuthentication;
         if (existing.AbsoluteSessionExpiresAt is not null)
@@ -231,9 +250,14 @@ public class TokenService : ITokenService
         {
             if (roleResolver is null)
             {
-                // G5: prefer the role context this session was minted with. The store fallback
-                // is process RAM the super-login mints never populate (see SessionRoleSnapshot).
-                if (!TryMintedSessionRoles(existing, out roleContext))
+                // Runtime DI requires the live owner. The snapshot/local branch
+                // remains only for isolated legacy constructor tests that do
+                // not supply an authority; production cannot select that branch.
+                if (currentOwnerRoles is not null)
+                {
+                    roleContext = currentOwnerRoles;
+                }
+                else if (!TryMintedSessionRoles(existing, out roleContext))
                 {
                     var roles = await _users.GetRolesAsync(existing.UserId, ct);
                     var activeRole = await _users.GetActiveRoleAsync(existing.UserId, ct);
@@ -249,6 +273,14 @@ public class TokenService : ITokenService
             }
             persistedAuthentication = AuthenticationFrom(existing);
         }
+
+        // Bounded/provider sessions and explicit admin resolvers retain their
+        // narrower context, but a revoked owner role or stale active role may
+        // never be restored from a previously minted snapshot.
+        if (currentOwnerRoles is not null
+            && (roleContext.ActiveRole != currentOwnerRoles.ActiveRole
+                || roleContext.Roles.Any(role => !currentOwnerRoles.Roles.Contains(role, StringComparer.Ordinal))))
+            return new RefreshResult { Outcome = RefreshOutcome.RoleResolutionFailed };
 
         // G5 fail-closed: a roles-less mint is a valid, correctly-audienced token that
         // L2 then 403s on EVERY capability route — a silent, unrecoverable session brick.
