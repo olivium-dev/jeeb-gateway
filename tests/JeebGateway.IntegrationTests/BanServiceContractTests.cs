@@ -46,6 +46,11 @@ public class BanServiceContractTests
         yield return new object[] { "wrong identity", "{\"user_id\":\"other\",\"ban_statuses\":[]}" };
         yield return new object[] { "null record", $$"""{"user_id":"{{JeeberId}}","ban_statuses":[null]}""" };
         var valid = $$"""{"user_id":"{{JeeberId}}","ban_statuses":[{"user_id":"{{JeeberId}}","ban_type":"yellow","current_stage":1,"status":"WARNING","last_updated":"2026-06-01T15:46:25Z","is_currently_banned":false}]}""";
+        yield return new object[] { "duplicate envelope identity", $$"""{"user_id":"other","user_id":"{{JeeberId}}","ban_statuses":[]}""" };
+        yield return new object[] { "duplicate envelope collection", valid[..^1] + ",\"ban_statuses\":[]}" };
+        yield return new object[] { "duplicate ban flag true then false", valid.Replace("\"is_currently_banned\":false", "\"is_currently_banned\":true,\"is_currently_banned\":false") };
+        yield return new object[] { "duplicate ban flag alternate casing", valid.Replace("\"is_currently_banned\":false", "\"IS_CURRENTLY_BANNED\":true,\"is_currently_banned\":false") };
+        yield return new object[] { "duplicate record status", valid.Replace("\"status\":\"WARNING\"", "\"status\":\"PARTIAL_BAN\",\"status\":\"WARNING\"") };
         foreach (var field in new[] { "user_id", "ban_type", "current_stage", "status", "last_updated", "is_currently_banned" })
         {
             var body = JsonNode.Parse(valid)!;

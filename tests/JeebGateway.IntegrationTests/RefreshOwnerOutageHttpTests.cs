@@ -25,7 +25,7 @@ public sealed class RefreshOwnerOutageHttpTests
     private static readonly string[] Routes = ["/v1/auth/refresh", "/auth/refresh", "/auth/tokens/refresh", "/admin/v1/auth/refresh", "/admin/auth/refresh"];
     private static readonly string[] UmFailures = ["um503", "umTimeout", "umMalformed", "umNull", "umWrongIdentity", "umMissingRoles", "umNullRoles", "umMissingActive", "umContradictoryActive", "umInvalidRole", "umInvalidJson", "umNumericRoles", "umDuplicateIdentity"];
     public static IEnumerable<object[]> Cases() =>
-        Routes.SelectMany(route => UmFailures.Concat(["ban503", "banTimeout", "banMalformed"])
+        Routes.SelectMany(route => UmFailures.Concat(["ban503", "banTimeout", "banMalformed", "banDuplicateFlag"])
                 .Select(failure => new object[] { route, failure }));
     public static IEnumerable<object[]> SecondaryCases() =>
         Routes.Where(route => route.StartsWith("/admin/", StringComparison.Ordinal))
@@ -144,6 +144,9 @@ public sealed class RefreshOwnerOutageHttpTests
             if (um && failure == "missing")
                 return Response(HttpStatusCode.NotFound, "{\"type\":\"https://docs.olivium-dev.com/errors/user-not-found\",\"status\":404}");
             if (!um && failure == "banMalformed") return Response(HttpStatusCode.OK, "{}");
+            if (!um && failure == "banDuplicateFlag") return Response(HttpStatusCode.OK,
+                "{\"user_id\":\"" + UserId + "\",\"ban_statuses\":[{\"user_id\":\"" + UserId
+                + "\",\"ban_type\":\"yellow\",\"current_stage\":2,\"status\":\"PARTIAL_BAN\",\"last_updated\":\"2026-06-01T15:46:25Z\",\"is_currently_banned\":true,\"is_currently_banned\":false}]}");
             if (um)
             {
                 var malformed = failure switch {

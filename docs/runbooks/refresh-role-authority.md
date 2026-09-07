@@ -24,6 +24,8 @@ An explicit empty role list does confirm that no grants remain and returns 401.
 The admin resolver's secondary read uses the same authority/parser and retains
 its portal-access restriction, including exact missing-identity 404 handling.
 Client code must retain its refresh credential on 503 and retry later.
+Ban status reads also reject duplicate properties, including casing variants,
+so a later unbanned flag or empty collection cannot replace an earlier ban fact.
 HTTP integration fixtures exercise every route with the real token service and
 UM/ban parsers, including a successful retry of the unchanged credential.
 

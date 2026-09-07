@@ -47,7 +47,10 @@ public sealed class BanServiceClient : IBanServiceClient
         using var response = await _http.GetAsync(url, ct);
         response.EnsureSuccessStatusCode();
 
-        var wire = await response.Content.ReadFromJsonAsync<WireStatuses>(JsonOptions, ct);
+        using var body = await response.Content.ReadAsStreamAsync(ct);
+        using var document = await JsonDocument.ParseAsync(body, cancellationToken: ct);
+        RejectDuplicateProperties(document.RootElement);
+        var wire = document.RootElement.Deserialize<WireStatuses>(JsonOptions);
         if (wire is null || wire.UserId != userId || wire.BanStatuses is null)
         {
             throw new HttpRequestException(
@@ -117,6 +120,25 @@ public sealed class BanServiceClient : IBanServiceClient
             NewStatus = wire.NewStatus is null ? null : MapStatus(wire.NewStatus, userId),
             Updated = wire.Updated,
         };
+    }
+
+    private static void RejectDuplicateProperties(JsonElement value)
+    {
+        if (value.ValueKind == JsonValueKind.Object)
+        {
+            // Match the serializer's case-insensitive names, including decoded
+            // escapes. Never let a later property replace an earlier ban fact.
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var property in value.EnumerateObject())
+            {
+                if (!names.Add(property.Name)) throw new JsonException("Ambiguous ban status response.");
+                RejectDuplicateProperties(property.Value);
+            }
+        }
+        else if (value.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in value.EnumerateArray()) RejectDuplicateProperties(item);
+        }
     }
 
     private static BanStatusItem MapStatus(WireStatus? w, string expectedUserId)
