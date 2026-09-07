@@ -3,8 +3,10 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using FluentAssertions;
 using JeebGateway.IntegrationTests.Fakes;
+using JeebGateway.Requests;
 using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests;
@@ -18,6 +20,7 @@ public class V1CreateDescriptionLengthTests : IClassFixture<V1CreateDescriptionL
     {
         protected override void ConfigureWebHost(Microsoft.AspNetCore.Hosting.IWebHostBuilder builder)
         {
+            base.ConfigureWebHost(builder);
             builder.UseSetting("FeatureFlags:CreateModeration:Enabled", "true");
             builder.ConfigureServices(services =>
             {
@@ -25,6 +28,15 @@ public class V1CreateDescriptionLengthTests : IClassFixture<V1CreateDescriptionL
                 OwnerServiceFakes.UseLiveShapedModerationCatalog(services);
             });
         }
+    }
+
+    [Fact]
+    public void Factory_Uses_Test_Environment_And_Local_Request_Owner()
+    {
+        _factory.Services.GetRequiredService<IHostEnvironment>()
+            .EnvironmentName.Should().Be("Testing");
+        _factory.Services.GetRequiredService<IRequestsStore>()
+            .Should().BeOfType<InMemoryRequestsStore>();
     }
 
     [Theory]
