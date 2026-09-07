@@ -1,7 +1,7 @@
 # Refresh role continuity
 
 Runtime `ITokenService` requires `IRefreshRoleAuthority` through explicit DI
-resolution. Ordinary UM sessions and bounded internal UM sessions read
+resolution. Ordinary UM sessions read
 `GET api/User/{userId}/roles` from user-management on every refresh. The existing
 generated client and configured owner base URL are reused; this owner endpoint
 has no access-bearer requirement. A refresh request's optional bearer is not used.
@@ -13,6 +13,14 @@ granted a default role. A missing identity, malformed role context, revoked role
 changed active role, suspension or unavailable owner refuses the refresh before
 rotation. Transport timeout is bounded to five seconds. Failure does not consume
 the refresh token, so a transient owner outage can recover using the same token.
+
+Short-lived runtime partner sessions belong to the durable partner credential
+owner, not UM. Their validated bounded refresh record must match the owner's
+holder, family, and exact reservation deadline, with active and consumed markers
+present and no revocation marker. Every refresh also reads live ban status.
+A bounded record or stored role snapshot alone cannot grant the partner role;
+the original deadline and narrower bounded role checks still apply. Credential
+owner read failures refuse rotation with retryable 503, never a local fallback.
 
 The authority returns distinct valid, invalid and unavailable outcomes. Confirmed
 missing identities, revoked roles and suspensions remain 401. Transport faults,

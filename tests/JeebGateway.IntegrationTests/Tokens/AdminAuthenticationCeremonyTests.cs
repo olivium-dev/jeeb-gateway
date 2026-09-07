@@ -262,7 +262,7 @@ public sealed class AdminAuthenticationCeremonyTests
 
     private sealed class RejectUmAuthority : IRefreshRoleAuthority
     {
-        public Task<RefreshRoleAuthorityResult> ResolveAsync(string userId, CancellationToken ct) =>
+        public Task<RefreshRoleAuthorityResult> ResolveAsync(string userId, CancellationToken ct, JeebGateway.Tokens.RefreshToken? session = null) =>
             throw new InvalidOperationException("provider-bound identity must not query UM");
         public Task<bool> ProbeAsync(CancellationToken ct) => throw new NotSupportedException();
     }

@@ -101,7 +101,7 @@ public sealed class DurableOwnershipDeploymentContractTests
     }
 
     [Fact]
-    public void Jeeb_staging_uses_private_state_dns_and_does_not_require_dead_delivery_auth()
+    public void Jeeb_staging_uses_private_state_dns_and_preserves_activated_delivery_auth()
     {
         var workflow = Workflow("jeeb-staging-deploy.yml");
 
@@ -110,7 +110,11 @@ public sealed class DurableOwnershipDeploymentContractTests
         workflow.Should().NotContain("JeebStateService__BaseUrl http://192.168.2.20:10073");
         workflow.Should().NotContain("secrets.DELIVERY_SERVICE_TOKEN");
         workflow.Should().NotContain("add_rotated_secret \"$delivery_secret_name\"");
-        workflow.Should().Contain("remove_secret_target delivery_service_token");
+        workflow.Should().NotContain("remove_secret_target delivery_service_token");
+        workflow.Should().NotContain("for stale_env in DELIVERY_SERVICE_TOKEN_FILE");
+        workflow.Should().Contain("cat scripts/staging-delivery-auth-retention.sh");
+        workflow.Should().Contain("delivery_auth_before=$(staging_delivery_auth_snapshot gateway");
+        workflow.Should().Contain("staging_delivery_auth_assert_retained \"$delivery_auth_before\" gateway \"$candidate\"");
     }
 
     [Fact]

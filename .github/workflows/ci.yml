@@ -17,6 +17,8 @@ jobs:
       - uses: actions/checkout@v4
       - name: Reject banned gateway destinations
         run: bash scripts/check-no-50-server.sh
+      - name: Validate staging delivery credential retention
+        run: python3 scripts/test-staging-delivery-auth-retention.py
       - name: Validate Jeeb Firebase, Chat, and push ownership contract
         run: |
           python3 scripts/validate-jeeb-firebase-contract.py

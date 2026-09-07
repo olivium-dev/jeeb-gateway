@@ -162,14 +162,14 @@ public sealed class RefreshRoleContinuityHealthCheckTests
     private sealed class StubAuthority(bool available) : IRefreshRoleAuthority
     {
         public Task<bool> ProbeAsync(CancellationToken ct) => Task.FromResult(available);
-        public Task<RefreshRoleAuthorityResult> ResolveAsync(string userId, CancellationToken ct) => throw new NotSupportedException();
+        public Task<RefreshRoleAuthorityResult> ResolveAsync(string userId, CancellationToken ct, RefreshToken? session = null) => throw new NotSupportedException();
     }
 
     private sealed class ThrowingUsersStore : IRefreshRoleAuthority
     {
         public Task<bool> ProbeAsync(CancellationToken ct) =>
             throw new InvalidOperationException("owner unavailable");
-        public Task<RefreshRoleAuthorityResult> ResolveAsync(string userId, CancellationToken ct) => throw new NotSupportedException();
+        public Task<RefreshRoleAuthorityResult> ResolveAsync(string userId, CancellationToken ct, RefreshToken? session = null) => throw new NotSupportedException();
     }
 
     private sealed class EmptyUsersStoreAdapter : IUsersStoreAdapter

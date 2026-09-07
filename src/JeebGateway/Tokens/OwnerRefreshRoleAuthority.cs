@@ -20,7 +20,7 @@ public sealed record RefreshRoleAuthorityResult(RefreshRoleAuthorityOutcome Outc
 
 public interface IRefreshRoleAuthority
 {
-    Task<RefreshRoleAuthorityResult> ResolveAsync(string userId, CancellationToken ct);
+    Task<RefreshRoleAuthorityResult> ResolveAsync(string userId, CancellationToken ct, RefreshToken? session = null);
     Task<bool> ProbeAsync(CancellationToken ct);
 }
 
@@ -28,7 +28,7 @@ public sealed class OwnerRefreshRoleAuthority(
     IServiceScopeFactory scopes,
     ILogger<OwnerRefreshRoleAuthority> log) : IRefreshRoleAuthority
 {
-    public async Task<RefreshRoleAuthorityResult> ResolveAsync(string userId, CancellationToken ct)
+    public async Task<RefreshRoleAuthorityResult> ResolveAsync(string userId, CancellationToken ct, RefreshToken? session = null)
     {
         if (!Guid.TryParse(userId, out var expected) || expected == Guid.Empty) return new(RefreshRoleAuthorityOutcome.Invalid);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -36,6 +36,23 @@ public sealed class OwnerRefreshRoleAuthority(
         await using var scope = scopes.CreateAsyncScope();
         try
         {
+            if (session?.AbsoluteSessionExpiresAt is { } deadline)
+            {
+                // Only the durable partner credential owner can attest its exact
+                // short-lived family. A deadline/role snapshot alone is no grant.
+                var owner = scope.ServiceProvider.GetRequiredService<JeebGateway.Partner.Auth.IPartnerCredentialStore>();
+                if (session.UserId != userId || string.IsNullOrWhiteSpace(session.BoundedSessionFamilyId)
+                    || !await owner.ValidateRuntimeSessionAsync(expected, session.BoundedSessionFamilyId, deadline, timeout.Token))
+                    return new(RefreshRoleAuthorityOutcome.Invalid);
+                var verdict = await UserModerationGate.EvaluateAsync(
+                    scope.ServiceProvider.GetRequiredService<IUserSuspensionSource>(), userId, log, timeout.Token);
+                return verdict.Verdict switch
+                {
+                    ModerationVerdict.Proceed => RefreshRoleAuthorityResult.FromContext(new TokenRoleContext(["partner"], "partner")),
+                    ModerationVerdict.Unavailable => new(RefreshRoleAuthorityOutcome.Unavailable),
+                    _ => new(RefreshRoleAuthorityOutcome.Invalid)
+                };
+            }
             // The existing UM roles endpoint is an owner-to-owner read and has no
             // access-bearer requirement. Refresh authentication is the validated
             // refresh record; never forward an expired/attacker-supplied bearer.

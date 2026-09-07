@@ -222,7 +222,7 @@ public class TokenService : ITokenService
         // prefix selects this path and a partial tuple cannot become ordinary.
         if (existing.AbsoluteSessionExpiresAt is not null || !HasExternalSessionFields(existing))
         {
-            var authorityResult = await _roleAuthority.ResolveAsync(existing.UserId, ct);
+            var authorityResult = await _roleAuthority.ResolveAsync(existing.UserId, ct, existing);
             if (authorityResult.Outcome == RefreshRoleAuthorityOutcome.Unavailable)
                 return new RefreshResult { Outcome = RefreshOutcome.AuthorityUnavailable };
             currentOwnerRoles = authorityResult.Outcome == RefreshRoleAuthorityOutcome.Valid
@@ -559,7 +559,7 @@ public class TokenService : ITokenService
     }
 
     /// <summary>G5 — reads the minted role context off an ordinary record, bounded like the
-    /// external/bounded snapshots. False (legacy or malformed) keeps the store resolution.</summary>
+    /// external/bounded snapshots. False (legacy or malformed) leaves live owner authority mandatory.</summary>
     private bool TryMintedSessionRoles(
         RefreshToken token,
         out TokenRoleContext roleContext)
@@ -583,7 +583,7 @@ public class TokenService : ITokenService
             || !roles.Contains(token.SessionActiveRoleSnapshot, StringComparer.OrdinalIgnoreCase))
         {
             // Present but malformed: log it, else a minter regression looks like random logouts.
-            _log.LogWarning("auth.refresh session role snapshot failed validation — falling back to the users store");
+            _log.LogWarning("auth.refresh session role snapshot failed validation; live owner authority remains required");
             return false;
         }
 

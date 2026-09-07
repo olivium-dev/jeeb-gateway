@@ -178,8 +178,8 @@ public static class ServiceClientExtensions
             .AddHttpMessageHandler<DeliveryServiceCredentialHandler>();
         // W5-02 request-owner surface. Resilience only + the importauth bearer: the
         // standard pipeline forwards the CALLER's bearer, which is an end-user token and
-        // would fail a service-credential check. Deliberately not the
-        // X-Delivery-Service-Token handler — delivery-service does not read that header.
+        // would fail a service-credential check. The importauth bearer remains
+        // independent of the global X-Delivery-Service-Token boundary; both apply.
         AttachResilienceOnly(
             services.AddHttpClient<JeebGateway.Requests.IRequestsOwnerClient,
                                    JeebGateway.Requests.RequestsOwnerClient>(http =>
