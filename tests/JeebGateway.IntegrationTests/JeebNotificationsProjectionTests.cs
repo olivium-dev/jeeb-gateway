@@ -34,15 +34,10 @@ public class JeebNotificationsProjectionTests
     // ── empty / cold-start page ───────────────────────────────────────────────────
 
     [Fact]
-    public void ProjectPage_Null_Rows_Is_Empty_Page()
+    public void ProjectPage_Null_Rows_Is_A_Contract_Failure()
     {
-        var page = JeebNotificationsProjection.ProjectPage(null, page: 1, pageSize: 20);
-
-        page.Items.Should().BeEmpty();
-        page.Page.Should().Be(1);
-        page.PageSize.Should().Be(20);
-        page.TotalCount.Should().Be(0);
-        page.TotalPages.Should().Be(1);
+        var act = () => JeebNotificationsProjection.ProjectPage(null, page: 1, pageSize: 20);
+        act.Should().Throw<JeebGateway.Notifications.NotificationContractException>();
     }
 
     [Fact]
@@ -155,15 +150,13 @@ public class JeebNotificationsProjectionTests
     }
 
     [Fact]
-    public void ExtractRows_ConstructedDegeneratePayloadIds_LeaveRefNull_NoThrow()
+    public void ExtractRows_ConstructedDegeneratePayloadIds_Fail_Explicitly()
     {
         var wire = Fm1NotificationWireFixtures.ConstructedDegenerateOfferPayloads();
 
         var act = () => JeebNotificationsInboxController.ExtractRowsForTests(wire);
 
-        var result = act.Should().NotThrow().Subject;
-        result.Rows.Should().HaveCount(6);
-        result.Rows.Should().OnlyContain(row => row.Ref == null);
+        act.Should().Throw<JeebGateway.Notifications.NotificationContractException>();
     }
 
     [Fact]

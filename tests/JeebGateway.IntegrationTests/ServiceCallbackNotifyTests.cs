@@ -76,7 +76,7 @@ public sealed class ServiceCallbackNotifyTests
     [Theory]
     [InlineData("en", "Offer Updated", "A delivery offer has been updated. Open Jeeb to view the latest details.")]
     [InlineData("ar", "تحديث على العرض", "تم تحديث عرض توصيل. افتح جيب للاطلاع على أحدث التفاصيل.")]
-    public async Task OfferUpdated_Callback_Uses_Localized_Copy_OfferLink_And_Deduplicates(
+    public async Task OfferUpdated_Callback_Uses_Localized_Copy_InboxRootLink_And_Deduplicates(
         string locale,
         string expectedTitle,
         string expectedBody)
@@ -113,9 +113,63 @@ public sealed class ServiceCallbackNotifyTests
         payload["title"].Should().Be(expectedTitle);
         payload["body"].Should().Be(expectedBody);
         payload["type"].Should().Be("jeeb.offer_updated");
-        payload["deepLink"].Should().Be("jeeb://offers/offer-42");
+        // Mobile keys no route by offer id, and the {id} slot is the request ref: with only an
+        // offer id on the callback the honest destination is the inbox root, not a dead route.
+        payload["deepLink"].Should().Be(NotificationDeepLinkResolver.InboxRoot);
         payload["offerId"].Should().Be("offer-42");
         payload["status"].Should().Be("expired");
+    }
+
+    [Theory]
+    [InlineData("req/7")]
+    [InlineData("../admin")]
+    [InlineData("req 7")]
+    public async Task Malformed_RoutingId_Returns_400_And_Sends_No_Push(string requestId)
+    {
+        var push = new RecordingPushClient();
+        await using var factory = CreateFactory(push);
+        var client = factory.CreateClient();
+
+        var resp = await client.PostAsync(Endpoint, Json(new
+        {
+            notificationType = "jeeb.offer_updated",
+            recipientUserId = Recipient,
+            locale = "en",
+            idempotencyKey = $"malformed-route:{Guid.NewGuid()}",
+            data = new Dictionary<string, string> { ["requestId"] = requestId },
+        }));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadRequest);
+        push.Attempts.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task OfferUpdated_Callback_WithRequestId_DeepLinksToTheRequestOffers()
+    {
+        var push = new RecordingPushClient();
+        await using var factory = CreateFactory(push);
+        var client = factory.CreateClient();
+
+        var resp = await client.PostAsync(Endpoint, Json(new
+        {
+            notificationType = "jeeb.offer_updated",
+            recipientUserId = Recipient,
+            locale = "en",
+            silent = false,
+            idempotencyKey = $"offer-updated-request:{Guid.NewGuid()}",
+            data = new Dictionary<string, string>
+            {
+                ["offerId"] = "offer-42",
+                ["requestId"] = "req-7",
+            },
+        }));
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Accepted);
+        var payload = push.UserSends.Should().ContainSingle().Which.Payload
+            .Should().BeAssignableTo<IDictionary<string, object?>>().Subject;
+        // The offer id must never occupy the request slot; the request ref wins the route.
+        payload["deepLink"].Should().Be("jeeb://requests/req-7/offers");
+        payload["offerId"].Should().Be("offer-42");
     }
 
     [Fact]

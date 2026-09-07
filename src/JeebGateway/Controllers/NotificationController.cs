@@ -97,6 +97,7 @@ namespace JeebGateway.Controllers
         [ProducesResponseType(typeof(string), StatusCodes.Status401Unauthorized)]
         [ProducesResponseType(typeof(string), StatusCodes.Status422UnprocessableEntity)]
         [ProducesResponseType(typeof(string), StatusCodes.Status500InternalServerError)]
+        [ProducesResponseType(StatusCodes.Status502BadGateway)]
         public async Task<ActionResult<PagedNotificationMessagesResponseDto>> GetMessagesForCurrentUser(
             [FromQuery] int? page = null,
             [FromQuery] int? pageSize = null,
@@ -129,6 +130,14 @@ namespace JeebGateway.Controllers
             catch (NotificationApiException ex)
             {
                 return UpstreamProblem(ex);
+            }
+            catch (NotificationContractException)
+            {
+                // Same sanitized 502 as the inbox: a malformed upstream id must not
+                // silently truncate this list (P02).
+                return Problem(title: "The notifications response could not be verified.",
+                    statusCode: StatusCodes.Status502BadGateway,
+                    type: "https://jeeb.dev/errors/notification-contract-invalid");
             }
             catch (Exception ex)
             {
@@ -534,7 +543,7 @@ namespace JeebGateway.Controllers
                             }
 
                             // NOT-02 — resolve the client deep-link from the (opaque) type +
-                            // optional entity id. Pure, total mapping; never throws.
+                            // optional entity id. A malformed id throws; the action maps it to 502.
                             notificationDto.DeepLink = NotificationDeepLinkResolver.Resolve(
                                 notificationDto.NotificationType,
                                 notificationDto.EntityId);
@@ -542,6 +551,12 @@ namespace JeebGateway.Controllers
                             dto.Items.Add(notificationDto);
                         }
                     }
+                }
+                catch (NotificationContractException)
+                {
+                    // A malformed upstream id is a contract breach, not a mapping quirk:
+                    // surface it instead of returning a truncated list.
+                    throw;
                 }
                 catch
                 {

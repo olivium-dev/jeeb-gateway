@@ -14,6 +14,20 @@ namespace JeebGateway.IntegrationTests;
 public sealed class JeebNotificationsDeepLinkResolutionTests
 {
     [Fact]
+    public async Task ListNotifications_PayloadRequestIdWinsWithoutIndexLookup()
+    {
+        var index = new RecordingOfferRequestIndex(_ => "SHOULD-NOT-BE-USED");
+        var wire = Newtonsoft.Json.Linq.JObject.Parse("""
+            {"messages":[{"notification_id":"p02-offer","type":"offer","requestId":"top-request",
+            "payload":{"request_id":"payload-request","offer_id":"not-a-request"}}]}
+            """);
+        var page = await ListPage(index, wire);
+        page.Items.Should().ContainSingle().Which.Ref.Should().Be("payload-request");
+        page.Items[0].DeepLink.Should().Be("jeeb://requests/payload-request/offers");
+        index.CallCount.Should().Be(0);
+    }
+
+    [Fact]
     public async Task AC17a_ListNotifications_IndexHit_ResolvesPayloadOfferIdToRequestRef()
     {
         var index = new RecordingOfferRequestIndex(
