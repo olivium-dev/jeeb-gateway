@@ -423,3 +423,5 @@ Services:ServiceOTP:BaseUrl                          setting -
 StoreDurability:FailClosedDisabled                   setting - # SECURITY: disables the fail-closed durability guard (test harness only)
 Swagger                                              setting - # parent section of Features:Swagger
 WalletPostgres:ConnectionString                      setting - # DSN, deleted with the wallet read path at W5-10
+JeeberOnboarding:Coverage:Boundaries                  setting - # P01 dormant coverage boundaries
+JeeberOnboarding:Coverage:FailOpenWhenUnconfigured    setting - # P01 default true

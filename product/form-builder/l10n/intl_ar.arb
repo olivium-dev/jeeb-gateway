@@ -11,5 +11,15 @@
   "kyc.jeeb.v1.vehicle_plate_number.label": "رقم لوحة المركبة",
   "kyc.jeeb.v1.vehicle_year_make_model.label": "سنة الصنع والشركة المصنّعة والطراز",
   "kyc.jeeb.v1.selfie_with_liveness_url.label": "صورة شخصية مع التحقق الحي",
-  "kyc.jeeb.v1.tos_accepted_version.label": "الشروط والأحكام"
+  "kyc.jeeb.v1.tos_accepted_version.label": "الشروط والأحكام",
+  "onboarding.jeeb.v1.portrait_object_ref.label": "الصورة",
+  "onboarding.jeeb.v1.state.label": "المنطقة",
+  "onboarding.jeeb.v1.country.label": "البلد",
+  "onboarding.jeeb.v1.street.label": "الشارع",
+  "onboarding.jeeb.v1.address.label": "العنوان",
+  "onboarding.jeeb.v1.home_base.label": "منطقة الخدمة",
+  "onboarding.jeeb.v1.state.placeholder": "المنطقة أو المحافظة",
+  "onboarding.jeeb.v1.country.placeholder": "البلد",
+  "onboarding.jeeb.v1.street.placeholder": "اسم الشارع",
+  "onboarding.jeeb.v1.address.placeholder": "المبنى والشقة"
 }
