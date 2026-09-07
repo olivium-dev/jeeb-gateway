@@ -1,0 +1,79 @@
+{
+  "template_id": "jeeb_jeeber_onboarding_v1",
+  "template_version": "1.0.0",
+  "fields": [
+    {
+      "id": "portrait_object_ref",
+      "type": "string",
+      "i18n_label_key": "onboarding.jeeb.v1.portrait_object_ref.label",
+      "validations": []
+    },
+    {
+      "id": "state",
+      "type": "string",
+      "i18n_label_key": "onboarding.jeeb.v1.state.label",
+      "placeholder": "onboarding.jeeb.v1.state.placeholder",
+      "validations": [
+        {
+          "rule": "required"
+        },
+        {
+          "rule": "maxLength",
+          "value": 256
+        }
+      ]
+    },
+    {
+      "id": "country",
+      "type": "string",
+      "i18n_label_key": "onboarding.jeeb.v1.country.label",
+      "placeholder": "onboarding.jeeb.v1.country.placeholder",
+      "validations": [
+        {
+          "rule": "required"
+        },
+        {
+          "rule": "maxLength",
+          "value": 256
+        }
+      ]
+    },
+    {
+      "id": "street",
+      "type": "string",
+      "i18n_label_key": "onboarding.jeeb.v1.street.label",
+      "placeholder": "onboarding.jeeb.v1.street.placeholder",
+      "validations": [
+        {
+          "rule": "maxLength",
+          "value": 256
+        }
+      ]
+    },
+    {
+      "id": "address",
+      "type": "string",
+      "i18n_label_key": "onboarding.jeeb.v1.address.label",
+      "placeholder": "onboarding.jeeb.v1.address.placeholder",
+      "validations": [
+        {
+          "rule": "required"
+        },
+        {
+          "rule": "maxLength",
+          "value": 256
+        }
+      ]
+    },
+    {
+      "id": "home_base",
+      "type": "object",
+      "i18n_label_key": "onboarding.jeeb.v1.home_base.label",
+      "validations": [
+        {
+          "rule": "required"
+        }
+      ]
+    }
+  ]
+}
