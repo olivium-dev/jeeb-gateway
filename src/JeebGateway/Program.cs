@@ -2521,15 +2521,14 @@ builder.Services.AddSingleton<IUsersStoreAdapter, UsersStoreRolesAdapter>();
 builder.Services.AddSingleton<IRefreshRoleAuthority, OwnerRefreshRoleAuthority>();
 // Feeds the refresh-role-continuity readiness row; TokenService writes it on every rotation.
 builder.Services.AddSingleton<IRefreshSessionCensus, InProcessRefreshSessionCensus>();
-builder.Services.AddSingleton<JeebGateway.Health.IUsersStoreCensus, JeebGateway.Health.UsersStoreCensus>();
 builder.Services.AddSingleton<ITokenService>(sp => new TokenService(
     sp.GetRequiredService<IRefreshTokenStore>(),
     sp.GetRequiredService<IUsersStoreAdapter>(),
     sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<JwtOptions>>(),
     sp.GetRequiredService<TimeProvider>(),
+    sp.GetRequiredService<IRefreshRoleAuthority>(),
     sp.GetRequiredService<ILogger<TokenService>>(),
-    sp.GetRequiredService<IRefreshSessionCensus>(),
-    sp.GetRequiredService<IRefreshRoleAuthority>()));
+    sp.GetRequiredService<IRefreshSessionCensus>()));
 builder.Services.AddSingleton<IUmAuthenticationContextValidator, UmAuthenticationContextValidator>();
 
 // Admin portal settlement reads/reconcile over the in-gateway COD owner

@@ -194,7 +194,7 @@ public sealed class AdminAuthenticationCeremonyTests
             new TokenRoleContext(new[] { "operations_admin" }, "operations_admin"));
 
     private static TokenService NewService(IRefreshTokenStore store, DateTimeOffset now) =>
-        new(store, new FakeUsersStoreAdapter(), Options.Create(GatewayOptions()), new FixedTimeProvider(now));
+        new(store, new FakeUsersStoreAdapter(), Options.Create(GatewayOptions()), new FixedTimeProvider(now), new TestRefreshRoleAuthority(new FakeUsersStoreAdapter()));
 
     private static JwtOptions GatewayOptions() => new()
     {

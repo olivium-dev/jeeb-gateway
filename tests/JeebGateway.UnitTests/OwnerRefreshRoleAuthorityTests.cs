@@ -129,7 +129,7 @@ public sealed class OwnerRefreshRoleAuthorityTests
         fixture.Http.Body = Absent;
         var census = new InProcessRefreshSessionCensus();
         census.RecordRotation("existing-family");
-        var health = new RefreshRoleContinuityHealthCheck(new RejectCensus(), census, fixture.Authority);
+        var health = new RefreshRoleContinuityHealthCheck(fixture.Authority, census);
         (await health.CheckHealthAsync(new HealthCheckContext())).Status.Should().Be(HealthStatus.Healthy);
         fixture.Http.Body = "{\"status\":404,\"type\":\"wrong-route\"}";
         (await health.CheckHealthAsync(new HealthCheckContext())).Status.Should().Be(HealthStatus.Degraded);

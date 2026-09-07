@@ -29,16 +29,16 @@ public class TokenService : ITokenService
     private readonly SigningCredentials _signingCredentials;
     private readonly ILogger<TokenService> _log;
     private readonly IRefreshSessionCensus _census;
-    private readonly IRefreshRoleAuthority? _roleAuthority;
+    private readonly IRefreshRoleAuthority _roleAuthority;
 
     public TokenService(
         IRefreshTokenStore store,
         IUsersStoreAdapter users,
         IOptions<JwtOptions> options,
         TimeProvider clock,
+        IRefreshRoleAuthority roleAuthority,
         ILogger<TokenService>? log = null,
-        IRefreshSessionCensus? census = null,
-        IRefreshRoleAuthority? roleAuthority = null)
+        IRefreshSessionCensus? census = null)
     {
         _store = store;
         _users = users;
@@ -46,7 +46,7 @@ public class TokenService : ITokenService
         _options = options.Value;
         _log = log ?? NullLogger<TokenService>.Instance;
         _census = census ?? new InProcessRefreshSessionCensus();
-        _roleAuthority = roleAuthority;
+        _roleAuthority = roleAuthority ?? throw new ArgumentNullException(nameof(roleAuthority));
 
         var keyBytes = Encoding.UTF8.GetBytes(_options.SigningKey);
         if (keyBytes.Length < 32)
@@ -220,12 +220,15 @@ public class TokenService : ITokenService
         // External operator identity belongs to its verified provider tuple,
         // not UM. Its complete tuple/deadline is validated below; no subject
         // prefix selects this path and a partial tuple cannot become ordinary.
-        if (_roleAuthority is not null
-            && (existing.AbsoluteSessionExpiresAt is not null || !HasExternalSessionFields(existing)))
+        if (existing.AbsoluteSessionExpiresAt is not null || !HasExternalSessionFields(existing))
         {
             currentOwnerRoles = await _roleAuthority.ResolveAsync(existing.UserId, ct);
             if (currentOwnerRoles is null)
+            {
+                _census.RecordRolesEmptyRefresh(now);
+                _log.LogError("token_mint.roles_empty path=refresh source=owner_authority");
                 return new RefreshResult { Outcome = RefreshOutcome.RoleResolutionFailed };
+            }
             if (TryMintedSessionRoles(existing, out var mintedRoles)
                 && (mintedRoles.ActiveRole != currentOwnerRoles.ActiveRole
                     || mintedRoles.Roles.Any(role => !currentOwnerRoles.Roles.Contains(role, StringComparer.Ordinal))))
@@ -250,19 +253,7 @@ public class TokenService : ITokenService
         {
             if (roleResolver is null)
             {
-                // Runtime DI requires the live owner. The snapshot/local branch
-                // remains only for isolated legacy constructor tests that do
-                // not supply an authority; production cannot select that branch.
-                if (currentOwnerRoles is not null)
-                {
-                    roleContext = currentOwnerRoles;
-                }
-                else if (!TryMintedSessionRoles(existing, out roleContext))
-                {
-                    var roles = await _users.GetRolesAsync(existing.UserId, ct);
-                    var activeRole = await _users.GetActiveRoleAsync(existing.UserId, ct);
-                    roleContext = new TokenRoleContext(roles, activeRole);
-                }
+                roleContext = currentOwnerRoles!;
             }
             else
             {

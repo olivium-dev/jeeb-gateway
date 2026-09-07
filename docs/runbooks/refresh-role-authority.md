@@ -16,8 +16,9 @@ the refresh token, so a transient owner outage can recover using the same token.
 
 The legacy `IUsersStore` projection remains separate because OTP sign-in and
 unrelated profile consumers still write it. It is not runtime refresh authority.
-Older isolated constructor tests retain their explicit local adapters; the
-runtime service factory cannot omit the authoritative reader silently.
+The reader is a required constructor dependency as well as a required runtime
+registration. Tests inject an explicit test-owned authority; there is no
+snapshot or local-store fallback branch in the production refresh service.
 
 Readiness probes the same UM roles route using the all-zero GUID and requires
 the owner's exact 404 `user-not-found` ProblemDetails response, then checks the
