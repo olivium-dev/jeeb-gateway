@@ -222,7 +222,11 @@ public class TokenService : ITokenService
         // prefix selects this path and a partial tuple cannot become ordinary.
         if (existing.AbsoluteSessionExpiresAt is not null || !HasExternalSessionFields(existing))
         {
-            currentOwnerRoles = await _roleAuthority.ResolveAsync(existing.UserId, ct);
+            var authorityResult = await _roleAuthority.ResolveAsync(existing.UserId, ct);
+            if (authorityResult.Outcome == RefreshRoleAuthorityOutcome.Unavailable)
+                return new RefreshResult { Outcome = RefreshOutcome.AuthorityUnavailable };
+            currentOwnerRoles = authorityResult.Outcome == RefreshRoleAuthorityOutcome.Valid
+                ? authorityResult.Context : null;
             if (currentOwnerRoles is null)
             {
                 _census.RecordRolesEmptyRefresh(now);
@@ -257,7 +261,12 @@ public class TokenService : ITokenService
             }
             else
             {
-                var resolved = await roleResolver(existing.UserId, ct);
+                TokenRoleContext? resolved;
+                try { resolved = await roleResolver(existing.UserId, ct); }
+                catch (RefreshRoleAuthorityUnavailableException)
+                {
+                    return new RefreshResult { Outcome = RefreshOutcome.AuthorityUnavailable };
+                }
                 if (resolved is null)
                     return new RefreshResult { Outcome = RefreshOutcome.RoleResolutionFailed };
                 roleContext = resolved;

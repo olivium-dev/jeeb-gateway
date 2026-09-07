@@ -52,7 +52,7 @@ public sealed class OwnerRefreshRoleAuthorityTests
         fixture.Http.Status = (HttpStatusCode)status;
         fixture.Http.Body = Absent;
         var result = await service.RefreshAsync(pair.RefreshToken, default);
-        result.Outcome.Should().Be(RefreshOutcome.RoleResolutionFailed);
+        result.Outcome.Should().Be(status == 404 ? RefreshOutcome.RoleResolutionFailed : RefreshOutcome.AuthorityUnavailable);
         result.Tokens.Should().BeNull();
         fixture.Http.Status = HttpStatusCode.OK;
         fixture.Http.Body = Valid;
@@ -84,7 +84,7 @@ public sealed class OwnerRefreshRoleAuthorityTests
     {
         using var fixture = new Fixture();
         fixture.Http.Body = payload;
-        (await fixture.Authority.ResolveAsync(UserId, default)).Should().BeNull();
+        (await fixture.Authority.ResolveAsync(UserId, default)).Outcome.Should().Be(RefreshRoleAuthorityOutcome.Invalid);
     }
 
     [Fact]
@@ -106,7 +106,7 @@ public sealed class OwnerRefreshRoleAuthorityTests
         fixture.Suspensions.Suspended = false;
         fixture.Suspensions.Unavailable = true;
         (await service.RefreshAsync(first.Tokens.RefreshToken, default)).Outcome
-            .Should().Be(RefreshOutcome.RoleResolutionFailed);
+            .Should().Be(RefreshOutcome.AuthorityUnavailable);
     }
 
     [Fact]
@@ -114,7 +114,7 @@ public sealed class OwnerRefreshRoleAuthorityTests
     {
         using var fixture = new Fixture();
         fixture.Http.Timeout = true;
-        (await fixture.Authority.ResolveAsync(UserId, default)).Should().BeNull();
+        (await fixture.Authority.ResolveAsync(UserId, default)).Outcome.Should().Be(RefreshRoleAuthorityOutcome.Unavailable);
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
         await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>

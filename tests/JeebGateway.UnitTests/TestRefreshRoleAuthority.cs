@@ -16,6 +16,7 @@ internal sealed class TestRefreshRoleAuthority : IRefreshRoleAuthority
     public TestRefreshRoleAuthority(IReadOnlyList<string> roles, string active) =>
         _resolve = (_, _) => Task.FromResult<TokenRoleContext?>(
             roles.Count > 0 && roles.Contains(active) ? new TokenRoleContext(roles, active) : null);
-    public Task<TokenRoleContext?> ResolveAsync(string userId, CancellationToken ct) => _resolve(userId, ct);
+    public async Task<RefreshRoleAuthorityResult> ResolveAsync(string userId, CancellationToken ct) =>
+        RefreshRoleAuthorityResult.FromContext(await _resolve(userId, ct));
     public Task<bool> ProbeAsync(CancellationToken ct) => Task.FromResult(true);
 }

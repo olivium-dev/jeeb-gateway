@@ -100,6 +100,7 @@ public enum RefreshOutcome
     Revoked,
     ReuseDetected,
     RoleResolutionFailed,
+    AuthorityUnavailable,
     AuthenticationExpired,
 }
 

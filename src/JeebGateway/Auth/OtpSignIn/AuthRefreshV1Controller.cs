@@ -65,6 +65,7 @@ public sealed class AuthRefreshV1Controller : ControllerBase
     [ProducesResponseType(typeof(RefreshPairResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> Refresh([FromBody] RefreshRequestDto? body, CancellationToken ct)
     {
         if (body is null || string.IsNullOrWhiteSpace(body.RefreshToken))
@@ -82,6 +83,10 @@ public sealed class AuthRefreshV1Controller : ControllerBase
                 RefreshToken = result.Tokens.RefreshToken,
             });
         }
+
+        if (result.Outcome == RefreshOutcome.AuthorityUnavailable)
+            return OtpSignInProblems.Problem(this, StatusCodes.Status503ServiceUnavailable, "identity_unavailable",
+                "Refresh temporarily unavailable", "Please try again shortly.");
 
         if (result.Outcome == RefreshOutcome.ReuseDetected)
         {

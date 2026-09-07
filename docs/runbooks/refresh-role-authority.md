@@ -14,6 +14,15 @@ changed active role, suspension or unavailable owner refuses the refresh before
 rotation. Transport timeout is bounded to five seconds. Failure does not consume
 the refresh token, so a transient owner outage can recover using the same token.
 
+The authority returns distinct valid, invalid and unavailable outcomes. Confirmed
+missing identities, revoked roles and suspensions remain 401. Transport faults,
+timeouts, unexpected owner statuses and failed/malformed ban reads return a
+sanitized 503 on every public and admin refresh route; browser cookies are not
+deleted. The admin resolver's secondary owner read also preserves this retryable
+outcome. Client code must retain its refresh credential on 503 and retry later.
+HTTP integration fixtures exercise every route with the real token service and
+UM/ban parsers, including a successful retry of the unchanged credential.
+
 The legacy `IUsersStore` projection remains separate because OTP sign-in and
 unrelated profile consumers still write it. It is not runtime refresh authority.
 The reader is a required constructor dependency as well as a required runtime

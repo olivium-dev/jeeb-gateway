@@ -52,6 +52,7 @@ public sealed class AdminAuthController : ControllerBase
     [HttpPost("refresh")]
     [ProducesResponseType(typeof(AdminAccessTokenResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> Refresh(CancellationToken ct)
     {
         PreventCaching();
@@ -61,7 +62,7 @@ public sealed class AdminAuthController : ControllerBase
             return ProblemResult(401, "invalid_refresh", "Sign in again.");
 
         var result = await _tokens.RefreshAsync(refresh, ResolveAdminRolesAsync, ct);
-        if (result.Outcome == RefreshOutcome.RoleResolutionFailed)
+        if (result.Outcome == RefreshOutcome.AuthorityUnavailable)
             return ProblemResult(503, "identity_unavailable", "Administrator roles could not be verified.");
         if (result.Outcome != RefreshOutcome.Ok || result.Tokens is null)
         {
@@ -76,16 +77,22 @@ public sealed class AdminAuthController : ControllerBase
 
     private async Task<TokenRoleContext?> ResolveAdminRolesAsync(string userId, CancellationToken ct)
     {
-        var result = await _roles.GetUserRolesAsync(userId, ct);
-        var roles = (result?.AvailableRoles ?? Array.Empty<string>())
-            .Union(_seededRoles.Resolve(userId, null) ?? Array.Empty<string>(), StringComparer.OrdinalIgnoreCase)
-            .Where(static role => !string.IsNullOrWhiteSpace(role))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        if (!HasPortalAccess(roles)) return null;
-        var activeRole = result?.ActiveRole;
-        if (string.IsNullOrWhiteSpace(activeRole) || !roles.Contains(activeRole, StringComparer.OrdinalIgnoreCase))
-            activeRole = roles[0];
+        UserRolesResult? result;
+        try { result = await _roles.GetUserRolesAsync(userId, ct); }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception) { throw new RefreshRoleAuthorityUnavailableException(); }
+        // This legacy adapter represents upstream faults as null. Do not let
+        // a second owner failure delete browser credentials after the first
+        // authoritative read succeeded.
+        if (result is null) throw new RefreshRoleAuthorityUnavailableException();
+        var roles = result.AvailableRoles.ToArray();
+        var activeRole = result.ActiveRole;
+        if (!Guid.TryParse(userId, out var expected) || !Guid.TryParse(result.UserId, out var actual)
+            || expected != actual || roles.Length == 0
+            || roles.Any(role => string.IsNullOrWhiteSpace(role) || role != role.Trim())
+            || string.IsNullOrWhiteSpace(activeRole)
+            || !roles.Contains(activeRole, StringComparer.Ordinal)
+            || !HasPortalAccess(roles)) return null;
         return new TokenRoleContext(roles, activeRole);
     }
 

@@ -30,11 +30,11 @@ internal static class OwnerServiceFakes
 
     private sealed class FixtureRefreshRoles(IUsersStore users) : JeebGateway.Tokens.IRefreshRoleAuthority
     {
-        public async Task<JeebGateway.Tokens.TokenRoleContext?> ResolveAsync(string userId, CancellationToken ct)
+        public async Task<JeebGateway.Tokens.RefreshRoleAuthorityResult> ResolveAsync(string userId, CancellationToken ct)
         {
             var profile = await users.GetByIdAsync(userId, ct);
-            return profile is not null && !profile.IsSuspended && profile.Roles.Contains(profile.ActiveRole)
-                ? new JeebGateway.Tokens.TokenRoleContext(profile.Roles, profile.ActiveRole) : null;
+            return JeebGateway.Tokens.RefreshRoleAuthorityResult.FromContext(profile is not null && !profile.IsSuspended && profile.Roles.Contains(profile.ActiveRole)
+                ? new JeebGateway.Tokens.TokenRoleContext(profile.Roles, profile.ActiveRole) : null);
         }
         public Task<bool> ProbeAsync(CancellationToken ct) => Task.FromResult(true);
     }

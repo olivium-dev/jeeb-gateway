@@ -36,6 +36,7 @@ public class AuthController : ControllerBase
     [ProducesResponseType(typeof(TokenPairResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> Refresh([FromBody] RefreshTokenRequest? body, CancellationToken ct)
     {
         if (body is null || string.IsNullOrWhiteSpace(body.RefreshToken))
@@ -50,6 +51,8 @@ public class AuthController : ControllerBase
         var result = await _tokens.RefreshAsync(body.RefreshToken, ct);
         return result.Outcome switch
         {
+            RefreshOutcome.AuthorityUnavailable => Problem(statusCode: 503, title: "Refresh temporarily unavailable",
+                detail: "Please try again shortly.", type: "https://docs.olivium-dev.com/errors/identity_unavailable"),
             RefreshOutcome.Ok => Ok(ToResponse(result.Tokens!)),
             _ => Unauthorized()
         };
