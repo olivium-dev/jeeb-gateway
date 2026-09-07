@@ -1669,8 +1669,8 @@ builder.Services.AddSingleton<JeebGateway.Financials.ICommissionCollector,
 // the same reused wallet-service saga). See Extensions/PartnerWalletExtensions.cs.
 builder.Services.AddPartnerWallet(builder.Configuration);
 
-// GET /v1/jeeb/wallet/ledger — migration seam. Production serves wallet-service
-// (Authority=wallet-api) with WalletPostgres as the compare-only shadow; dev/CI defaults to postgres.
+// GET /v1/jeeb/wallet/ledger uses wallet-service HTTP when configured and authoritative.
+// The retired database projection is not a fallback; unconfigured reads return an empty page.
 builder.Services.Configure<JeebGateway.JeebWallet.WalletLedgerMigrationOptions>(
     builder.Configuration.GetSection(
         JeebGateway.JeebWallet.WalletLedgerMigrationOptions.SectionName));

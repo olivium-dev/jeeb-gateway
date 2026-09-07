@@ -188,6 +188,10 @@ public class WalletGuardOfferTests
         body["needed"]!.Value<decimal>().Should().Be(10.0m);
         body["available"]!.Value<decimal>().Should().Be(1.0m);
         body["type"]!.Value<string>().Should().Be("https://jeeb.dev/errors/insufficient-wallet-balance");
+        body.Properties().Select(property => property.Name).Should().Contain(
+            ["type", "status", "needed", "available", "currency"]);
+        body["status"]!.Value<int>().Should().Be(402);
+        body["currency"]!.Type.Should().Be(JTokenType.Null);
     }
 
     [Fact]
@@ -269,6 +273,13 @@ public class WalletGuardOfferTests
         acceptResp.StatusCode.Should().Be(HttpStatusCode.Conflict);
         var body = JObject.Parse(await acceptResp.Content.ReadAsStringAsync());
         body["type"]!.Value<string>().Should().Be("https://jeeb.dev/errors/offer-jeeber-insufficient-balance");
+        // G0 pins guard 2's envelope too: G1-G6 may not drop keys old builds already read.
+        body.Properties().Select(property => property.Name).Should().Contain(
+            ["type", "status", "needed", "available", "currency"]);
+        body["status"]!.Value<int>().Should().Be(409);
+        body["needed"]!.Value<decimal>().Should().Be(10.0m);
+        body["available"]!.Value<decimal>().Should().Be(1.0m);
+        body["currency"]!.Type.Should().Be(JTokenType.Null);
         offerService.AcceptWithStatusCalled.Should().BeFalse("guard 2 must short-circuit before forwarding upstream");
     }
 
