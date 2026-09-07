@@ -4,8 +4,10 @@ using FluentAssertions;
 using JeebGateway.Tokens;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests;
@@ -36,6 +38,13 @@ public class AuthEndpointTests : IClassFixture<WebApplicationFactory<Program>>
                     ["Security:RateLimit:Enabled"] = "false",
                     ["Features:DevEndpoints:Enabled"] = "true"
                 });
+            });
+            // These tests exercise token rotation/revocation for fixture IDs;
+            // owner transport and invalid identities have their own HTTP suite.
+            builder.ConfigureTestServices(services =>
+            {
+                services.RemoveAll<IRefreshRoleAuthority>();
+                services.AddSingleton<IRefreshRoleAuthority>(new TestRefreshRoleAuthority(["client"], "client"));
             });
         });
     }
