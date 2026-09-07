@@ -11,8 +11,8 @@ namespace JeebGateway.ProhibitedItems.Scanner;
 ///        - registered synonyms (<see cref="IProhibitedItemSynonymRegistry"/>)
 ///   4. for each surface form:
 ///        - multi-word form  → word-boundary substring match against normalized text
-///        - single-word form → exact token hit, otherwise Damerau-Levenshtein
-///          with a length-tiered distance budget
+///        - single-word form → exact/plural token hit; canonical catalog names
+///          alone also use Damerau-Levenshtein with a length-tiered distance budget
 ///   5. score, dedupe by (item, type), return matches above the report floor
 ///
 /// Fuzzy thresholds are deliberately tight (length-tiered, short tokens never
@@ -26,6 +26,10 @@ public class ProhibitedItemScanner : IProhibitedItemScanner
 {
     private readonly IProhibitedItemsStore _store;
     private readonly IProhibitedItemSynonymRegistry _synonyms;
+    private static readonly HashSet<string> NameStopWords = new(StringComparer.Ordinal)
+    {
+        "and", "other", "materials", "material", "products", "items", "derivatives", "substances", "liquids"
+    };
 
     // Score floors: anything below ReportFloor isn't returned at all;
     // anything between ReportFloor and ReviewThreshold is reported but
@@ -78,7 +82,17 @@ public class ProhibitedItemScanner : IProhibitedItemScanner
 
             foreach (var synonym in _synonyms.GetSynonyms(item.Name))
             {
-                EvaluateTerm(item, synonym, ProhibitedMatchType.Synonym, normalized, tokens, best);
+                EvaluateTerm(item, synonym, ProhibitedMatchType.Synonym, normalized, tokens, best, allowFuzzy: false);
+            }
+
+            // Expand catalog-label tokens without adding duplicate synonyms for an exact catalog hit.
+            if (best.ContainsKey((item.Id, ProhibitedMatchType.Exact))) continue;
+            foreach (var nameToken in TextNormalizer.Tokenize(TextNormalizer.Normalize(item.Name)))
+            {
+                if (nameToken.Length < 4 || NameStopWords.Contains(nameToken)) continue;
+                foreach (var synonym in _synonyms.ExpandToken(Singular(nameToken))
+                             .Concat(_synonyms.ExpandToken(nameToken)).Distinct())
+                    EvaluateTerm(item, synonym, ProhibitedMatchType.Synonym, normalized, tokens, best, allowFuzzy: false);
             }
         }
 
@@ -101,7 +115,8 @@ public class ProhibitedItemScanner : IProhibitedItemScanner
         ProhibitedMatchType originalType,
         string normalizedText,
         IReadOnlyList<string> tokens,
-        Dictionary<(string itemId, ProhibitedMatchType type), ProhibitedItemMatch> sink)
+        Dictionary<(string itemId, ProhibitedMatchType type), ProhibitedItemMatch> sink,
+        bool allowFuzzy = true)
     {
         var term = TextNormalizer.Normalize(rawTerm);
         if (term.Length == 0) return;
@@ -134,7 +149,10 @@ public class ProhibitedItemScanner : IProhibitedItemScanner
         var single = termTokens[0];
 
         // Pass 1: exact token hit.
-        if (tokens.Contains(single, StringComparer.Ordinal))
+        if (tokens.Contains(single, StringComparer.Ordinal)
+            || tokens.Contains(single + "s", StringComparer.Ordinal)
+            || tokens.Contains(single + "es", StringComparer.Ordinal)
+            || (single.EndsWith('s') && tokens.Contains(single[..^1], StringComparer.Ordinal)))
         {
             Record(sink, new ProhibitedItemMatch
             {
@@ -150,8 +168,10 @@ public class ProhibitedItemScanner : IProhibitedItemScanner
             return;
         }
 
-        // Pass 2: length-tiered fuzzy. Short terms skip fuzz entirely.
-        if (single.Length < MinFuzzyTokenLength) return;
+        // Synonym/category expansion already broadens the catalog's meaning.
+        // Do not compound it with edit-distance guesses (cleaver -> clever).
+        // Canonical catalog names retain the existing typo matcher.
+        if (!allowFuzzy || single.Length < MinFuzzyTokenLength) return;
         var budget = FuzzyBudget(single.Length);
         if (budget == 0) return;
 
@@ -186,6 +206,14 @@ public class ProhibitedItemScanner : IProhibitedItemScanner
 
         if (bestFuzzy is not null) Record(sink, bestFuzzy);
     }
+
+    private static string Singular(string token) => token switch
+    {
+        _ when token.EndsWith("ies", StringComparison.Ordinal) => token[..^3] + "y",
+        _ when token.Length > 5 && token.EndsWith("es", StringComparison.Ordinal) => token[..^2],
+        _ when token.EndsWith('s') => token[..^1],
+        _ => token
+    };
 
     private static int FuzzyBudget(int termLength) => termLength switch
     {
