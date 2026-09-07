@@ -25,7 +25,7 @@ if ! command -v jq >/dev/null 2>&1; then
   exit 2
 fi
 
-KEY_RE='^kyc\.jeeb\.v1\.[a-z_]+\.(label|helper|placeholder|error\.(required|format|minLength|maxLength|fileSize|mimeType|minDate|enum))$'
+KEY_RE='^(kyc|onboarding)\.jeeb\.v1\.[a-z_]+\.(label|helper|placeholder|error\.(required|format|minLength|maxLength|fileSize|mimeType|minDate|enum))$'
 
 # Flavors live alongside this gate in the Jeeb product repo (jeeb-gateway):
 #   product/form-builder/flavors/jeeb_jeeber_v1/*.json
