@@ -223,7 +223,7 @@ public sealed class LegacyPhoneSessionAccessAndDurabilityTests
                 AccessTokenMinutes = 15,
                 RefreshTokenDays = 30,
             }),
-            TimeProvider.System);
+            TimeProvider.System, new TestRefreshRoleAuthority(users));
 
     private static RefreshToken RefreshRecord(string id, string hash, string subject) => new()
     {

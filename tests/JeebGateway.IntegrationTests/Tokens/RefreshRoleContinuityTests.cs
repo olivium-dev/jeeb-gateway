@@ -17,7 +17,7 @@ public class RefreshRoleContinuityTests
     {
         // The exact staging shape: super-login minted {customer, driver} and wrote no local
         // profile, so the store resolves nothing for this user.
-        var svc = NewService(new EmptyUsersStoreAdapter());
+        var svc = NewService(new EmptyUsersStoreAdapter(), authority: new TestRefreshRoleAuthority(new[] { "customer", "driver" }, "driver"));
 
         var pair = await svc.IssueAsync(
             "d1000000-0000-4000-8000-000000000002",
@@ -38,7 +38,7 @@ public class RefreshRoleContinuityTests
     [Fact]
     public async Task Refresh_PreservesMintedRoles_AcrossRepeatedRotations()
     {
-        var svc = NewService(new EmptyUsersStoreAdapter());
+        var svc = NewService(new EmptyUsersStoreAdapter(), authority: new TestRefreshRoleAuthority(new[] { "customer", "driver" }, "driver"));
 
         var current = await svc.IssueAsync(
             "u-multi", new[] { "customer", "driver" }, "driver",
@@ -56,7 +56,7 @@ public class RefreshRoleContinuityTests
     }
 
     [Fact]
-    public async Task Refresh_PrefersMintedRoles_OverAStoreThatDowngradesThem()
+    public async Task Refresh_RejectsMintedRoles_WhenAuthorityRevokesThem()
     {
         // The documented "roles=customer trap": the local profile shell defaults to a single
         // customer role, which silently demoted a jeeber's session on its first rotation.
@@ -68,9 +68,8 @@ public class RefreshRoleContinuityTests
 
         var refreshed = await svc.RefreshAsync(pair.RefreshToken, CancellationToken.None);
 
-        refreshed.Outcome.Should().Be(RefreshOutcome.Ok);
-        RolesOf(refreshed.Tokens!.AccessToken).Should().Contain("driver",
-            "the jeeber capability must survive an unattended rotation");
+        refreshed.Outcome.Should().Be(RefreshOutcome.RoleResolutionFailed);
+        refreshed.Tokens.Should().BeNull("a revoked driver role must not survive from a snapshot");
     }
 
     [Fact]
@@ -104,11 +103,9 @@ public class RefreshRoleContinuityTests
     }
 
     [Fact]
-    public async Task Refresh_WithARoleResolver_StillWins_OverTheSnapshot()
+    public async Task Refresh_RoleResolverCannotGrantRolesOutsideCurrentOwner()
     {
-        // The admin ceremony re-resolves roles live on every rotation; that authority must keep
-        // precedence over anything recorded at mint time.
-        var svc = NewService(new EmptyUsersStoreAdapter());
+        var svc = NewService(new EmptyUsersStoreAdapter(), authority: new TestRefreshRoleAuthority(new[] { "customer" }, "customer"));
 
         var pair = await svc.IssueAsync(
             "u-admin", new[] { "customer" }, "customer",
@@ -120,8 +117,8 @@ public class RefreshRoleContinuityTests
                 new TokenRoleContext(new[] { "operations_admin" }, "operations_admin")),
             CancellationToken.None);
 
-        refreshed.Outcome.Should().Be(RefreshOutcome.Ok);
-        RolesOf(refreshed.Tokens!.AccessToken).Should().BeEquivalentTo(new[] { "operations_admin" });
+        refreshed.Outcome.Should().Be(RefreshOutcome.RoleResolutionFailed);
+        refreshed.Tokens.Should().BeNull();
     }
 
     private static IReadOnlyList<string> RolesOf(string accessToken) =>
@@ -133,7 +130,7 @@ public class RefreshRoleContinuityTests
             .Claims.FirstOrDefault(c => c.Type == "active_role")?.Value;
 
     private static TokenService NewService(
-        IUsersStoreAdapter users, IRefreshTokenStore? store = null) =>
+        IUsersStoreAdapter users, IRefreshTokenStore? store = null, IRefreshRoleAuthority? authority = null) =>
         new(
             store ?? new InMemoryRefreshTokenStore(),
             users,
@@ -145,7 +142,7 @@ public class RefreshRoleContinuityTests
                 AccessTokenMinutes = 15,
                 RefreshTokenDays = 30,
             }),
-            TimeProvider.System);
+            TimeProvider.System, authority ?? new TestRefreshRoleAuthority(users));
 
     /// <summary>Models records written BEFORE the snapshot existed: normal in every other way,
     /// but nothing ever reads a SessionRoleSnapshot back.</summary>

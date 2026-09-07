@@ -38,16 +38,29 @@ public sealed class GeoHistoryClient : IGeoHistoryClient
     private readonly HttpClient _httpClient;
     private readonly GeoHistoryWriteOptions _writeOptions;
     private readonly ILogger<GeoHistoryClient> _logger;
+    private readonly TimeProvider _timeProvider;
 
     [ActivatorUtilitiesConstructor]
     public GeoHistoryClient(
         HttpClient httpClient,
         IOptions<GeoHistoryWriteOptions> writeOptions,
         ILogger<GeoHistoryClient> logger)
+        : this(httpClient, writeOptions, logger, TimeProvider.System)
+    {
+    }
+
+    // Shared clock for deterministic throttle-window tests. Production keeps
+    // system timing and the same retry count/delay bounds.
+    internal GeoHistoryClient(
+        HttpClient httpClient,
+        IOptions<GeoHistoryWriteOptions> writeOptions,
+        ILogger<GeoHistoryClient> logger,
+        TimeProvider timeProvider)
     {
         _httpClient = httpClient;
         _writeOptions = writeOptions.Value;
         _logger = logger;
+        _timeProvider = timeProvider;
     }
 
     // Keeps direct contract-test construction terse. Production DI supplies the
@@ -104,7 +117,7 @@ public sealed class GeoHistoryClient : IGeoHistoryClient
                 _logger.LogInformation(
                     "Geo-history write throttled for track {TrackId}; retry {Retry}/{MaxRetries} in {DelayMs}ms.",
                     trackId, attempt + 1, _writeOptions.MaxThrottleRetries, delay.TotalMilliseconds);
-                await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+                await Task.Delay(delay, _timeProvider, cancellationToken).ConfigureAwait(false);
             }
         }
     }
@@ -130,13 +143,13 @@ public sealed class GeoHistoryClient : IGeoHistoryClient
         response.EnsureSuccessStatusCode();
     }
 
-    private static TimeSpan? ReadRetryAfter(HttpResponseMessage response)
+    private TimeSpan? ReadRetryAfter(HttpResponseMessage response)
     {
         var retryAfter = response.Headers.RetryAfter;
         if (retryAfter?.Delta is { } delta)
             return delta;
         if (retryAfter?.Date is { } date)
-            return date - DateTimeOffset.UtcNow;
+            return date - _timeProvider.GetUtcNow();
         return null;
     }
 

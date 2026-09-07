@@ -10,47 +10,46 @@ using Xunit;
 
 namespace JeebGateway.UnitTests;
 
-/// <summary>G5/D2 §4a — the pre-incident alarm. Degraded exactly when the users store holds no
-/// profiles while sessions are rotating against it; Healthy otherwise, and never Unhealthy.</summary>
+/// <summary>Readiness requires current authoritative owner evidence.</summary>
 public sealed class RefreshRoleContinuityHealthCheckTests
 {
     [Fact]
-    public async Task Degraded_WhenTheStoreIsEmptyWhileSessionsAreRotating()
+    public async Task Degraded_WhenOwnerUnavailableWhileSessionsAreRotating()
     {
-        // The post-restart shape: RAM store wiped, live sessions still rotating.
+        // Existing families cannot make an unavailable owner healthy.
         var census = new InProcessRefreshSessionCensus();
         census.RecordRotation("user-1");
         census.RecordRotation("user-2");
 
-        var result = await CheckAsync(new StubUsersStore(profiles: 0), census);
+        var result = await CheckAsync(new StubAuthority(available: false), census);
 
         result.Status.Should().Be(HealthStatus.Degraded);
-        result.Description.Should().Contain("usersStoreProfiles=0");
-        result.Description.Should().Contain("refreshFamiliesActive=2");
-        result.Data["usersStoreProfiles"].Should().Be(0);
-        result.Data["refreshFamiliesActive"].Should().Be(2);
+        result.Description.Should().Contain("unavailable");
+        result.Data["refreshFamiliesObserved"].Should().Be(2);
+        result.Data["roleSource"].Should().Be("user-management-live");
+        result.Data["suspensionSource"].Should().Be("ban-service-live");
     }
 
     [Fact]
-    public async Task Healthy_WhenTheStoreHasProfiles()
+    public async Task Healthy_WhenOwnerReadPathIsVerified()
     {
         var census = new InProcessRefreshSessionCensus();
         census.RecordRotation("user-1");
 
-        var result = await CheckAsync(new StubUsersStore(profiles: 12), census);
+        var result = await CheckAsync(new StubAuthority(available: true), census);
 
         result.Status.Should().Be(HealthStatus.Healthy);
-        result.Description.Should().Contain("usersStoreProfiles=12");
+        result.Description.Should().Contain("verified");
     }
 
     [Fact]
     public async Task Healthy_OnAFreshProcessWithNoRotationsYet()
     {
-        // Empty store + nothing rotating is a cold boot, not an incident.
-        var result = await CheckAsync(new StubUsersStore(profiles: 0), new InProcessRefreshSessionCensus());
+        // Cold boot is healthy only after the owner read path succeeds.
+        var result = await CheckAsync(new StubAuthority(available: true), new InProcessRefreshSessionCensus());
 
         result.Status.Should().Be(HealthStatus.Healthy);
-        result.Description.Should().Contain("refreshFamiliesActive=0");
+        result.Data["refreshFamiliesObserved"].Should().Be(0);
     }
 
     [Fact]
@@ -62,7 +61,7 @@ public sealed class RefreshRoleContinuityHealthCheckTests
         census.RecordRolesEmptyRefresh(at);
         census.RecordRolesEmptyRefresh(at.AddSeconds(3));
 
-        var result = await CheckAsync(new StubUsersStore(profiles: 0), census);
+        var result = await CheckAsync(new StubAuthority(available: false), census);
 
         result.Status.Should().Be(HealthStatus.Degraded);
         result.Data["rolesEmptyRefreshes"].Should().Be(2);
@@ -71,13 +70,13 @@ public sealed class RefreshRoleContinuityHealthCheckTests
     }
 
     [Fact]
-    public async Task Degraded_NotUnhealthy_WhenTheStoreCountThrows()
+    public async Task Degraded_NotUnhealthy_WhenOwnerProbeThrows()
     {
         // Unhealthy would restart-loop the container via the Dockerfile HEALTHCHECK.
         var result = await CheckAsync(new ThrowingUsersStore(), new InProcessRefreshSessionCensus());
 
         result.Status.Should().Be(HealthStatus.Degraded);
-        result.Exception.Should().NotBeNull();
+        result.Description.Should().Contain("unavailable");
     }
 
     [Fact]
@@ -136,6 +135,7 @@ public sealed class RefreshRoleContinuityHealthCheckTests
                 RefreshTokenDays = 30,
             }),
             TimeProvider.System,
+            new TestRefreshRoleAuthority(Array.Empty<string>(), ""),
             logs,
             census);
 
@@ -145,29 +145,31 @@ public sealed class RefreshRoleContinuityHealthCheckTests
         result.Outcome.Should().Be(RefreshOutcome.RoleResolutionFailed);
         logs.Messages.Should().ContainSingle(m =>
             m.Contains("token_mint.roles_empty") && m.Contains("path=refresh")
-            && m.Contains("source=users_store_miss"));
+            && m.Contains("source=owner_authority"));
         logs.Messages.Should().NotContain(m => m.Contains("u-1"), "never log the user id");
         census.RolesEmptyRefreshes.Should().Be(1);
         census.ActiveFamilies.Should().Be(1);
 
-        var row = await CheckAsync(new StubUsersStore(profiles: 0), census);
+        var row = await CheckAsync(new StubAuthority(available: false), census);
         row.Status.Should().Be(HealthStatus.Degraded);
         row.Data["rolesEmptyRefreshes"].Should().Be(1);
     }
 
-    private static Task<HealthCheckResult> CheckAsync(IUsersStoreCensus users, IRefreshSessionCensus census) =>
+    private static Task<HealthCheckResult> CheckAsync(IRefreshRoleAuthority users, IRefreshSessionCensus census) =>
         new RefreshRoleContinuityHealthCheck(users, census)
             .CheckHealthAsync(new HealthCheckContext(), CancellationToken.None);
 
-    private sealed class StubUsersStore(int profiles) : IUsersStoreCensus
+    private sealed class StubAuthority(bool available) : IRefreshRoleAuthority
     {
-        public Task<int> CountProfilesAsync(CancellationToken ct) => Task.FromResult(profiles);
+        public Task<bool> ProbeAsync(CancellationToken ct) => Task.FromResult(available);
+        public Task<RefreshRoleAuthorityResult> ResolveAsync(string userId, CancellationToken ct, RefreshToken? session = null) => throw new NotSupportedException();
     }
 
-    private sealed class ThrowingUsersStore : IUsersStoreCensus
+    private sealed class ThrowingUsersStore : IRefreshRoleAuthority
     {
-        public Task<int> CountProfilesAsync(CancellationToken ct) =>
-            throw new InvalidOperationException("users store unavailable");
+        public Task<bool> ProbeAsync(CancellationToken ct) =>
+            throw new InvalidOperationException("owner unavailable");
+        public Task<RefreshRoleAuthorityResult> ResolveAsync(string userId, CancellationToken ct, RefreshToken? session = null) => throw new NotSupportedException();
     }
 
     private sealed class EmptyUsersStoreAdapter : IUsersStoreAdapter

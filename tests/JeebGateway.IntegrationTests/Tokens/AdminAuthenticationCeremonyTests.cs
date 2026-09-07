@@ -99,7 +99,8 @@ public sealed class AdminAuthenticationCeremonyTests
             new InMemoryRefreshTokenStore(),
             new ThrowingUsersStoreAdapter(),
             Options.Create(GatewayOptions()),
-            clock);
+            clock,
+            roleAuthority: new RejectUmAuthority());
         var context = new VerifiedAuthenticationContext(
             now.ToUnixTimeSeconds(),
             new[] { "pwd", "mfa" },
@@ -176,7 +177,8 @@ public sealed class AdminAuthenticationCeremonyTests
             store,
             new ThrowingUsersStoreAdapter(),
             Options.Create(GatewayOptions()),
-            new FixedTimeProvider(now));
+            new FixedTimeProvider(now),
+            roleAuthority: new RejectUmAuthority());
 
         var result = await service.RefreshAsync(
             raw,
@@ -192,7 +194,7 @@ public sealed class AdminAuthenticationCeremonyTests
             new TokenRoleContext(new[] { "operations_admin" }, "operations_admin"));
 
     private static TokenService NewService(IRefreshTokenStore store, DateTimeOffset now) =>
-        new(store, new FakeUsersStoreAdapter(), Options.Create(GatewayOptions()), new FixedTimeProvider(now));
+        new(store, new FakeUsersStoreAdapter(), Options.Create(GatewayOptions()), new FixedTimeProvider(now), new TestRefreshRoleAuthority(new FakeUsersStoreAdapter()));
 
     private static JwtOptions GatewayOptions() => new()
     {
@@ -256,6 +258,13 @@ public sealed class AdminAuthenticationCeremonyTests
 
         public Task<string> GetActiveRoleAsync(string userId, CancellationToken ct) =>
             Task.FromResult("operations_admin");
+    }
+
+    private sealed class RejectUmAuthority : IRefreshRoleAuthority
+    {
+        public Task<RefreshRoleAuthorityResult> ResolveAsync(string userId, CancellationToken ct, JeebGateway.Tokens.RefreshToken? session = null) =>
+            throw new InvalidOperationException("provider-bound identity must not query UM");
+        public Task<bool> ProbeAsync(CancellationToken ct) => throw new NotSupportedException();
     }
 
     private sealed class ThrowingUsersStoreAdapter : IUsersStoreAdapter

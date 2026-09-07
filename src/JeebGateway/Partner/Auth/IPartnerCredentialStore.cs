@@ -42,6 +42,11 @@ public interface IPartnerCredentialStore
         string sessionFamilyId,
         CancellationToken ct);
 
+    /// <summary>Read the durable live reservation and its exact bound family/deadline;
+    /// missing, expired, removed or mismatched credentials cannot authorize refresh.</summary>
+    Task<bool> ValidateRuntimeSessionAsync(
+        Guid holderId, string sessionFamilyId, DateTimeOffset deadline, CancellationToken ct);
+
     /// <summary>
     /// Removes a runtime dev credential. The expected holder lets a fresh replica durably revoke
     /// the credential even when activation's response was lost before login. When login succeeded,

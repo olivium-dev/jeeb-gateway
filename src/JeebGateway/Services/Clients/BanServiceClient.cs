@@ -47,18 +47,21 @@ public sealed class BanServiceClient : IBanServiceClient
         using var response = await _http.GetAsync(url, ct);
         response.EnsureSuccessStatusCode();
 
-        var wire = await response.Content.ReadFromJsonAsync<WireStatuses>(JsonOptions, ct);
-        if (wire is null)
+        using var body = await response.Content.ReadAsStreamAsync(ct);
+        using var document = await JsonDocument.ParseAsync(body, cancellationToken: ct);
+        RejectDuplicateProperties(document.RootElement);
+        var wire = document.RootElement.Deserialize<WireStatuses>(JsonOptions);
+        if (wire is null || wire.UserId != userId || wire.BanStatuses is null)
         {
             throw new HttpRequestException(
-                $"ban-service {response.RequestMessage?.RequestUri} returned an empty body.");
+                "ban-service returned an invalid status envelope.");
         }
 
         return new BanStatusesResult
         {
-            UserId = wire.UserId ?? userId,
-            BanStatuses = (wire.BanStatuses ?? new List<WireStatus>())
-                .Select(MapStatus)
+            UserId = wire.UserId,
+            BanStatuses = wire.BanStatuses
+                .Select(status => MapStatus(status, userId))
                 .ToList(),
         };
     }
@@ -77,7 +80,7 @@ public sealed class BanServiceClient : IBanServiceClient
                 $"ban-service {response.RequestMessage?.RequestUri} returned an empty body.");
         }
 
-        return MapStatus(wire);
+        return MapStatus(wire, userId);
     }
 
     public async Task<BanStatusItem> ApplyTerminalBanAsync(
@@ -95,7 +98,7 @@ public sealed class BanServiceClient : IBanServiceClient
                 $"ban-service {response.RequestMessage?.RequestUri} returned an empty body.");
         }
 
-        return MapStatus(wire);
+        return MapStatus(wire, userId);
     }
 
     public async Task<BanResetResult> ForceResetAsync(string userId, CancellationToken ct)
@@ -113,42 +116,68 @@ public sealed class BanServiceClient : IBanServiceClient
 
         return new BanResetResult
         {
-            OldStatus = wire.OldStatus is null ? null : MapStatus(wire.OldStatus),
-            NewStatus = wire.NewStatus is null ? null : MapStatus(wire.NewStatus),
+            OldStatus = wire.OldStatus is null ? null : MapStatus(wire.OldStatus, userId),
+            NewStatus = wire.NewStatus is null ? null : MapStatus(wire.NewStatus, userId),
             Updated = wire.Updated,
         };
     }
 
-    private static BanStatusItem MapStatus(WireStatus w) => new()
+    private static void RejectDuplicateProperties(JsonElement value)
     {
-        UserId = w.UserId ?? string.Empty,
-        BanType = w.BanType ?? string.Empty,
+        if (value.ValueKind == JsonValueKind.Object)
+        {
+            // Match the serializer's case-insensitive names, including decoded
+            // escapes. Never let a later property replace an earlier ban fact.
+            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var property in value.EnumerateObject())
+            {
+                if (!names.Add(property.Name)) throw new JsonException("Ambiguous ban status response.");
+                RejectDuplicateProperties(property.Value);
+            }
+        }
+        else if (value.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in value.EnumerateArray()) RejectDuplicateProperties(item);
+        }
+    }
+
+    private static BanStatusItem MapStatus(WireStatus? w, string expectedUserId)
+    {
+        if (w is null || w.UserId != expectedUserId
+            || string.IsNullOrWhiteSpace(w.BanType)
+            || string.IsNullOrWhiteSpace(w.Status) || w.CurrentStage < 0
+            || w.LastUpdated == default)
+            throw new HttpRequestException("ban-service returned an invalid status record.");
+        return new BanStatusItem {
+        UserId = w.UserId,
+        BanType = w.BanType,
         CurrentStage = w.CurrentStage,
-        Status = w.Status ?? string.Empty,
+        Status = w.Status,
         Message = w.Message ?? string.Empty,
         BannedUntil = w.BannedUntil,
         LastUpdated = w.LastUpdated,
         IsCurrentlyBanned = w.IsCurrentlyBanned,
-    };
+        };
+    }
 
     // --- wire DTOs (snake_case as emitted by ban-service) ---
 
     private sealed class WireStatuses
     {
-        [JsonPropertyName("user_id")] public string? UserId { get; init; }
-        [JsonPropertyName("ban_statuses")] public List<WireStatus>? BanStatuses { get; init; }
+        [JsonRequired, JsonPropertyName("user_id")] public string? UserId { get; init; }
+        [JsonRequired, JsonPropertyName("ban_statuses")] public List<WireStatus>? BanStatuses { get; init; }
     }
 
     private sealed class WireStatus
     {
-        [JsonPropertyName("user_id")] public string? UserId { get; init; }
-        [JsonPropertyName("ban_type")] public string? BanType { get; init; }
-        [JsonPropertyName("current_stage")] public int CurrentStage { get; init; }
-        [JsonPropertyName("status")] public string? Status { get; init; }
+        [JsonRequired, JsonPropertyName("user_id")] public string? UserId { get; init; }
+        [JsonRequired, JsonPropertyName("ban_type")] public string? BanType { get; init; }
+        [JsonRequired, JsonPropertyName("current_stage")] public int CurrentStage { get; init; }
+        [JsonRequired, JsonPropertyName("status")] public string? Status { get; init; }
         [JsonPropertyName("message")] public string? Message { get; init; }
         [JsonPropertyName("banned_until")] public DateTimeOffset? BannedUntil { get; init; }
-        [JsonPropertyName("last_updated")] public DateTimeOffset LastUpdated { get; init; }
-        [JsonPropertyName("is_currently_banned")] public bool IsCurrentlyBanned { get; init; }
+        [JsonRequired, JsonPropertyName("last_updated")] public DateTimeOffset LastUpdated { get; init; }
+        [JsonRequired, JsonPropertyName("is_currently_banned")] public bool IsCurrentlyBanned { get; init; }
     }
 
     private sealed class WireUpdate

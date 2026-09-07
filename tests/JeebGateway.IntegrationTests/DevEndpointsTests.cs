@@ -613,7 +613,12 @@ public class DevEndpointsTests
             enabled: true,
             upstreamHandler: ThrowingHandler(),
             wallets: new RecordingWalletProvisioner());
-        var client = factory.CreateClient();
+        using var liveAuthorityFactory = factory.WithWebHostBuilder(builder => builder.ConfigureTestServices(services =>
+        {
+            services.RemoveAll<IRefreshRoleAuthority>();
+            services.AddSingleton<IRefreshRoleAuthority, OwnerRefreshRoleAuthority>();
+        }));
+        var client = liveAuthorityFactory.CreateClient();
 
         var seed = await client.PostAsync("/dev/partner/credentials", JsonBody("""
             {
@@ -640,6 +645,21 @@ public class DevEndpointsTests
             DateTimeOffset.UtcNow.Add(PartnerCredentialStore.RuntimeCredentialLifetime));
         refreshExpiry.Should().BeOnOrBefore(
             DateTimeOffset.UtcNow.Add(PartnerCredentialStore.RuntimeCredentialLifetime));
+
+        var owner = liveAuthorityFactory.Services.GetRequiredService<IPartnerCredentialStore>();
+        var holder = Guid.Parse("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee");
+        var family = new JwtSecurityTokenHandler().ReadJwtToken(accessToken).Claims
+            .Single(claim => claim.Type == TokenService.RuntimeSessionFamilyClaim).Value;
+        (await owner.ValidateRuntimeSessionAsync(holder, family, refreshExpiry, default)).Should().BeTrue();
+        (await owner.ValidateRuntimeSessionAsync(holder, "different-family", refreshExpiry, default)).Should().BeFalse();
+        (await owner.ValidateRuntimeSessionAsync(holder, family, refreshExpiry.AddSeconds(1), default)).Should().BeFalse();
+        (await owner.ValidateRuntimeSessionAsync(Guid.NewGuid(), family, refreshExpiry, default)).Should().BeFalse();
+        // A new bounded record alone cannot borrow the credential's existing binding.
+        var unbound = await liveAuthorityFactory.Services.GetRequiredService<ITokenService>()
+            .IssueBoundedAsync(holder.ToString(), ["partner"], "partner", refreshExpiry, default);
+        (await client.PostAsync("/auth/refresh", JsonBody($$"""
+            { "refreshToken": "{{unbound.RefreshToken}}" }
+            """))).StatusCode.Should().Be(HttpStatusCode.Unauthorized);
 
         var refresh = await client.PostAsync("/auth/refresh", JsonBody($$"""
             { "refreshToken": "{{refreshToken}}" }
@@ -998,6 +1018,8 @@ public class DevEndpointsTests
 
     private sealed class RecordingCredentialStore(List<string> events) : IPartnerCredentialStore
     {
+        public Task<bool> ValidateRuntimeSessionAsync(Guid holderId, string sessionFamilyId,
+            DateTimeOffset deadline, CancellationToken ct) => throw new NotSupportedException("This credential fixture does not model refresh.");
         private readonly Dictionary<string, PartnerAccount> _accounts =
             new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, string> _secrets =

@@ -29,12 +29,14 @@ public class TokenService : ITokenService
     private readonly SigningCredentials _signingCredentials;
     private readonly ILogger<TokenService> _log;
     private readonly IRefreshSessionCensus _census;
+    private readonly IRefreshRoleAuthority _roleAuthority;
 
     public TokenService(
         IRefreshTokenStore store,
         IUsersStoreAdapter users,
         IOptions<JwtOptions> options,
         TimeProvider clock,
+        IRefreshRoleAuthority roleAuthority,
         ILogger<TokenService>? log = null,
         IRefreshSessionCensus? census = null)
     {
@@ -44,6 +46,7 @@ public class TokenService : ITokenService
         _options = options.Value;
         _log = log ?? NullLogger<TokenService>.Instance;
         _census = census ?? new InProcessRefreshSessionCensus();
+        _roleAuthority = roleAuthority ?? throw new ArgumentNullException(nameof(roleAuthority));
 
         var keyBytes = Encoding.UTF8.GetBytes(_options.SigningKey);
         if (keyBytes.Length < 32)
@@ -213,6 +216,29 @@ public class TokenService : ITokenService
         // sessions depend on it, which is the readiness row's other input (D2 sec 4a).
         _census.RecordRotation(existing.BoundedSessionFamilyId ?? existing.UserId);
 
+        TokenRoleContext? currentOwnerRoles = null;
+        // External operator identity belongs to its verified provider tuple,
+        // not UM. Its complete tuple/deadline is validated below; no subject
+        // prefix selects this path and a partial tuple cannot become ordinary.
+        if (existing.AbsoluteSessionExpiresAt is not null || !HasExternalSessionFields(existing))
+        {
+            var authorityResult = await _roleAuthority.ResolveAsync(existing.UserId, ct, existing);
+            if (authorityResult.Outcome == RefreshRoleAuthorityOutcome.Unavailable)
+                return new RefreshResult { Outcome = RefreshOutcome.AuthorityUnavailable };
+            currentOwnerRoles = authorityResult.Outcome == RefreshRoleAuthorityOutcome.Valid
+                ? authorityResult.Context : null;
+            if (currentOwnerRoles is null)
+            {
+                _census.RecordRolesEmptyRefresh(now);
+                _log.LogError("token_mint.roles_empty path=refresh source=owner_authority");
+                return new RefreshResult { Outcome = RefreshOutcome.RoleResolutionFailed };
+            }
+            if (TryMintedSessionRoles(existing, out var mintedRoles)
+                && (mintedRoles.ActiveRole != currentOwnerRoles.ActiveRole
+                    || mintedRoles.Roles.Any(role => !currentOwnerRoles.Roles.Contains(role, StringComparer.Ordinal))))
+                return new RefreshResult { Outcome = RefreshOutcome.RoleResolutionFailed };
+        }
+
         TokenRoleContext roleContext;
         VerifiedAuthenticationContext? persistedAuthentication;
         if (existing.AbsoluteSessionExpiresAt is not null)
@@ -231,24 +257,30 @@ public class TokenService : ITokenService
         {
             if (roleResolver is null)
             {
-                // G5: prefer the role context this session was minted with. The store fallback
-                // is process RAM the super-login mints never populate (see SessionRoleSnapshot).
-                if (!TryMintedSessionRoles(existing, out roleContext))
-                {
-                    var roles = await _users.GetRolesAsync(existing.UserId, ct);
-                    var activeRole = await _users.GetActiveRoleAsync(existing.UserId, ct);
-                    roleContext = new TokenRoleContext(roles, activeRole);
-                }
+                roleContext = currentOwnerRoles!;
             }
             else
             {
-                var resolved = await roleResolver(existing.UserId, ct);
+                TokenRoleContext? resolved;
+                try { resolved = await roleResolver(existing.UserId, ct); }
+                catch (RefreshRoleAuthorityUnavailableException)
+                {
+                    return new RefreshResult { Outcome = RefreshOutcome.AuthorityUnavailable };
+                }
                 if (resolved is null)
                     return new RefreshResult { Outcome = RefreshOutcome.RoleResolutionFailed };
                 roleContext = resolved;
             }
             persistedAuthentication = AuthenticationFrom(existing);
         }
+
+        // Bounded/provider sessions and explicit admin resolvers retain their
+        // narrower context, but a revoked owner role or stale active role may
+        // never be restored from a previously minted snapshot.
+        if (currentOwnerRoles is not null
+            && (roleContext.ActiveRole != currentOwnerRoles.ActiveRole
+                || roleContext.Roles.Any(role => !currentOwnerRoles.Roles.Contains(role, StringComparer.Ordinal))))
+            return new RefreshResult { Outcome = RefreshOutcome.RoleResolutionFailed };
 
         // G5 fail-closed: a roles-less mint is a valid, correctly-audienced token that
         // L2 then 403s on EVERY capability route — a silent, unrecoverable session brick.
@@ -527,7 +559,7 @@ public class TokenService : ITokenService
     }
 
     /// <summary>G5 — reads the minted role context off an ordinary record, bounded like the
-    /// external/bounded snapshots. False (legacy or malformed) keeps the store resolution.</summary>
+    /// external/bounded snapshots. False (legacy or malformed) leaves live owner authority mandatory.</summary>
     private bool TryMintedSessionRoles(
         RefreshToken token,
         out TokenRoleContext roleContext)
@@ -551,7 +583,7 @@ public class TokenService : ITokenService
             || !roles.Contains(token.SessionActiveRoleSnapshot, StringComparer.OrdinalIgnoreCase))
         {
             // Present but malformed: log it, else a minter regression looks like random logouts.
-            _log.LogWarning("auth.refresh session role snapshot failed validation — falling back to the users store");
+            _log.LogWarning("auth.refresh session role snapshot failed validation; live owner authority remains required");
             return false;
         }
 
