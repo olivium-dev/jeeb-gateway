@@ -16,10 +16,14 @@ the refresh token, so a transient owner outage can recover using the same token.
 
 The authority returns distinct valid, invalid and unavailable outcomes. Confirmed
 missing identities, revoked roles and suspensions remain 401. Transport faults,
-timeouts, unexpected owner statuses and failed/malformed ban reads return a
+timeouts, unexpected owner statuses and failed/malformed UM or ban reads return a
 sanitized 503 on every public and admin refresh route; browser cookies are not
-deleted. The admin resolver's secondary owner read also preserves this retryable
-outcome. Client code must retain its refresh credential on 503 and retry later.
+deleted. A wrong response identity, absent/null role fields, contradictory active
+role, numeric role values or duplicate identity keys cannot confirm revocation.
+An explicit empty role list does confirm that no grants remain and returns 401.
+The admin resolver's secondary read uses the same authority/parser and retains
+its portal-access restriction, including exact missing-identity 404 handling.
+Client code must retain its refresh credential on 503 and retry later.
 HTTP integration fixtures exercise every route with the real token service and
 UM/ban parsers, including a successful retry of the unchanged credential.
 

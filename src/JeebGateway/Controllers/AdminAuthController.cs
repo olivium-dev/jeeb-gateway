@@ -29,20 +29,20 @@ public sealed class AdminAuthController : ControllerBase
     internal const string CsrfCookie = AdminSessionCookies.CsrfCookie;
     internal const string CsrfHeader = AdminSessionCookies.CsrfHeader;
 
-    private readonly IUserManagementDualRoleClient _roles;
+    private readonly IRefreshRoleAuthority _roleAuthority;
     private readonly IDevSeededRoleStore _seededRoles;
     private readonly ITokenService _tokens;
     private readonly IWebHostEnvironment _environment;
     private readonly IConfiguration _configuration;
 
     public AdminAuthController(
-        IUserManagementDualRoleClient roles,
+        IRefreshRoleAuthority roleAuthority,
         IDevSeededRoleStore seededRoles,
         ITokenService tokens,
         IWebHostEnvironment environment,
         IConfiguration configuration)
     {
-        _roles = roles;
+        _roleAuthority = roleAuthority;
         _seededRoles = seededRoles;
         _tokens = tokens;
         _environment = environment;
@@ -77,23 +77,18 @@ public sealed class AdminAuthController : ControllerBase
 
     private async Task<TokenRoleContext?> ResolveAdminRolesAsync(string userId, CancellationToken ct)
     {
-        UserRolesResult? result;
-        try { result = await _roles.GetUserRolesAsync(userId, ct); }
+        RefreshRoleAuthorityResult result;
+        try { result = await _roleAuthority.ResolveAsync(userId, ct); }
         catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
         catch (Exception) { throw new RefreshRoleAuthorityUnavailableException(); }
-        // This legacy adapter represents upstream faults as null. Do not let
-        // a second owner failure delete browser credentials after the first
-        // authoritative read succeeded.
-        if (result is null) throw new RefreshRoleAuthorityUnavailableException();
-        var roles = result.AvailableRoles.ToArray();
-        var activeRole = result.ActiveRole;
-        if (!Guid.TryParse(userId, out var expected) || !Guid.TryParse(result.UserId, out var actual)
-            || expected != actual || roles.Length == 0
-            || roles.Any(role => string.IsNullOrWhiteSpace(role) || role != role.Trim())
-            || string.IsNullOrWhiteSpace(activeRole)
-            || !roles.Contains(activeRole, StringComparer.Ordinal)
-            || !HasPortalAccess(roles)) return null;
-        return new TokenRoleContext(roles, activeRole);
+        // Reuse the authoritative parser so a second malformed/unavailable read
+        // preserves the browser credential, while confirmed identity deletion or
+        // grant revocation remains an authentication failure.
+        if (result.Outcome == RefreshRoleAuthorityOutcome.Unavailable)
+            throw new RefreshRoleAuthorityUnavailableException();
+        if (result.Outcome != RefreshRoleAuthorityOutcome.Valid || result.Context is null
+            || !HasPortalAccess(result.Context.Roles)) return null;
+        return result.Context;
     }
 
     [HttpPost("logout")]

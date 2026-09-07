@@ -44,10 +44,15 @@ public sealed class OwnerRefreshRoleAuthority(
             var roles = identity.Available_roles?.ToArray();
             var active = identity.Active_role;
             if (!Guid.TryParse(identity.UserId, out var actual) || actual != expected
-                || roles is null || roles.Length == 0
-                || roles.Any(role => string.IsNullOrWhiteSpace(role) || role != role.Trim())
-                || string.IsNullOrWhiteSpace(active)
-                || !roles.Contains(active, StringComparer.Ordinal)) return new(RefreshRoleAuthorityOutcome.Invalid);
+                || roles is null
+                || roles.Any(role => string.IsNullOrWhiteSpace(role) || role != role.Trim()))
+                return new(RefreshRoleAuthorityOutcome.Unavailable);
+            // A confirmed empty grant set is revocation. Missing, malformed or
+            // contradictory owner fields cannot establish the caller's identity
+            // or its current grants, so preserve its credential for retry.
+            if (roles.Length == 0) return new(RefreshRoleAuthorityOutcome.Invalid);
+            if (string.IsNullOrWhiteSpace(active) || !roles.Contains(active, StringComparer.Ordinal))
+                return new(RefreshRoleAuthorityOutcome.Unavailable);
 
             var moderation = await UserModerationGate.EvaluateAsync(
                 scope.ServiceProvider.GetRequiredService<IUserSuspensionSource>(), userId, log, timeout.Token);

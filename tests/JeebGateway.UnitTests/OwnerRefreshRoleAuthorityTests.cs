@@ -76,15 +76,16 @@ public sealed class OwnerRefreshRoleAuthorityTests
     }
 
     [Theory]
-    [InlineData("{}")]
-    [InlineData("{\"userId\":\"10000000-0000-4000-8000-000000000002\",\"available_roles\":[\"driver\"],\"active_role\":\"driver\"}")]
-    [InlineData("{\"userId\":\"10000000-0000-4000-8000-000000000001\",\"available_roles\":[],\"active_role\":\"customer\"}")]
-    [InlineData("{\"userId\":\"10000000-0000-4000-8000-000000000001\",\"available_roles\":[\"customer\"],\"active_role\":\"driver\"}")]
-    public async Task InvalidIdentityOrStaleActiveRoleHasNoDefault(string payload)
+    [InlineData("{}", RefreshRoleAuthorityOutcome.Unavailable)]
+    [InlineData("null", RefreshRoleAuthorityOutcome.Unavailable)]
+    [InlineData("{\"userId\":\"10000000-0000-4000-8000-000000000002\",\"available_roles\":[\"driver\"],\"active_role\":\"driver\"}", RefreshRoleAuthorityOutcome.Unavailable)]
+    [InlineData("{\"userId\":\"10000000-0000-4000-8000-000000000001\",\"available_roles\":[],\"active_role\":\"customer\"}", RefreshRoleAuthorityOutcome.Invalid)]
+    [InlineData("{\"userId\":\"10000000-0000-4000-8000-000000000001\",\"available_roles\":[\"customer\"],\"active_role\":\"driver\"}", RefreshRoleAuthorityOutcome.Unavailable)]
+    public async Task UnconfirmedOwnerDataIsRetryableButExplicitRevocationIsInvalid(string payload, RefreshRoleAuthorityOutcome expected)
     {
         using var fixture = new Fixture();
         fixture.Http.Body = payload;
-        (await fixture.Authority.ResolveAsync(UserId, default)).Outcome.Should().Be(RefreshRoleAuthorityOutcome.Invalid);
+        (await fixture.Authority.ResolveAsync(UserId, default)).Outcome.Should().Be(expected);
     }
 
     [Fact]
