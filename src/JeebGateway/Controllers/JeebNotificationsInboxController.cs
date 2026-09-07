@@ -558,7 +558,10 @@ public sealed class JeebNotificationsInboxController : ControllerBase
             var token = obj?[key];
             if (token is null || token.Type == JTokenType.Null) continue;
             if (token.Type != JTokenType.String) throw new NotificationContractException();
-            return NotificationDeepLinkResolver.ValidateExplicitLink(token.Value<string>()!);
+            // A stored link outside the route grammar (e.g. the pre-P02 jeeb://offers/{offerId})
+            // is no route for this row, never a page failure; a malformed envelope still throws.
+            var matched = NotificationDeepLinkResolver.MatchExplicitLink(token.Value<string>()!);
+            if (matched is not null) return matched;
         }
         return null;
     }
@@ -611,8 +614,15 @@ public sealed class JeebNotificationsInboxController : ControllerBase
         {
             var t = obj[key];
             if (t is null || t.Type == JTokenType.Null) continue;
+            // A Date token holds either DateTime or DateTimeOffset; casting the wrong one threw
+            // InvalidCastException, which left the page an unhandled 500. Render both, round-trip.
             var s = t.Type == JTokenType.Date
-                ? t.Value<DateTimeOffset>().ToString("o")
+                ? (t as JValue)?.Value switch
+                {
+                    DateTimeOffset offset => offset.ToString("o", CultureInfo.InvariantCulture),
+                    DateTime moment => moment.ToString("o", CultureInfo.InvariantCulture),
+                    _ => t.ToString(),
+                }
                 : t.ToString();
             if (!string.IsNullOrWhiteSpace(s)) return s;
         }

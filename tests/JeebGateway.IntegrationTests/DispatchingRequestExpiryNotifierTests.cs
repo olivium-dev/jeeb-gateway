@@ -14,7 +14,8 @@ namespace JeebGateway.IntegrationTests;
 public class DispatchingRequestExpiryNotifierTests
 {
     private const string ClientId = "b52eb018-3ece-44e9-856f-87f27ec32b7f";
-    private const string RequestId = "request-123";
+    private const string RequestId = "defb1f07-efa5-4b8f-bc1a-09d6fcd1140b";
+    private const string OrderReference = "ORD-D1140B";
 
     [Fact]
     public async Task Expiry_Uses_External_Push_Service_Route_And_Static_Template()
@@ -37,8 +38,10 @@ public class DispatchingRequestExpiryNotifierTests
 
         var payload = JObject.Parse(request.Body)["payload"]!.Value<JObject>()!;
         payload.Value<string>("title").Should().Be("Request Expired");
+        // F4a: the body carries the ORD- order reference, never the raw request id.
         payload.Value<string>("body").Should().Be(
-            $"Your request {RequestId} expired before a Jeeber accepted it. Tap to re-request.");
+            $"Your request {OrderReference} expired before a Jeeber accepted it. Tap to re-request.");
+        payload.Value<string>("body").Should().NotContain(RequestId);
         payload.Value<string>("type").Should().Be("request_expired");
         payload.Value<string>("requestId").Should().Be(RequestId);
         payload.Value<string>("request_id").Should().Be(RequestId);
@@ -73,8 +76,10 @@ public class DispatchingRequestExpiryNotifierTests
 
         var payload = JObject.Parse(request.Body)["payload"]!.Value<JObject>()!;
         payload.Value<string>("title").Should().Be("Still looking");
+        // F4a (device judge): the nudge body used to read "No Jeeber has accepted <uuid> yet".
         payload.Value<string>("body").Should().Be(
-            $"No Jeeber has accepted {RequestId} yet. Try a faster tier.");
+            $"No Jeeber has accepted {OrderReference} yet. Try a faster tier.");
+        payload.Value<string>("body").Should().NotContain(RequestId);
         payload.Value<string>("type").Should().Be("try_expand_tier");
     }
 

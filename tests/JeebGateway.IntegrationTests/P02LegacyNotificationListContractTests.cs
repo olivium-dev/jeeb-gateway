@@ -15,13 +15,8 @@ using Xunit;
 
 namespace JeebGateway.IntegrationTests;
 
-/// <summary>
-/// P02 — the legacy list <c>GET /api/Notification/messages</c> shares
-/// <see cref="JeebGateway.Notifications.NotificationDeepLinkResolver"/> with the inbox. The resolver now
-/// rejects a malformed present id, and the mapper's blanket catch used to swallow that and hand back the
-/// rows mapped so far, so a malformed row silently truncated the page. The mapper rethrows the contract
-/// breach and the action answers the same sanitized 502 as the inbox.
-/// </summary>
+/// <summary>P02 — the legacy list's blanket catch used to swallow a malformed-id contract breach and
+/// truncate the page; the mapper rethrows it and the action answers the inbox's sanitized 502.</summary>
 public sealed class P02LegacyNotificationListContractTests
 {
     private const string GoodRowId = "notif-good-p02";

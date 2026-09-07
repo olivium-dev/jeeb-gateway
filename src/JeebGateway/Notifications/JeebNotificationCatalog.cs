@@ -51,25 +51,8 @@ public static class JeebNotificationCatalog
                 ["en"] = new("Offer Updated", "A delivery offer has been updated. Open Jeeb to view the latest details."),
                 ["ar"] = new("تحديث على العرض", "تم تحديث عرض توصيل. افتح جيب للاطلاع على أحدث التفاصيل."),
             },
-            // ── RETIRED: "jeeb.offer_rejected" (b02 step 6b, owner ruling D3 = retire) ──
-            //
-            // It used to be declared here as the ninth template. It is deliberately GONE and
-            // must NOT be re-added. The notification centre has no route for it:
-            //   POST :10026/notifications/jeeb.offer_rejected  -> 405
-            //   POST :10026/notifications/jeeb.offer_received   -> 422  (route exists, body invalid)
-            // and there is no unprefixed `offer_rejected` route either. So no notification-centre
-            // row of that type can ever exist, which makes every consumer of this catalog wrong
-            // about it: the seeder registers a key the centre will never accept a write for, and
-            // POST /svc-callbacks/notify would advertise a type whose inbox row is impossible.
-            // Declaring it here was unroutable taxonomy, and a centre writer for it (step 6a)
-            // would have failed on every call.
-            //
-            // WHAT DID NOT CHANGE — the loser-bidder PUSH still ships, with byte-identical copy.
-            // That push never needed the centre: it renders copy and pushes via the push
-            // microservice. Its EN/AR copy and its jeeb://offers/{offerId} deep link now live
-            // locally at OfferPushNotifier.OfferLostTemplate / OfferLostDeepLink, next to their
-            // only caller. Retiring the taxonomy is not the same as deleting the notification;
-            // OfferAcceptLifecyclePushTests pins that copy and that link so this cannot regress.
+            // RETIRED: "jeeb.offer_rejected" (b02 step 6b, D3) — the centre 405s that route, so no
+            // row of it can exist; the loser PUSH still ships from OfferPushNotifier.OfferLostTemplate.
             ["jeeb.delivery_status_updated"] = new Dictionary<string, NotificationTemplate>
             {
                 ["en"] = new("Delivery Update", "Your delivery status has been updated. Check the app for the latest information."),

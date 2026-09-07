@@ -74,7 +74,7 @@ public class OfferAcceptLifecyclePushTests
     }
 
     [Fact]
-    public async Task OfferLost_NotifiesLoser_WithRejectedTemplate_AndOffersDeepLink()
+    public async Task OfferLost_NotifiesLoser_WithRejectedTemplate_AndInboxRootDeepLink()
     {
         var push = new RecordingUserPushClient();
         var notifier = new OfferPushNotifier(push, NullLogger<OfferPushNotifier>.Instance);
@@ -90,7 +90,9 @@ public class OfferAcceptLifecyclePushTests
         payload["title"].Should().Be("Offer Not Selected");
         ((string)payload["body"]!).Should().Contain("wasn't selected");
         payload["offerId"].Should().Be("offer-lost");
-        payload["deepLink"].Should().Be("jeeb://offers/offer-lost");
+        // P02 §4: offer_lost has no route, so the link is the inbox root. jeeb://offers/{offerId}
+        // is outside the mobile grammar — a dead tap, and a link the inbox read side must not store.
+        payload["deepLink"].Should().Be(NotificationDeepLinkResolver.InboxRoot);
     }
 
     [Fact]

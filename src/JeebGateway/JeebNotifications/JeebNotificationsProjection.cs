@@ -89,11 +89,15 @@ public static class JeebNotificationsProjection
             Ts = row.Timestamp ?? string.Empty,
             Read = IsRead(row.Status),
             Ref = NotificationDeepLinkResolver.ValidateEntityId(row.Ref),
-            DeepLink = row.DeepLink is null
-                ? NotificationDeepLinkResolver.Resolve(row.Type, row.Ref)
-                : NotificationDeepLinkResolver.ValidateExplicitLink(row.DeepLink),
+            DeepLink = ExplicitRoute(row.DeepLink)
+                ?? NotificationDeepLinkResolver.Resolve(row.Type, row.Ref),
         };
     }
+
+    // A stored link outside the route grammar is no route for this row: the type resolves it
+    // (inbox root when the type has none). A malformed link is still a contract breach.
+    private static string? ExplicitRoute(string? storedLink)
+        => storedLink is null ? null : NotificationDeepLinkResolver.MatchExplicitLink(storedLink);
 
     /// <summary>Upstream <c>status == "read"</c> (case-insensitive) ⇒ the row is read.</summary>
     public static bool IsRead(string? status)

@@ -31,7 +31,9 @@ public static class NotificationDeepLinkResolver
         return value;
     }
 
-    public static string ValidateExplicitLink(string value)
+    /// <summary>The link when it is well-formed AND names a route in the mobile grammar; null when
+    /// it is well-formed but names no route, so the caller resolves the row from its type instead.</summary>
+    public static string? MatchExplicitLink(string value)
     {
         value = value.Trim();
         var isPath = value.StartsWith('/') && !value.StartsWith("//", StringComparison.Ordinal);
@@ -65,8 +67,7 @@ public static class NotificationDeepLinkResolver
             or ["orders", _, "receipt" or "summary" or "cancel" or "rate" or "tracking" or "otp" or "feedback" or "mutual-rate" or "escalate"]
             or ["jeeber", "requests", _] or ["jeeber", "requests", _, "offer"]
             or ["jeeber", "deliveries", _, "active"];
-        if (!allowed) throw new NotificationContractException();
-        return value;
+        return allowed ? value : null;
     }
 
     // Templates follow mobile routeFromPushDeepLink's allow-list; host is the first path segment.
@@ -94,13 +95,8 @@ public static class NotificationDeepLinkResolver
             ["offer_updated"]      = "jeeb://requests/{id}/offers",
             ["jeeb.offer_accepted"] = "jeeb://chat/{id}",
             ["offer_accepted"]      = "jeeb://chat/{id}",
-            // NOTE — "jeeb.offer_rejected" / "offer_rejected" are deliberately ABSENT
-            // (b02 step 6b, owner ruling D3 = retire). This map exists to deep-link an INBOX
-            // ROW, and the notification centre has no route for either spelling
-            // (POST :10026/notifications/jeeb.offer_rejected -> 405), so a row of that type
-            // cannot exist and an entry here could never be reached from the inbox.
-            // The loser-bidder PUSH still carries jeeb://offers/{offerId}; it now gets that
-            // link from OfferPushNotifier.OfferLostDeepLink, not from this resolver.
+            // NOTE — "jeeb.offer_rejected" / "offer_rejected" stay ABSENT (b02 step 6b, D3 = retire):
+            // the centre 405s that type, and PLAN-P02 §4 routes offer_lost to the inbox root.
 
             // KYC approve/reject -> KYC review screen
             ["jeeb.kyc_approved"] = "jeeb://profile/kyc",

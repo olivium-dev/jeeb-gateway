@@ -56,7 +56,6 @@ public sealed class P02NotificationContractFailureTests
     [InlineData("jeeb://chat/%2f")]
     [InlineData("jeeb://orders/../chat/req")]
     [InlineData("jeeb://chat/..")]
-    [InlineData("jeeb://unsupported/req")]
     [InlineData("/chat/../req?valid=query")]
     [InlineData("/chat/%2f?valid=query")]
     [InlineData("/chat/req//")]
@@ -109,11 +108,44 @@ public sealed class P02NotificationContractFailureTests
         NotificationDeepLinkResolver.Resolve("chat", id).Should().Be("jeeb://chat/" + id);
     }
 
+    [Theory]
+    [InlineData("jeeb://unsupported/req")]
+    [InlineData("jeeb://offers/offer-9")]
+    public void Wellformed_Link_Outside_The_Route_Grammar_Is_No_Route_Not_A_Failure(string link)
+    {
+        // Documented inbox-root semantics: the row keeps its type-resolved destination and the
+        // page still answers. Only a malformed envelope is a contract breach.
+        NotificationDeepLinkResolver.MatchExplicitLink(link).Should().BeNull();
+        var row = new JObject { ["type"] = "chat", ["requestId"] = "valid-request",
+            ["metadata"] = new JObject { ["deep_link"] = link } };
+        var extracted = JeebNotificationsInboxController.ExtractRowsForTests(new JArray(row)).Rows.Single();
+        extracted.DeepLink.Should().BeNull();
+        JeebNotificationsProjection.ProjectItem(extracted).DeepLink.Should().Be("jeeb://chat/valid-request");
+        JeebNotificationsProjection.ProjectItem(new UpstreamNotificationRow
+            { Type = "offer_lost", Ref = "valid-request", DeepLink = link })
+            .DeepLink.Should().Be(NotificationDeepLinkResolver.InboxRoot);
+    }
+
     [Fact]
     public void Explicit_Link_Outer_Whitespace_Is_Normalized_Like_Mobile()
     {
-        NotificationDeepLinkResolver.ValidateExplicitLink("  jeeb://chat/req-1?source=inbox  ")
+        NotificationDeepLinkResolver.MatchExplicitLink("  jeeb://chat/req-1?source=inbox  ")
             .Should().Be("jeeb://chat/req-1?source=inbox");
+    }
+
+    [Theory]
+    [InlineData("ts")]
+    [InlineData("created_at")]
+    [InlineData("createdAt")]
+    public void A_Parsed_Date_Token_Is_Rendered_Not_Cast_Into_An_Unhandled_500(string field)
+    {
+        // Newtonsoft parses an ISO row timestamp into a Date token holding a DateTime; casting it
+        // to DateTimeOffset threw InvalidCastException, leaving the whole page an unhandled 500.
+        var wire = JObject.Parse(
+            "{ \"type\": \"chat\", \"requestId\": \"req-1\", \"" + field + "\": \"2026-09-06T10:00:00Z\" }");
+        var row = JeebNotificationsInboxController.ExtractRowsForTests(new JArray(wire)).Rows.Single();
+        row.Timestamp.Should().StartWith("2026-09-06T10:00:00");
+        JeebNotificationsProjection.ProjectItem(row).Ts.Should().Be(row.Timestamp);
     }
 
     [Fact]
