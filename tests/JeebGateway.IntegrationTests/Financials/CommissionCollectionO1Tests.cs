@@ -13,6 +13,7 @@ using JeebGateway.Availability;
 using JeebGateway.Controllers;
 using JeebGateway.Financials;
 using JeebGateway.IntegrationTests.Fakes;
+using JeebGateway.Partner;
 using JeebGateway.Requests;
 using JeebGateway.Requests.Cancellation;
 using JeebGateway.Services.Clients;
@@ -543,6 +544,7 @@ public class CommissionCollectionO1Tests
     private static WalletSufficiencyGuard NewGuard(double balance)
         => new(new FakeWalletClient { Balance = balance },
             Options.Create(new WalletGuardOptions { FailMode = "fail-closed" }),
+            Options.Create(new PartnerWalletOptions { CurrencyId = 1 }),
             NullLogger<WalletSufficiencyGuard>.Instance);
 
     private static WalletCommissionCollector NewCollector(
