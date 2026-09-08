@@ -31,6 +31,7 @@ public class TokensController : ControllerBase
 {
     private readonly ITokenService _tokens;
     private readonly IUsersStore _users;
+    private readonly IUserManagementDualRoleClient _roleAuthority;
     private readonly IOptionsMonitor<SecurityOptions> _security;
     private readonly IOptionsMonitor<JwtOptions> _jwt;
     private readonly IOptionsMonitor<JeebGateway.Auth.SuperLogin.SuperLoginOptions> _superLogin;
@@ -39,6 +40,7 @@ public class TokensController : ControllerBase
     public TokensController(
         ITokenService tokens,
         IUsersStore users,
+        IUserManagementDualRoleClient roleAuthority,
         IOptionsMonitor<SecurityOptions> security,
         IOptionsMonitor<JwtOptions> jwt,
         IOptionsMonitor<JeebGateway.Auth.SuperLogin.SuperLoginOptions> superLogin,
@@ -46,6 +48,7 @@ public class TokensController : ControllerBase
     {
         _tokens = tokens;
         _users = users;
+        _roleAuthority = roleAuthority;
         _security = security;
         _jwt = jwt;
         _superLogin = superLogin;
@@ -57,6 +60,7 @@ public class TokensController : ControllerBase
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status502BadGateway)]
     public async Task<IActionResult> Issue([FromBody] IssueTokensRequest? body, CancellationToken ct)
     {
         // F3 security-P0 — privileged-caller gate. The credential-less mint was an
@@ -80,12 +84,50 @@ public class TokensController : ControllerBase
             });
         }
 
-        // Identity state is never created in the gateway. If the privileged caller
-        // supplied no role context, resolve it from user-management through the
-        // stateless compatibility facade; otherwise use the explicitly authorized
-        // role set and avoid manufacturing a local profile shell.
+        // The local compatibility projection is process RAM. A freshly dev-seeded user is
+        // written there for immediate minting, but a gateway restart clears it. For a ROLELESS
+        // privileged mint, fall back to user-management's durable role authority and validate
+        // the returned identity/active-role relationship before signing anything. Explicit-role
+        // mints retain their existing privileged-caller behavior for compatibility.
         var profile = await _users.GetByIdAsync(body.UserId, ct);
-        var roles = body.Roles is { Count: > 0 } ? body.Roles : profile?.Roles;
+        IReadOnlyList<string>? roles;
+        string? activeRole;
+        if (profile is null && body.Roles is not { Count: > 0 })
+        {
+            var authority = await _roleAuthority.GetUserRolesAsync(body.UserId, ct);
+            if (authority is null)
+            {
+                return NotFound(new ProblemDetails
+                {
+                    Title = $"User '{body.UserId}' was not found in user-management.",
+                    Status = StatusCodes.Status404NotFound,
+                });
+            }
+
+            if (!string.Equals(authority.UserId, body.UserId, StringComparison.OrdinalIgnoreCase)
+                || authority.AvailableRoles is not { Count: > 0 }
+                || string.IsNullOrWhiteSpace(authority.ActiveRole)
+                || !authority.AvailableRoles.Contains(authority.ActiveRole, StringComparer.OrdinalIgnoreCase))
+            {
+                _logger.LogError(
+                    "Roleless token mint received invalid role authority state for userId={UserId}",
+                    body.UserId);
+                return StatusCode(StatusCodes.Status502BadGateway, new ProblemDetails
+                {
+                    Title = "user-management returned invalid role state.",
+                    Status = StatusCodes.Status502BadGateway,
+                });
+            }
+
+            roles = authority.AvailableRoles;
+            activeRole = authority.ActiveRole;
+        }
+        else
+        {
+            roles = body.Roles is { Count: > 0 } ? body.Roles : profile?.Roles;
+            activeRole = profile?.ActiveRole;
+        }
+
         if (roles is not { Count: > 0 })
         {
             return NotFound(new ProblemDetails
@@ -95,7 +137,6 @@ public class TokensController : ControllerBase
             });
         }
 
-        var activeRole = profile?.ActiveRole;
         if (string.IsNullOrWhiteSpace(activeRole)
             || !roles.Contains(activeRole, StringComparer.OrdinalIgnoreCase))
             activeRole = roles[0];

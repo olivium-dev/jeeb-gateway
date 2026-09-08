@@ -18,6 +18,14 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using Xunit;
+using GwAddressUpsert = JeebGateway.Users.AddressUpsert;
+using GwProfilePatch = JeebGateway.Users.ProfilePatch;
+using GwSavedAddress = JeebGateway.Users.SavedAddress;
+using GwSeededRoles = JeebGateway.Users.IDevSeededRoleStore;
+using GwUserProfile = JeebGateway.Users.UserProfile;
+using GwUserSearchQuery = JeebGateway.Users.UserSearchQuery;
+using GwUserSearchResult = JeebGateway.Users.UserSearchResult;
+using GwUsersStore = JeebGateway.Users.IUsersStore;
 
 namespace JeebGateway.IntegrationTests;
 
@@ -132,7 +140,7 @@ public class DevEndpointsTests
         // The mapped RegisterUserRequest carries a derived username/email and a
         // password == confirmPassword (the gateway generated a strong random pw),
         // and NEVER reflects the raw phone as a UM field name we did not map.
-        var json = captured.LastBody;
+        var json = captured.Bodies[0];
         json.Should().Contain("\"email\":");
         json.Should().Contain("\"username\":");
         json.Should().Contain("\"password\":");
@@ -204,9 +212,19 @@ public class DevEndpointsTests
         var stub = new StubHttpMessageHandler(req =>
         {
             captured.Add(req, req.Content is null ? "" : req.Content.ReadAsStringAsync().GetAwaiter().GetResult());
-            return JsonResponse("""
-                { "userId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "username": "jad", "email": "seed-jad@jeeb.test", "status": "created" }
-                """);
+            return req.RequestUri!.AbsolutePath switch
+            {
+                "/api/User/register" => JsonResponse("""
+                    { "userId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "username": "jad", "email": "seed-jad@jeeb.test", "status": "created" }
+                    """),
+                "/api/User/role/grant" => JsonResponse("""
+                    { "userId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "available_roles": ["customer", "driver"], "added": true }
+                    """),
+                "/api/User/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/active-role" => JsonResponse("""
+                    { "userId": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "available_roles": ["customer", "driver"], "active_role": "driver" }
+                    """),
+                _ => throw new InvalidOperationException($"Unexpected UM path {req.RequestUri.AbsolutePath}"),
+            };
         });
 
         using var factory = NewFactory(enabled: true, upstreamHandler: stub);
@@ -219,9 +237,168 @@ public class DevEndpointsTests
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         var body = await resp.Content.ReadFromJsonAsync<SeedUserResponseDto>();
         body!.UserId.Should().Be("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
-        var json = captured.LastBody;
+        var json = captured.Bodies[0];
         json.Should().Contain("\"referralCode\":\"REF123\"",
             "a caller-supplied referralCode is forwarded verbatim to user-management");
+    }
+
+    [Fact]
+    public async Task SeedUser_Jeeber_IsImmediatelyDiscoverableByNormalAuthTokensMint()
+    {
+        const string userId = "abababab-abab-abab-abab-abababababab";
+        var stub = new StubHttpMessageHandler(request => request.RequestUri!.AbsolutePath switch
+        {
+            "/api/User/register" => JsonResponse($$"""
+                {
+                  "userId": "{{userId}}",
+                  "username": "devtool_jeeber",
+                  "email": "devtool-jeeber@jeeb.test",
+                  "status": "created",
+                  "createdDate": "2026-06-05T09:00:00Z"
+                }
+                """),
+            "/api/User/role/grant" => JsonResponse($$"""
+                { "userId": "{{userId}}", "available_roles": ["customer", "driver"], "added": true }
+                """),
+            $"/api/User/{userId}/active-role" => JsonResponse($$"""
+                { "userId": "{{userId}}", "available_roles": ["customer", "driver"], "active_role": "driver" }
+                """),
+            _ => throw new InvalidOperationException($"Unexpected UM path {request.RequestUri.AbsolutePath}"),
+        });
+        using var factory = NewFactory(enabled: true, upstreamHandler: stub);
+        var client = factory.CreateClient();
+
+        var seed = await client.PostAsync("/dev/seed/user", JsonBody("""
+            { "role": "jeeber", "phone": "+96139120011", "displayName": "Dev Jeeber" }
+            """));
+        seed.StatusCode.Should().Be(HttpStatusCode.OK);
+
+        // This is the normal Super-Login+/DevTool token route, with no caller-supplied roles.
+        // It used to 404 because fresh UM identities had no gateway-local projection yet.
+        var mint = await client.PostAsync("/auth/tokens", JsonBody($$"""
+            { "userId": "{{userId}}" }
+            """));
+
+        mint.StatusCode.Should().Be(HttpStatusCode.OK);
+        using var minted = JsonDocument.Parse(await mint.Content.ReadAsStringAsync());
+        var accessToken = minted.RootElement.GetProperty("accessToken").GetString();
+        new JwtSecurityTokenHandler().ReadJwtToken(accessToken!).Claims
+            .Where(claim => claim.Type == "roles")
+            .Select(claim => claim.Value)
+            .Should().Contain("driver");
+
+        var projection = await factory.Services.GetRequiredService<GwUsersStore>()
+            .GetByIdAsync(userId, CancellationToken.None);
+        projection!.Roles.Should().Contain("driver");
+    }
+
+    [Fact]
+    public async Task SeedUser_Jeeber_PersistsRoleAndActiveRoleInUserManagement()
+    {
+        const string userId = "acacacac-acac-acac-acac-acacacacacac";
+        var events = new List<string>();
+        var wallets = new RecordingWalletProvisioner(events);
+        var captured = new CapturedRequests();
+        var stub = new StubHttpMessageHandler(request =>
+        {
+            var body = request.Content is null
+                ? string.Empty
+                : request.Content.ReadAsStringAsync().GetAwaiter().GetResult();
+            captured.Add(request, body);
+            events.Add(request.RequestUri!.AbsolutePath);
+            return request.RequestUri!.AbsolutePath switch
+            {
+                "/api/User/register" => JsonResponse($$"""
+                    { "userId": "{{userId}}", "username": "durable_jeeber", "email": "durable@jeeb.test", "status": "created" }
+                    """),
+                "/api/User/role/grant" => JsonResponse($$"""
+                    { "userId": "{{userId}}", "available_roles": ["customer", "driver"], "added": true }
+                    """),
+                $"/api/User/{userId}/active-role" => JsonResponse($$"""
+                    { "userId": "{{userId}}", "available_roles": ["customer", "driver"], "active_role": "driver" }
+                    """),
+                _ => throw new InvalidOperationException($"Unexpected UM path {request.RequestUri.AbsolutePath}"),
+            };
+        });
+        using var factory = NewFactory(enabled: true, upstreamHandler: stub, wallets);
+        var client = factory.CreateClient();
+
+        var response = await client.PostAsync("/dev/seed/user", JsonBody("""
+            { "role": "jeeber", "phone": "+96139120015", "displayName": "Durable Jeeber" }
+            """));
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        captured.Paths.Should().Equal(
+            "/api/User/register",
+            "/api/User/role/grant",
+            $"/api/User/{userId}/active-role");
+        captured.Bodies[1].Should().Contain("\"role\":\"driver\"");
+        captured.Bodies[2].Should().Contain("\"active_role\":\"driver\"");
+        events.Should().Equal(
+            "/api/User/register",
+            "jeeber-wallet",
+            "/api/User/role/grant",
+            $"/api/User/{userId}/active-role");
+    }
+
+    [Fact]
+    public async Task SeedUser_Jeeber_InvalidRoleGrantResponse_DoesNotPublishLocalRoleState()
+    {
+        const string userId = "adadadad-adad-adad-adad-adadadadadad";
+        var stub = new StubHttpMessageHandler(request => request.RequestUri!.AbsolutePath switch
+        {
+            "/api/User/register" => JsonResponse($$"""
+                { "userId": "{{userId}}", "username": "invalid_grant", "email": "invalid-grant@jeeb.test", "status": "created" }
+                """),
+            "/api/User/role/grant" => JsonResponse("""
+                { "userId": "ffffffff-ffff-ffff-ffff-ffffffffffff", "available_roles": ["customer"], "added": false }
+                """),
+            _ => throw new InvalidOperationException($"Unexpected UM path {request.RequestUri.AbsolutePath}"),
+        });
+        using var factory = NewFactory(enabled: true, upstreamHandler: stub);
+        var client = factory.CreateClient();
+
+        var response = await client.PostAsync("/dev/seed/user", JsonBody("""
+            { "role": "jeeber", "phone": "+96139120016", "displayName": "Invalid Grant" }
+            """));
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadGateway);
+        var projection = await factory.Services.GetRequiredService<GwUsersStore>()
+            .GetByIdAsync(userId, CancellationToken.None);
+        projection.Should().BeNull();
+        factory.Services.GetRequiredService<GwSeededRoles>()
+            .Resolve(userId, email: null)
+            .Should().BeNull();
+    }
+
+    [Fact]
+    public async Task SeedUser_ProjectionFailure_Returns502_AndDoesNotPublishSeededRoles()
+    {
+        const string userId = "cdcdcdcd-cdcd-cdcd-cdcd-cdcdcdcdcdcd";
+        var users = new ProjectionFailingUsersStore();
+        var stub = new StubHttpMessageHandler(_ => JsonResponse($$"""
+            {
+              "userId": "{{userId}}",
+              "username": "projection_failure",
+              "email": "projection-failure@jeeb.test",
+              "status": "created"
+            }
+            """));
+        using var factory = NewFactory(enabled: true, upstreamHandler: stub, users: users);
+        var client = factory.CreateClient();
+
+        var response = await client.PostAsync("/dev/seed/user", JsonBody("""
+            { "role": "client", "phone": "+96139120012", "displayName": "Projection Failure" }
+            """));
+
+        response.StatusCode.Should().Be(HttpStatusCode.BadGateway,
+            "a fresh user that normal /auth/tokens cannot discover must not receive a misleading 200 seed result");
+        using var problem = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        problem.RootElement.GetProperty("title").GetString().Should().Be("dev seed projection failed");
+        users.ProjectionAttempts.Should().Be(1);
+        factory.Services.GetRequiredService<GwSeededRoles>()
+            .Resolve(userId, email: null)
+            .Should().BeNull("the partial seed must not unlock a later token or DevTool funding bridge");
     }
 
     [Fact]
@@ -247,9 +424,19 @@ public class DevEndpointsTests
     [Fact]
     public async Task SeedUser_FlagOn_NeverReturnsPassword()
     {
-        var stub = new StubHttpMessageHandler(_ => JsonResponse("""
-            { "userId": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "username": "u1", "email": "seed-x@jeeb.test", "status": "created" }
-            """));
+        var stub = new StubHttpMessageHandler(request => request.RequestUri!.AbsolutePath switch
+        {
+            "/api/User/register" => JsonResponse("""
+                { "userId": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "username": "u1", "email": "seed-x@jeeb.test", "status": "created" }
+                """),
+            "/api/User/role/grant" => JsonResponse("""
+                { "userId": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "available_roles": ["customer", "driver"], "added": true }
+                """),
+            "/api/User/bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb/active-role" => JsonResponse("""
+                { "userId": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "available_roles": ["customer", "driver"], "active_role": "driver" }
+                """),
+            _ => throw new InvalidOperationException($"Unexpected UM path {request.RequestUri.AbsolutePath}"),
+        });
 
         using var factory = NewFactory(enabled: true, upstreamHandler: stub);
         var client = factory.CreateClient();
@@ -857,13 +1044,15 @@ public class DevEndpointsTests
         HttpMessageHandler upstreamHandler,
         RecordingWalletProvisioner? wallets = null,
         IPartnerCredentialStore? credentials = null,
-        ITokenService? tokens = null)
+        ITokenService? tokens = null,
+        GwUsersStore? users = null)
     {
         return new WebApplicationFactory<Program>()
             .WithWebHostBuilder(builder =>
             {
                 builder.UseSetting("Features:DevEndpoints:Enabled", enabled ? "true" : "false");
                 builder.UseSetting("Jwt:SigningKey", TestSigningKey);
+                builder.UseSetting("Security:TokenMint:Enabled", "false");
 
                 builder.ConfigureTestServices(services =>
                 {
@@ -872,6 +1061,11 @@ public class DevEndpointsTests
                     services.RemoveAll<ServiceUserManagementClient>();
                     services.RemoveAll<IJeeberWalletProvisioner>();
                     services.RemoveAll<IPartnerWalletProvisioner>();
+                    if (users is not null)
+                    {
+                        services.RemoveAll<GwUsersStore>();
+                        services.AddSingleton<GwUsersStore>(users);
+                    }
                     if (credentials is not null)
                     {
                         services.RemoveAll<IPartnerCredentialStore>();
@@ -957,6 +1151,8 @@ public class DevEndpointsTests
         }
         public HttpRequestMessage Single() => _items.Single();
         public string LastBody => _bodies[^1];
+        public IReadOnlyList<string> Paths => _items.Select(item => item.RequestUri!.AbsolutePath).ToList();
+        public IReadOnlyList<string> Bodies => _bodies;
     }
 
     private sealed class StubHttpMessageHandler : HttpMessageHandler
@@ -994,6 +1190,42 @@ public class DevEndpointsTests
             PartnerCalls.Add((holderId, holderName));
             return Failure is null ? Task.CompletedTask : Task.FromException(Failure);
         }
+    }
+
+    /// <summary>
+    /// A failure seam for the one post-registration write that makes a dev-created identity
+    /// discoverable by <c>POST /auth/tokens</c>. Every operation faults because this test must
+    /// prove the controller never falls back to a partially usable local identity.
+    /// </summary>
+    private sealed class ProjectionFailingUsersStore : GwUsersStore
+    {
+        public int ProjectionAttempts { get; private set; }
+
+        private static Exception Fault() => new InvalidOperationException("forced projection-store outage");
+        private static Task<T> Failed<T>() => Task.FromException<T>(Fault());
+        private static Task Failed() => Task.FromException(Fault());
+
+        public Task<GwUserProfile?> GetByIdAsync(string userId, CancellationToken ct) => Failed<GwUserProfile?>();
+        public Task<GwUserProfile?> GetForModerationAsync(string userId, CancellationToken ct) => Failed<GwUserProfile?>();
+        public Task<GwUserProfile> GetOrCreateAsync(string userId, CancellationToken ct) => Failed<GwUserProfile>();
+        public Task UpsertProjectionAsync(GwUserProfile profile, CancellationToken ct)
+        {
+            ProjectionAttempts++;
+            return Failed();
+        }
+        public Task<GwUserProfile> UpdateProfileAsync(string userId, GwProfilePatch patch, CancellationToken ct) => Failed<GwUserProfile>();
+        public Task<IReadOnlyList<GwSavedAddress>> ListAddressesAsync(string userId, CancellationToken ct) => Failed<IReadOnlyList<GwSavedAddress>>();
+        public Task<GwSavedAddress?> GetAddressAsync(string userId, string addressId, CancellationToken ct) => Failed<GwSavedAddress?>();
+        public Task<GwSavedAddress> CreateAddressAsync(string userId, GwAddressUpsert input, CancellationToken ct) => Failed<GwSavedAddress>();
+        public Task<GwSavedAddress?> UpdateAddressAsync(string userId, string addressId, GwAddressUpsert patch, CancellationToken ct) => Failed<GwSavedAddress?>();
+        public Task<bool> DeleteAddressAsync(string userId, string addressId, CancellationToken ct) => Failed<bool>();
+        public Task<GwUserSearchResult> SearchAsync(GwUserSearchQuery query, CancellationToken ct) => Failed<GwUserSearchResult>();
+        public Task<GwUserProfile?> SuspendAsync(string userId, string reason, string adminId, CancellationToken ct) => Failed<GwUserProfile?>();
+        public Task<GwUserProfile?> UnsuspendAsync(string userId, string adminId, CancellationToken ct) => Failed<GwUserProfile?>();
+        public Task<GwUserProfile?> SwitchRoleAsync(string userId, string newRole, CancellationToken ct) => Failed<GwUserProfile?>();
+        public Task<GwUserProfile?> GrantRoleAsync(string userId, string role, CancellationToken ct) => Failed<GwUserProfile?>();
+        public Task<GwUserProfile?> RevokeRoleAsync(string userId, string role, CancellationToken ct) => Failed<GwUserProfile?>();
+        public Task<bool> PurgePiiAsync(string userId, CancellationToken ct) => Failed<bool>();
     }
 
     private sealed class RecordingCredentialStore(List<string> events) : IPartnerCredentialStore

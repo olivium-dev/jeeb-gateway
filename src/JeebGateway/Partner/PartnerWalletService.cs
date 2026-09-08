@@ -4,6 +4,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using JeebGateway.Admin;
+using JeebGateway.Users;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using ServiceWalletClient = JeebGateway.service.ServiceWallet.ServiceWalletClient;
@@ -30,22 +31,31 @@ public sealed class PartnerWalletService : IPartnerWalletService
     private readonly IAdminAuditLog _audit;
     private readonly PartnerWalletOptions _options;
     private readonly ILogger<PartnerWalletService> _log;
+    private readonly IDevSeededRoleStore _devSeededRoles;
     private readonly IReadOnlyCollection<string> _jeeberHolderTypes;
     private readonly IReadOnlyCollection<string> _partnerHolderTypes;
     private readonly IReadOnlyCollection<string> _systemWalletTypes;
+
+    // wallet-service records generic identity metadata independently of a user's Jeeb role.
+    // These are the two legacy/user-provisioning spellings observed in the dev estate. They
+    // remain a dev-only exception below; partner/admin/unknown holder types never bypass BOPLA.
+    private static readonly IReadOnlyCollection<string> DevSeededGenericJeeberHolderTypes =
+        new[] { "user", "customer" };
 
     public PartnerWalletService(
         ServiceWalletClient wallet,
         IPartnerWalletOperationStore ops,
         IAdminAuditLog audit,
         IOptions<PartnerWalletOptions> options,
-        ILogger<PartnerWalletService> log)
+        ILogger<PartnerWalletService> log,
+        IDevSeededRoleStore devSeededRoles)
     {
         _wallet = wallet;
         _ops = ops;
         _audit = audit;
         _options = options.Value;
         _log = log;
+        _devSeededRoles = devSeededRoles;
         _jeeberHolderTypes = SplitTokens(_options.JeeberHolderTypes);
         _partnerHolderTypes = SplitTokens(_options.PartnerHolderTypes);
         _systemWalletTypes = SplitTokens(_options.SystemWalletTypes);
@@ -447,8 +457,11 @@ public sealed class PartnerWalletService : IPartnerWalletService
             throw new PartnerWalletException("Wallet holder-type policy is unavailable.");
         }
 
-        if (string.IsNullOrWhiteSpace(actual)
-            || !expectedTypes.Contains(actual, StringComparer.OrdinalIgnoreCase))
+        var expectedHolderType = !string.IsNullOrWhiteSpace(actual)
+            && expectedTypes.Contains(actual, StringComparer.OrdinalIgnoreCase);
+        var devSeededGenericJeeber = !expectedHolderType
+            && IsDevSeededGenericJeeberTarget(holderId, label, actual);
+        if (!expectedHolderType && !devSeededGenericJeeber)
         {
             _log.LogWarning(
                 "Partner wallet target-type guard REJECT: {Label} holder {HolderId} HolderType='{Actual}' "
@@ -458,7 +471,32 @@ public sealed class PartnerWalletService : IPartnerWalletService
                 $"The specified holder is not an eligible {label} target for this operation.");
         }
 
+        if (devSeededGenericJeeber)
+        {
+            // The only writer of IDevSeededRoleStore is [DevOnly] POST /dev/seed/user. This
+            // lets the Dev Tool fund a newly seeded driver whose immutable wallet holder is a
+            // generic user/customer, while production stays fail-closed because the store is
+            // empty there. The real wallet/currency/active checks above still apply.
+            _log.LogInformation(
+                "Partner wallet target accepted through the dev-seeded Jeeber bridge: holder={HolderId} HolderType='{Actual}'.",
+                holderId, actual);
+        }
+
         return (wallet.WalletId, holder?.WalletHolder);
+    }
+
+    private bool IsDevSeededGenericJeeberTarget(Guid holderId, string label, string? actualHolderType)
+    {
+        if (!string.Equals(label, "jeeber", StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrWhiteSpace(actualHolderType)
+            || !DevSeededGenericJeeberHolderTypes.Contains(
+                actualHolderType, StringComparer.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var seededRoles = _devSeededRoles.Resolve(holderId.ToString("D"), email: null);
+        return seededRoles?.Contains(Roles.Jeeber, StringComparer.OrdinalIgnoreCase) == true;
     }
 
     private async Task<Guid> RequireSystemWalletIdAsync(CancellationToken ct)

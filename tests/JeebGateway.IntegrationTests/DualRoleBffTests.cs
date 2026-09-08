@@ -201,6 +201,86 @@ public class DualRoleBffTests
     }
 
     /// <summary>
+    /// DevTool's register contract cannot persist its requested role in UM. SeedUser writes the
+    /// completed local projection and DevSeededRoleStore together, so a fresh seeded Jeeber has
+    /// UM={customer, active=customer} but gateway-local={customer,driver, active=driver}.
+    /// /me must report the same active role as the freshly minted gateway token.
+    /// </summary>
+    [Fact]
+    public async Task FB_GetMe_DevSeededRoleMissingFromUm_UsesProjectionActiveRole()
+    {
+        const string userId = "e989a5d2-bcc4-4c12-87fd-e39a55b6d235";
+        var um = new StubUm
+        {
+            UserRoles = new UserRolesResult(userId, new[] { Roles.Client }, Roles.Client),
+        };
+        using var factory = MakeFactory(new StubOtp(), um, umEnabled: true);
+        var now = DateTimeOffset.UtcNow;
+        await factory.Services.GetRequiredService<IUsersStore>().UpsertProjectionAsync(new UserProfile
+        {
+            Id = userId,
+            Phone = "+96139120013",
+            Name = "Dev Jeeber",
+            Roles = new List<string> { Roles.Client, Roles.Jeeber },
+            ActiveRole = Roles.Jeeber,
+            CreatedAt = now,
+            UpdatedAt = now,
+        }, CancellationToken.None);
+        factory.Services.GetRequiredService<IDevSeededRoleStore>()
+            .Record(userId, email: null, new[] { Roles.Client, Roles.Jeeber });
+
+        var http = factory.CreateClient();
+        http.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue(
+                "Bearer", MintGatewayBearer(factory, userId, Roles.Client, Roles.Jeeber));
+
+        var response = await http.GetAsync("/v1/users/me");
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        document.RootElement.GetProperty("active_role").GetString().Should().Be("jeeber");
+        document.RootElement.GetProperty("available_roles").EnumerateArray().Select(element => element.GetString())
+            .Should().BeEquivalentTo(new[] { "client", "jeeber" });
+    }
+
+    [Fact]
+    public async Task FB_GetMe_LocalProjectionCannotOverridePersistedUmActiveRole_WhenItAddsNothing()
+    {
+        const string userId = "6800c56e-126f-4b16-af13-91e4b2c5c75e";
+        var um = new StubUm
+        {
+            UserRoles = new UserRolesResult(userId,
+                new[] { Roles.Client, Roles.Jeeber }, Roles.Client),
+        };
+        using var factory = MakeFactory(new StubOtp(), um, umEnabled: true);
+        var now = DateTimeOffset.UtcNow;
+        await factory.Services.GetRequiredService<IUsersStore>().UpsertProjectionAsync(new UserProfile
+        {
+            Id = userId,
+            Phone = "+96139120014",
+            Name = "Persisted User",
+            Roles = new List<string> { Roles.Client, Roles.Jeeber },
+            ActiveRole = Roles.Jeeber,
+            CreatedAt = now,
+            UpdatedAt = now,
+        }, CancellationToken.None);
+        factory.Services.GetRequiredService<IDevSeededRoleStore>()
+            .Record(userId, email: null, new[] { Roles.Client, Roles.Jeeber });
+
+        var http = factory.CreateClient();
+        http.DefaultRequestHeaders.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue(
+                "Bearer", MintGatewayBearer(factory, userId, Roles.Jeeber, Roles.Client));
+
+        var response = await http.GetAsync("/v1/users/me");
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        using var document = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        document.RootElement.GetProperty("active_role").GetString().Should().Be("client",
+            "UM keeps authority when it already holds the projection's active role");
+    }
+
+    /// <summary>
     /// The authority never INVENTS a role: a persisted active role the user does not hold, or none
     /// at all, still falls back to the validated session claim rather than emitting an unheld role.
     /// </summary>

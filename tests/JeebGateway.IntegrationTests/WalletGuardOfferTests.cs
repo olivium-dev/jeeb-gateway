@@ -4,6 +4,7 @@ using FluentAssertions;
 using JeebGateway.Availability;
 using JeebGateway.Financials;
 using JeebGateway.IntegrationTests.Fakes;
+using JeebGateway.Partner;
 using JeebGateway.Requests;
 using JeebGateway.Services.Clients;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -51,18 +52,21 @@ public class WalletGuardOfferTests
     }
 
     [Fact]
-    public async Task CheckAsync_MultiCurrency_SumsOnlyTheDominantGroup()
+    public async Task CheckAsync_MultiCurrency_UsesTheSameConfiguredCurrencyAsJeebWallet()
     {
         var holderId = Guid.NewGuid();
-        var fake = new DominantCurrencyWalletClient(holderId);
-        var guard = NewGuard(fake, "fail-closed");
+        var guard = NewGuard(
+            new TypedWalletClient(holderId, (null, 1, 0.0), (null, 2, 50.0)),
+            "fail-closed",
+            currencyId: 2);
 
-        // Dominant group (2 wallets, currency 1) totals 3.0; the lone currency-2 wallet
-        // (100.0) must NOT be blended in.
-        var result = await guard.CheckAsync(holderId, requiredFee: 3.0m, CancellationToken.None);
+        // This is the historical failure shape: one wallet in each currency gives the
+        // old dominant-group selector a count tie, which it broke by numeric CurrencyID
+        // and therefore chose the zero balance. The wallet UI selects configured currency 2.
+        var result = await guard.CheckAsync(holderId, requiredFee: 50.0m, CancellationToken.None);
 
         result.Allowed.Should().BeTrue();
-        result.Available.Should().Be(3.0m);
+        result.Available.Should().Be(50.0m);
     }
 
     [Fact]
@@ -146,14 +150,13 @@ public class WalletGuardOfferTests
     }
 
     [Fact]
-    public async Task CheckAsync_Cod_Types_Cannot_Flip_The_Dominant_Currency_Group()
+    public async Task CheckAsync_Cod_Types_Cannot_Inflate_The_Configured_Currency_Balance()
     {
-        // Two cod_* legs on currency 2 would out-count the single spendable currency-1
-        // wallet and zero the compare if they were filtered after the grouping.
+        // COD float on the same configured currency must never count as spendable money.
         var holderId = Guid.NewGuid();
         var guard = NewGuard(
             new TypedWalletClient(holderId,
-                (null, 1, 5.0), ("cod_earnings", 2, 900.0), ("cod_commission", 2, 900.0)),
+                (null, 1, 5.0), ("cod_earnings", 1, 900.0), ("cod_commission", 1, 900.0)),
             "fail-closed");
 
         var result = await guard.CheckAsync(holderId, requiredFee: 5.0m, CancellationToken.None);
@@ -162,8 +165,13 @@ public class WalletGuardOfferTests
         result.Available.Should().Be(5.0m);
     }
 
-    private static WalletSufficiencyGuard NewGuard(SwServiceWalletClient wallet, string failMode)
-        => new(wallet, Options.Create(new WalletGuardOptions { FailMode = failMode }),
+    private static WalletSufficiencyGuard NewGuard(
+        SwServiceWalletClient wallet,
+        string failMode,
+        int currencyId = 1)
+        => new(wallet,
+            Options.Create(new WalletGuardOptions { FailMode = failMode }),
+            Options.Create(new PartnerWalletOptions { CurrencyId = currencyId }),
             NullLogger<WalletSufficiencyGuard>.Instance);
 
     // -----------------------------------------------------------------
@@ -474,30 +482,6 @@ public class WalletGuardOfferTests
         c.DefaultRequestHeaders.Add("X-User-Id", clientId);
         c.DefaultRequestHeaders.Add("X-User-Roles", "client");
         return c;
-    }
-
-    /// <summary>Two active wallets on currency 1 (dominant, sums to 3.0) plus one lone
-    /// wallet on currency 2 (100.0) that must never blend into the compare.</summary>
-    private sealed class DominantCurrencyWalletClient : SwServiceWalletClient
-    {
-        private readonly Guid _holderId;
-        public DominantCurrencyWalletClient(Guid holderId) : base("http://localhost", new HttpClient())
-            => _holderId = holderId;
-
-        public override Task<JeebGateway.service.ServiceWallet.GetHolderWallets> WalletsAsync(Guid holderId, CancellationToken ct)
-            => Task.FromResult(new JeebGateway.service.ServiceWallet.GetHolderWallets
-            {
-                WalletHolder = new JeebGateway.service.ServiceWallet.WalletHolder { HolderId = _holderId, IsActive = true },
-                Wallets = new List<JeebGateway.service.ServiceWallet.Wallet>
-                {
-                    new() { WalletId = Guid.NewGuid(), HolderId = _holderId, CurrencyID = 1, Amount = 2.0, IsActive = true },
-                    new() { WalletId = Guid.NewGuid(), HolderId = _holderId, CurrencyID = 1, Amount = 1.0, IsActive = true },
-                    new() { WalletId = Guid.NewGuid(), HolderId = _holderId, CurrencyID = 2, Amount = 100.0, IsActive = true },
-                },
-            });
-
-        public override Task<JeebGateway.service.ServiceWallet.GetHolderWallets> WalletsAsync(Guid holderId)
-            => WalletsAsync(holderId, CancellationToken.None);
     }
 
     /// <summary>R-M1: a holder whose wallets carry explicit (type, currency, amount) rows.</summary>

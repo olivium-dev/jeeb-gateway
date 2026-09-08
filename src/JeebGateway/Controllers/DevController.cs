@@ -7,6 +7,8 @@ using JeebGateway.service.ServiceUserManagement;
 using Microsoft.AspNetCore.Mvc;
 using GwRoles = JeebGateway.Users.Roles;
 using GwSeededRoles = JeebGateway.Users.IDevSeededRoleStore;
+using GwUserProfile = JeebGateway.Users.UserProfile;
+using GwUsersStore = JeebGateway.Users.IUsersStore;
 using UserManagementApiException = JeebGateway.service.ServiceUserManagement.ApiException;
 // JEB-1472: the regenerated UserManagement NSwag client now emits a ProblemDetails
 // DTO (the bumped UM 1.1.0 contract documents RFC 7807 error bodies). Alias the bare
@@ -62,17 +64,20 @@ public sealed class DevController : ControllerBase
 {
     private readonly ServiceUserManagementClient _userManagement;
     private readonly GwSeededRoles _seededRoles;
+    private readonly GwUsersStore _users;
     private readonly IJeeberWalletProvisioner _jeeberWallets;
     private readonly ILogger<DevController> _logger;
 
     public DevController(
         ServiceUserManagementClient userManagement,
         GwSeededRoles seededRoles,
+        GwUsersStore users,
         IJeeberWalletProvisioner jeeberWallets,
         ILogger<DevController> logger)
     {
         _userManagement = userManagement;
         _seededRoles = seededRoles;
+        _users = users;
         _jeeberWallets = jeeberWallets;
         _logger = logger;
     }
@@ -93,7 +98,7 @@ public sealed class DevController : ControllerBase
     /// <response code="400">Invalid body (missing role / phone / displayName).</response>
     /// <response code="404">Dev endpoints disabled (the <see cref="DevOnlyAttribute"/> gate).</response>
     /// <response code="409">Upstream collision (passthrough from user-management).</response>
-    /// <response code="502">user-management unreachable.</response>
+    /// <response code="502">user-management or the local token-mint projection is unavailable.</response>
     [HttpPost("seed/user")]
     [ProducesResponseType(typeof(DevSeedUserResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
@@ -158,15 +163,134 @@ public sealed class DevController : ControllerBase
         try
         {
             var created = await _userManagement.RegisterAsync(registerRequest, ct);
+            if (string.IsNullOrWhiteSpace(created.UserId))
+            {
+                _logger.LogError("Dev seed register returned no canonical user id");
+                return Problem(
+                    title: "user-management returned an invalid seed response",
+                    detail: "The created user did not include a canonical user id.",
+                    statusCode: StatusCodes.Status502BadGateway,
+                    type: "https://datatracker.ietf.org/doc/html/rfc7231#section-6.6.3");
+            }
+
+            var userId = created.UserId.Trim();
+            var createdAt = created.CreatedDate == default
+                ? DateTimeOffset.UtcNow
+                : created.CreatedDate;
 
             // JEBV4-314 — user-management has no role column on the register contract, so
             // the requested role would otherwise be dropped and a later /v1/auth/login would
-            // mint roles:customer. Record the OPAQUE roles for this seed HERE (keyed by the
-            // UM canonical userId + the login email) so the login facade's role mint reflects
-            // the seeded role (e.g. admin) and admin endpoints stop 403'ing. Dev-only: this
-            // action is [DevOnly]-gated, so the store is only ever populated in a dev env.
+            // mint roles:customer. Keep the opaque role context ready to record once the local
+            // projection is available. It must not be published before then: a failed projection
+            // must not make a half-created dev identity look usable to a later token mint.
             var seededRoles = MapSeedRoleToOpaque(role);
-            _seededRoles.Record(created.UserId, email, seededRoles);
+            var seededActiveRole = seededRoles.FirstOrDefault(candidate =>
+                !string.Equals(candidate, GwRoles.Client, StringComparison.OrdinalIgnoreCase))
+                ?? GwRoles.Client;
+
+            // Persist a Jeeber dev seed in user-management before advertising success. The
+            // gateway-local projection/bridge below makes the account immediately mintable, but
+            // both are intentionally process-local. Without this owner write a gateway restart
+            // silently demoted a freshly seeded Jeeber back to customer. Keep the existing admin
+            // seed semantics process-local: this durability repair is deliberately scoped to the
+            // mobile Jeeber flow that UM's public opaque-role contracts already support.
+            if (string.Equals(seededActiveRole, GwRoles.Jeeber, StringComparison.OrdinalIgnoreCase))
+            {
+                if (!Guid.TryParse(userId, out var holderId) || holderId == Guid.Empty)
+                {
+                    _logger.LogError(
+                        "Dev seed register returned a non-wallet-safe Jeeber userId={UserId}", userId);
+                    return Problem(
+                        title: "user-management returned an invalid seed response",
+                        detail: "The created Jeeber did not include a wallet-safe canonical user id.",
+                        statusCode: StatusCodes.Status502BadGateway,
+                        type: "https://datatracker.ietf.org/doc/html/rfc7231#section-6.6.3");
+                }
+
+                // Preserve the platform invariant enforced by WalletProvisioningDualRoleClient:
+                // no durable driver grant may exist before its zero-balance wallet inventory is
+                // ready. The later DevTool fund step remains idempotent and adds balance to these
+                // same canonical wallets.
+                await _jeeberWallets.EnsureAsync(holderId, ct);
+
+                var grant = await _userManagement.GrantAsync(new GrantAvailableRoleRequest
+                {
+                    UserId = userId,
+                    Role = seededActiveRole,
+                }, ct);
+                if (!string.Equals(grant.UserId, userId, StringComparison.OrdinalIgnoreCase)
+                    || grant.Available_roles is null
+                    || !grant.Available_roles.Contains(seededActiveRole, StringComparer.OrdinalIgnoreCase))
+                {
+                    _logger.LogError(
+                        "Dev seed role grant returned invalid authority state for userId={UserId}", userId);
+                    return Problem(
+                        title: "user-management returned an invalid role grant response",
+                        detail: "The created Jeeber's durable role grant could not be verified.",
+                        statusCode: StatusCodes.Status502BadGateway,
+                        type: "https://datatracker.ietf.org/doc/html/rfc7231#section-6.6.3");
+                }
+
+                var activated = await _userManagement.ActiveRoleAsync(userId, new SwitchActiveRoleRequest
+                {
+                    Active_role = seededActiveRole,
+                }, ct);
+                if (!string.Equals(activated.UserId, userId, StringComparison.OrdinalIgnoreCase)
+                    || !string.Equals(activated.Active_role, seededActiveRole, StringComparison.OrdinalIgnoreCase)
+                    || activated.Available_roles is null
+                    || !activated.Available_roles.Contains(seededActiveRole, StringComparer.OrdinalIgnoreCase))
+                {
+                    _logger.LogError(
+                        "Dev seed active-role write returned invalid authority state for userId={UserId}", userId);
+                    return Problem(
+                        title: "user-management returned an invalid active role response",
+                        detail: "The created Jeeber's durable active role could not be verified.",
+                        statusCode: StatusCodes.Status502BadGateway,
+                        type: "https://datatracker.ietf.org/doc/html/rfc7231#section-6.6.3");
+                }
+            }
+
+            // POST /auth/tokens resolves a role-less mint from IUsersStore. A freshly
+            // created dev user exists in user-management but may not be readable from its
+            // normal profile endpoint yet, which used to turn a create→super-login flow into
+            // a 404. Mirror the same canonical identity and opaque role context immediately.
+            try
+            {
+                await _users.UpsertProjectionAsync(new GwUserProfile
+                {
+                    Id = userId,
+                    Phone = request.Phone.Trim(),
+                    Email = created.Email ?? email,
+                    Name = request.DisplayName.Trim(),
+                    Roles = seededRoles.ToList(),
+                    ActiveRole = seededActiveRole,
+                    CreatedAt = createdAt,
+                    UpdatedAt = createdAt,
+                }, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // UM has already created the identity, but returning 200 here would lie: the
+                // normal /auth/tokens path cannot discover it until this projection succeeds.
+                // Do not publish the companion dev-role record either; that keeps the partial
+                // seed invisible to every local token/partner-dev bridge.
+                _logger.LogError(ex,
+                    "Dev seed projection failed after user-management created userId={UserId}", userId);
+                return Problem(
+                    title: "dev seed projection failed",
+                    detail: "The user was created upstream but is not available for token minting. "
+                        + "Do not treat this seed as complete; repair the gateway projection before retrying.",
+                    statusCode: StatusCodes.Status502BadGateway,
+                    type: "https://datatracker.ietf.org/doc/html/rfc7231#section-6.6.3");
+            }
+
+            // Publish the dev-only role bridge only after the normal token-mint projection is
+            // durable. This couples the two local views atomically from the caller's perspective.
+            _seededRoles.Record(userId, email, seededRoles);
 
             // Structured log — role/runId/username/email only. NEVER the password
             // or the phone (the phone is PII; only the derived handle is logged).
@@ -176,21 +300,23 @@ public sealed class DevController : ControllerBase
 
             var response = new DevSeedUserResponse
             {
-                UserId = created.UserId,
+                UserId = userId,
                 Role = role,
                 Phone = request.Phone,
                 DisplayName = request.DisplayName,
                 Username = created.Username ?? username,
                 Email = created.Email ?? email,
                 Status = string.IsNullOrWhiteSpace(created.Status) ? "created" : created.Status!,
-                CreatedAt = created.CreatedDate == default
-                    ? DateTimeOffset.UtcNow
-                    : created.CreatedDate,
+                CreatedAt = createdAt,
                 RunId = runId,
                 Tags = request.Tags ?? Array.Empty<string>(),
             };
 
             return Ok(response);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
         }
         catch (UserManagementApiException ex)
         {
