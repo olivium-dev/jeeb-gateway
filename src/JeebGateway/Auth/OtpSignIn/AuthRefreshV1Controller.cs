@@ -18,8 +18,8 @@ namespace JeebGateway.Auth.OtpSignIn;
 /// pair and revokes the presented token on success, and (2) on replay of an
 /// already-rotated token, revokes the ENTIRE refresh-token family and returns
 /// <see cref="RefreshOutcome.ReuseDetected"/>. The gateway is the sole signer of
-/// the session JWT (token-authority invariant N11); this path does NOT touch
-/// user-management.</para>
+/// the session JWT (token-authority invariant N11); role continuity is revalidated
+/// against user-management and ban-service before minting.</para>
 ///
 /// <para><b>Durable store (M3).</b> The behaviour here is independent of the
 /// <see cref="IRefreshTokenStore"/> backing implementation; binding a durable
@@ -65,6 +65,7 @@ public sealed class AuthRefreshV1Controller : ControllerBase
     [ProducesResponseType(typeof(RefreshPairResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> Refresh([FromBody] RefreshRequestDto? body, CancellationToken ct)
     {
         if (body is null || string.IsNullOrWhiteSpace(body.RefreshToken))
@@ -82,6 +83,10 @@ public sealed class AuthRefreshV1Controller : ControllerBase
                 RefreshToken = result.Tokens.RefreshToken,
             });
         }
+
+        if (result.Outcome == RefreshOutcome.AuthorityUnavailable)
+            return OtpSignInProblems.Problem(this, StatusCodes.Status503ServiceUnavailable, "identity_unavailable",
+                "Refresh temporarily unavailable", "Please try again shortly.");
 
         if (result.Outcome == RefreshOutcome.ReuseDetected)
         {

@@ -1,8 +1,12 @@
 using System.Net;
 using System.Text;
+using System.Text.Json.Nodes;
 using FluentAssertions;
 using JeebGateway.Requests.Cancellation;
 using JeebGateway.Services.Clients;
+using JeebGateway.Users;
+using JeebGateway.Users.Moderation;
+using Microsoft.Extensions.Logging.Abstractions;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests;
@@ -31,6 +35,50 @@ public class BanServiceContractTests
 {
     private const string JeeberId = "6f1515fb-ace5-4868-bb80-0c4802c9300e";
     private static readonly DateTimeOffset Now = DateTimeOffset.Parse("2026-06-01T15:46:25Z");
+
+    public static IEnumerable<object[]> InvalidStatusBodies()
+    {
+        yield return new object[] { "empty envelope", "{}" };
+        yield return new object[] { "null envelope", "null" };
+        yield return new object[] { "missing collection", $$"""{"user_id":"{{JeeberId}}"}""" };
+        yield return new object[] { "null collection", $$"""{"user_id":"{{JeeberId}}","ban_statuses":null}""" };
+        yield return new object[] { "missing identity", "{\"ban_statuses\":[]}" };
+        yield return new object[] { "wrong identity", "{\"user_id\":\"other\",\"ban_statuses\":[]}" };
+        yield return new object[] { "null record", $$"""{"user_id":"{{JeeberId}}","ban_statuses":[null]}""" };
+        var valid = $$"""{"user_id":"{{JeeberId}}","ban_statuses":[{"user_id":"{{JeeberId}}","ban_type":"yellow","current_stage":1,"status":"WARNING","last_updated":"2026-06-01T15:46:25Z","is_currently_banned":false}]}""";
+        yield return new object[] { "duplicate envelope identity", $$"""{"user_id":"other","user_id":"{{JeeberId}}","ban_statuses":[]}""" };
+        yield return new object[] { "duplicate envelope collection", valid[..^1] + ",\"ban_statuses\":[]}" };
+        yield return new object[] { "duplicate ban flag true then false", valid.Replace("\"is_currently_banned\":false", "\"is_currently_banned\":true,\"is_currently_banned\":false") };
+        yield return new object[] { "duplicate ban flag alternate casing", valid.Replace("\"is_currently_banned\":false", "\"IS_CURRENTLY_BANNED\":true,\"is_currently_banned\":false") };
+        yield return new object[] { "duplicate record status", valid.Replace("\"status\":\"WARNING\"", "\"status\":\"PARTIAL_BAN\",\"status\":\"WARNING\"") };
+        foreach (var field in new[] { "user_id", "ban_type", "current_stage", "status", "last_updated", "is_currently_banned" })
+        {
+            var body = JsonNode.Parse(valid)!;
+            body["ban_statuses"]![0]!.AsObject().Remove(field);
+            yield return new object[] { "missing record " + field, body.ToJsonString() };
+        }
+        foreach (var field in new[] { "user_id", "ban_type", "status", "is_currently_banned" })
+        {
+            var body = JsonNode.Parse(valid)!;
+            body["ban_statuses"]![0]![field] = null;
+            yield return new object[] { "null record " + field, body.ToJsonString() };
+        }
+        var wrong = JsonNode.Parse(valid)!;
+        wrong["ban_statuses"]![0]!["user_id"] = "other";
+        yield return new object[] { "wrong record identity", wrong.ToJsonString() };
+    }
+
+    [Theory]
+    [MemberData(nameof(InvalidStatusBodies))]
+    public async Task MalformedOwnerStatusCannotBecomeAnUnbannedVerdict(string scenario, string body)
+    {
+        var client = ClientReturning(HttpStatusCode.OK, body);
+        var exception = await Record.ExceptionAsync(() => client.GetStatusAsync(JeeberId, default));
+        (exception is HttpRequestException or System.Text.Json.JsonException).Should().BeTrue(scenario);
+        var verdict = await UserModerationGate.EvaluateAsync(
+            new BanServiceUserSuspensionSource(client), JeeberId, NullLogger.Instance, default);
+        verdict.Verdict.Should().Be(ModerationVerdict.Unavailable, scenario);
+    }
 
     // -----------------------------------------------------------------
     // (1) JSON seam — BanServiceClient against literal ban-service bytes

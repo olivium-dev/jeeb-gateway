@@ -43,6 +43,12 @@ using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
 
+if (args.Length > 0 && args[0] == "--staging-delivery-auth-probe")
+{
+    Environment.ExitCode = await DeliveryActivationProbe.RunAsync(args);
+    return;
+}
+
 var builder = WebApplication.CreateBuilder(args);
 
 // ---------------------------------------------------------------------------
@@ -1669,8 +1675,8 @@ builder.Services.AddSingleton<JeebGateway.Financials.ICommissionCollector,
 // the same reused wallet-service saga). See Extensions/PartnerWalletExtensions.cs.
 builder.Services.AddPartnerWallet(builder.Configuration);
 
-// GET /v1/jeeb/wallet/ledger — migration seam. Production serves wallet-service
-// (Authority=wallet-api) with WalletPostgres as the compare-only shadow; dev/CI defaults to postgres.
+// GET /v1/jeeb/wallet/ledger uses wallet-service HTTP when configured and authoritative.
+// The retired database projection is not a fallback; unconfigured reads return an empty page.
 builder.Services.Configure<JeebGateway.JeebWallet.WalletLedgerMigrationOptions>(
     builder.Configuration.GetSection(
         JeebGateway.JeebWallet.WalletLedgerMigrationOptions.SectionName));
@@ -1732,6 +1738,12 @@ if (builder.Configuration.GetValue("FeatureFlags:UseUpstream:RemoteUserPreferenc
         JeebGateway.Users.SavedLocations.RemoteUserPreferencesSavedLocationStore>();
 }
 builder.Services.AddSavedLocations();
+builder.Services.Configure<JeebGateway.FormSubmissions.JeeberOnboardingCoverageOptions>(
+    builder.Configuration.GetSection(JeebGateway.FormSubmissions.JeeberOnboardingCoverageOptions.SectionName));
+builder.Services.AddSingleton<JeebGateway.FormSubmissions.IJeeberOnboardingCoverageResolver,
+    JeebGateway.FormSubmissions.JeeberOnboardingCoverageResolver>();
+builder.Services.AddSingleton<JeebGateway.FormSubmissions.IFormSubmissionStore,
+    JeebGateway.FormSubmissions.RemoteUserPreferencesFormSubmissionStore>();
 
 // The in-gateway push stack is DELETED (durability registers #10 + #12 [push] die with it):
 // it resolved NoDevices on every send. Producers now hand over via PushHandover.
@@ -2032,7 +2044,7 @@ if (Uri.TryCreate(builder.Configuration["Services:Delivery:BaseUrl"], UriKind.Ab
         {
             client.BaseAddress = new Uri(escalationMirrorUri.ToString().TrimEnd('/') + "/");
             client.Timeout = TimeSpan.FromSeconds(8);
-        }));
+        })).AddHttpMessageHandler<DeliveryServiceCredentialHandler>();
     builder.Services.AddSingleton<JeebGateway.Requests.OtpHandover.DeliveryServiceEscalationMirror>();
     builder.Services.AddSingleton<IEscalationMirror>(sp =>
         sp.GetRequiredService<JeebGateway.Requests.OtpHandover.DeliveryServiceEscalationMirror>());
@@ -2059,7 +2071,7 @@ if (Uri.TryCreate(builder.Configuration["Services:Delivery:BaseUrl"], UriKind.Ab
         {
             client.BaseAddress = new Uri(availabilityMirrorUri.ToString().TrimEnd('/') + "/");
             client.Timeout = TimeSpan.FromSeconds(8);
-        }));
+        })).AddHttpMessageHandler<DeliveryServiceCredentialHandler>();
     builder.Services.AddSingleton<JeebGateway.Availability.DeliveryServiceAvailabilityMirror>();
     builder.Services.AddSingleton<JeebGateway.Availability.IAvailabilityMirror>(sp =>
         sp.GetRequiredService<JeebGateway.Availability.DeliveryServiceAvailabilityMirror>());
@@ -2138,7 +2150,7 @@ if (tiersModePhase >= JeebGateway.Migration.GwdbxMigrationPhase.UpstreamAuthorit
         {
             client.BaseAddress = new Uri(tiersUpstreamUri.ToString().TrimEnd('/') + "/");
             client.Timeout = TimeSpan.FromSeconds(8);
-        }));
+        })).AddHttpMessageHandler<DeliveryServiceCredentialHandler>();
     builder.Services.AddSingleton<JeebGateway.Tiers.ITiersStore, JeebGateway.Tiers.DeliveryServiceTiersStore>();
 }
 else
@@ -2510,10 +2522,19 @@ if (!JeebGateway.Migration.GwdbxMigrationOptions.RequiresUpstream(
     builder.Services.AddSingleton<IRefreshTokenStore, InMemoryRefreshTokenStore>();
 }
 builder.Services.AddSingleton<IUsersStoreAdapter, UsersStoreRolesAdapter>();
+// Refresh roles and suspension are read from their owners on every rotation.
+// Legacy profile projection remains separate and cannot authorize refresh.
+builder.Services.AddSingleton<IRefreshRoleAuthority, OwnerRefreshRoleAuthority>();
 // Feeds the refresh-role-continuity readiness row; TokenService writes it on every rotation.
 builder.Services.AddSingleton<IRefreshSessionCensus, InProcessRefreshSessionCensus>();
-builder.Services.AddSingleton<JeebGateway.Health.IUsersStoreCensus, JeebGateway.Health.UsersStoreCensus>();
-builder.Services.AddSingleton<ITokenService, TokenService>();
+builder.Services.AddSingleton<ITokenService>(sp => new TokenService(
+    sp.GetRequiredService<IRefreshTokenStore>(),
+    sp.GetRequiredService<IUsersStoreAdapter>(),
+    sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<JwtOptions>>(),
+    sp.GetRequiredService<TimeProvider>(),
+    sp.GetRequiredService<IRefreshRoleAuthority>(),
+    sp.GetRequiredService<ILogger<TokenService>>(),
+    sp.GetRequiredService<IRefreshSessionCensus>()));
 builder.Services.AddSingleton<IUmAuthenticationContextValidator, UmAuthenticationContextValidator>();
 
 // Admin portal settlement reads/reconcile over the in-gateway COD owner
@@ -2528,7 +2549,7 @@ ServiceClientExtensions.AttachResilienceOnly(builder.Services.AddHttpClient("adm
     if (Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri))
         client.BaseAddress = new Uri(uri.ToString().TrimEnd('/') + "/");
     client.Timeout = TimeSpan.FromSeconds(8);
-}));
+})).AddHttpMessageHandler<DeliveryServiceCredentialHandler>();
 
 // ===========================================================================
 // User-management integration — EXACT mirror of the salehly-gateway sibling.

@@ -7,11 +7,10 @@ namespace JeebGateway.Services.Clients;
 /// Presents delivery-service's <c>importauth</c> bearer on the request-owner surface
 /// (<c>/api/v1/requests*</c>).
 ///
-/// <para>Deliberately NOT <see cref="DeliveryServiceCredentialHandler"/>'s
-/// <c>X-Delivery-Service-Token</c>: delivery-service does not read that header anywhere
-/// in its source, so building a cutover on it would authenticate against nothing. The
-/// <c>importauth</c> guard is the credential that surface actually checks, and it fails
-/// closed when unset.</para>
+/// <para>This remains an independent credential in addition to the route-wide
+/// <see cref="DeliveryServiceCredentialHandler"/> header. Enabling provider-side
+/// service authentication must preserve the importauth guard on this surface.
+/// Both credentials fail closed when unset.</para>
 ///
 /// <para>Secret handling mirrors the sibling handler exactly — the mounted file is re-read
 /// per request so rotation needs no restart, the bytes are zeroed after decoding, and a

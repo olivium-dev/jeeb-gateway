@@ -18,7 +18,7 @@ public sealed class BoundedSessionRevocationTests
             {
                 SigningKey = "bounded-session-tests-signing-key-32bytes",
             }),
-            TimeProvider.System);
+            TimeProvider.System, new TestRefreshRoleAuthority(Array.Empty<string>(), ""));
 
         var revoked = await service.RevokeBoundedSessionAsync(
             "exact-family", RevocationReason.DevCredentialRemoved, CancellationToken.None);

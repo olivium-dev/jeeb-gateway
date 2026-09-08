@@ -63,8 +63,13 @@ public static class GatewayCredentialDeclarations
             new[] { File("JeebStateService:ServiceTokenFile") }),
         new GatewayCredentialDeclaration(
             "credential-delivery-service-token",
-            "FeatureFlags:UseUpstream:Delivery is true",
-            configuration => Flag(configuration, "FeatureFlags:UseUpstream:Delivery"),
+            "FeatureFlags:UseUpstream:Delivery is true or Services:Delivery:BaseUrl is configured",
+            // Cases, requests-owner and admin delivery reads register independently
+            // of the delivery flag. A configured owner URL arms those clients even
+            // when mirror/tiers modes are local; their narrower URL+mode conditions
+            // are therefore already covered by this union.
+            configuration => Flag(configuration, "FeatureFlags:UseUpstream:Delivery")
+                || NonEmpty(configuration, "Services:Delivery:BaseUrl"),
             new[]
             {
                 File("DELIVERY_SERVICE_TOKEN_FILE"),

@@ -190,6 +190,24 @@ public sealed class PartnerCredentialStore : IPartnerCredentialStore
             throw new InvalidOperationException("Runtime session binding conflicts.");
     }
 
+    public async Task<bool> ValidateRuntimeSessionAsync(
+        Guid holderId, string sessionFamilyId, DateTimeOffset deadline, CancellationToken ct)
+    {
+        if (holderId == Guid.Empty || string.IsNullOrWhiteSpace(sessionFamilyId)
+            || deadline <= _clock.GetUtcNow()) return false;
+        var key = ReservationKey(holderId);
+        var record = Deserialize((await _runtime.GetAsync(key, ct))?.ResponseBodyJson);
+        var session = DeserializeSession((await _runtime.GetAsync(key + SessionSuffix, ct))?.ResponseBodyJson);
+        return record is not null && session is not null
+            && record.HolderId == holderId && session.HolderId == holderId
+            && record.Login == RuntimeIdentifier(holderId) && session.Login == record.Login
+            && session.SessionFamilyId == sessionFamilyId && record.ExpiresAt == deadline
+            && record.ExpiresAt > _clock.GetUtcNow()
+            && await _runtime.GetAsync(key + ActiveSuffix, ct) is not null
+            && await _runtime.GetAsync(key + UsedSuffix, ct) is not null
+            && await _runtime.GetAsync(key + RevokedSuffix, ct) is null;
+    }
+
     public async Task<RuntimeCredentialSession> RemoveAsync(
         string login,
         Guid expectedHolderId,

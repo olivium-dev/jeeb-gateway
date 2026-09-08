@@ -1,0 +1,63 @@
+#!/usr/bin/env python3
+"""Explicit inventory for the new Python Engine surface; existing policy unchanged."""
+import ast
+from pathlib import Path
+import sys
+import yaml
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def check_engine(source):
+    tree = ast.parse(source)
+    assignments = {node.targets[0].id: node.value for node in tree.body if isinstance(node, ast.Assign)
+                   and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)}
+    assert ast.literal_eval(assignments['SOCKET']) == '/var/run/docker.sock'
+    assert ast.literal_eval(assignments['SERVICES']) == {'gateway': 'jeeb-staging-jeeb-gateway', 'delivery': 'jeeb-staging-delivery-service'}
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+             and node.func.id == 'request' and node.args and isinstance(node.args[0], ast.Constant)
+             and node.args[0].value != 'GET']
+    assert len(calls) == 2 and all(call.args[0].value == 'POST' for call in calls)
+    assert {ast.unparse(call.args[1]) for call in calls} == {"f'/v1.52/services/{service_id}/update?version={version}'", "'/v1.52/secrets/create'"}
+    submit = next(node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == 'submit')
+    text = ast.get_source_segment(source, submit)
+    assert text.index('self.captured(role) == baseline') < text.index('custody.write_exclusive(') < text.index("request('POST'")
+    assert 'self.authority()' in text and 'self.lock()' in text and 'self.existing_secret()' in text
+
+
+def main():
+    inventory = {str(path.relative_to(ROOT)) for path in (ROOT/'scripts').glob('*.py')
+                 if '/var/run/docker.sock' in path.read_text() and path.name != Path(__file__).name}
+    # Account explicitly for the offline argv fixture's expected socket string.
+    # It substitutes both SSH and Docker with temporary executables; do not hide
+    # the literal through concatenation or exclude every test from this inventory.
+    assert inventory == {'scripts/staging-paired-engine.py', 'scripts/test-staging-paired-ssh-argv.py'}
+    source = (ROOT/'scripts/staging-paired-engine.py').read_text()
+    check_engine(source)
+    for changed in (source.replace("'gateway': 'jeeb-staging-jeeb-gateway'", "'gateway': 'another-service'"),
+                    source + "\nrequest('POST', '/unreviewed', {})\n"):
+        try: check_engine(changed)
+        except AssertionError: pass
+        else: raise AssertionError('unsafe Engine inventory mutation accepted')
+    template = ROOT/'.github/workflows/jeeb-staging-paired-activation.yml'
+    document = yaml.safe_load(template.read_text())
+    assert document['permissions'] == {'contents': 'read', 'actions': 'read', 'packages': 'write'}
+    assert document['concurrency'] == {'group': 'jeeb-staging-jeeb-gateway', 'cancel-in-progress': False}
+    assert document['jobs']['paired']['timeout-minutes'] == 20
+    assert document['jobs']['paired']['environment'] == 'staging'
+    steps = document['jobs']['paired']['steps']
+    build = [step for step in steps if step.get('id') == 'build']
+    assert len(build) == 1 and build[0]['if'] == "inputs.operation == 'prepare'"
+    assert 'run-staging-paired-activation.sh' in str(steps)
+    assert not (ROOT/'docs/runbooks/jeeb-staging-paired-activation.workflow.yml').exists()
+    assert document['on']['workflow_dispatch']['inputs']['operation']['options'] == ['prepare', 'activate']
+    assert 'staging-paired-source-guard.sh' in str(steps)
+    assert 'GITHUB_TRIGGERING_ACTOR' in str(steps)
+    print('Paired Python Engine inventory and fixed registered workflow validated.')
+
+
+if __name__ == '__main__':
+    try: main()
+    except Exception:
+        print('Paired activation source policy failed closed.', file=sys.stderr)
+        sys.exit(1)

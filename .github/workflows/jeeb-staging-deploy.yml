@@ -888,6 +888,7 @@ jobs:
               service_auth_secret_name; do
               printf '%s=%q\n' "$variable" "${!variable}"
             done
+            cat scripts/staging-delivery-auth-retention.sh
             cat <<'REMOTE'
           set -euo pipefail
           case "$DEPLOYMENT_MODE" in normal|security-cutover|otp-cutover|devtool-reassert) ;; *) exit 64 ;; esac
@@ -1034,10 +1035,9 @@ jobs:
                 if [ "$DEPLOYMENT_MODE" = otp-cutover ]; then
                   add_rotated_secret "$service_auth_secret_name" jeeb_gateway_service_auth
                 fi
-                remove_secret_target delivery_service_token
                 remove_secret_target private_artifact_store_bearer_token
                 remove_secret_target data_export_token_signing_key
-                for stale_env in DELIVERY_SERVICE_TOKEN_FILE PRIVATE_ARTIFACT_STORE_BASE_URL \
+                for stale_env in PRIVATE_ARTIFACT_STORE_BASE_URL \
                   PRIVATE_ARTIFACT_STORE_BEARER_TOKEN_FILE DATA_EXPORT_TOKEN_SIGNING_KEY_FILE \
                   Services__Settlement__ApiToken Jwt__SigningKey UmJwt__SigningKey \
                   Services__Realtime__GuardianSecret Operations__RealtimeProbe__MintKey \
@@ -1159,6 +1159,7 @@ jobs:
             echo 'Incumbent full Spec changed before candidate construction' >&2
             exit 1
           }
+          delivery_auth_before=$(staging_delivery_auth_snapshot gateway "$current_spec")
           printf '%s\n' "${desired_env[@]}" | \
             jq -Rsc 'split("\n") | map(select(length > 0))' > "$desired_env_json"
           printf '%s\n' "${env_remove_keys[@]}" | \
@@ -1288,6 +1289,7 @@ jobs:
               ' "$current_spec" > "$candidate"
           fi
           jq -e 'type == "object"' "$candidate" >/dev/null
+          staging_delivery_auth_assert_retained "$delivery_auth_before" gateway "$candidate"
           cat "$candidate"
           trap - EXIT
           rm -rf -- "$build_root"

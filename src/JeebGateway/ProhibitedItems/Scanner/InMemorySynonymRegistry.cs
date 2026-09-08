@@ -12,6 +12,8 @@ public class InMemorySynonymRegistry : IProhibitedItemSynonymRegistry
 {
     private readonly ConcurrentDictionary<string, string[]> _map =
         new(StringComparer.OrdinalIgnoreCase);
+    private readonly object _registrationLock = new();
+    private IReadOnlyDictionary<string, string[]> _groups = new Dictionary<string, string[]>();
 
     public InMemorySynonymRegistry()
     {
@@ -19,13 +21,17 @@ public class InMemorySynonymRegistry : IProhibitedItemSynonymRegistry
         // canonical item. Keep entries to terms a moderator would expect to see
         // in a free-text delivery description; broad slang lives in the admin
         // alias UI when that ships.
-        Register("knife", "blade", "dagger", "switchblade", "machete", "cleaver");
-        Register("gun", "firearm", "pistol", "rifle", "handgun", "revolver", "shotgun");
-        Register("ammunition", "ammo", "bullets", "cartridges", "rounds");
+        Register("knife", "knives", "blade", "dagger", "switchblade", "machete", "cleaver");
+        Register("gun", "guns", "firearm", "firearms", "pistol", "rifle", "handgun", "handguns", "revolver", "shotgun");
+        Register("weapon", "weapons", "sword", "swords", "machete", "machetes");
+        // A cylinder is a shape, not evidence of compressed gas. Keep this
+        // category phrase-scoped; never reverse-index the bare shape noun.
+        Register("compressed gas cylinders", "propane", "butane", "gas cylinder", "gas cylinders", "propane tank", "oxygen cylinder", "gas canister");
+        Register("ammunition", "ammo", "bullets", "cartridges");
         Register("explosive", "explosives", "dynamite", "tnt", "c4", "grenade", "detonator");
         Register("drug", "drugs", "narcotic", "narcotics", "cocaine", "heroin", "meth", "methamphetamine", "marijuana", "cannabis", "hashish");
         Register("alcohol", "liquor", "whiskey", "vodka", "beer", "wine");
-        Register("fireworks", "firecracker", "firecrackers", "rocket", "rockets");
+        Register("fireworks", "firecracker", "firecrackers");
         Register("flammable", "gasoline", "petrol", "kerosene", "lighter fluid");
         Register("hazardous material", "hazmat", "toxic", "corrosive", "radioactive");
         Register("counterfeit", "fake currency", "forged", "knockoff");
@@ -43,6 +49,26 @@ public class InMemorySynonymRegistry : IProhibitedItemSynonymRegistry
     public void Register(string itemName, params string[] synonyms)
     {
         if (string.IsNullOrWhiteSpace(itemName)) return;
-        _map[itemName.Trim()] = synonyms ?? Array.Empty<string>();
+        lock (_registrationLock)
+        {
+            _map[itemName.Trim()] = synonyms?.ToArray() ?? Array.Empty<string>();
+            var groups = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+            foreach (var entry in _map)
+            {
+                var terms = entry.Value.Prepend(entry.Key).Select(TextNormalizer.Normalize)
+                    .Where(term => term.Length > 0).Distinct().ToArray();
+                foreach (var token in terms.Where(term => TextNormalizer.Tokenize(term).Count == 1))
+                {
+                    if (!groups.TryGetValue(token, out var group))
+                        groups[token] = group = new HashSet<string>(StringComparer.Ordinal);
+                    group.UnionWith(terms);
+                }
+            }
+            Volatile.Write(ref _groups, groups.ToDictionary(entry => entry.Key, entry => entry.Value.ToArray()));
+        }
     }
+
+    public IReadOnlyList<string> ExpandToken(string token) =>
+        Volatile.Read(ref _groups).TryGetValue(TextNormalizer.Normalize(token), out var values)
+            ? values : Array.Empty<string>();
 }

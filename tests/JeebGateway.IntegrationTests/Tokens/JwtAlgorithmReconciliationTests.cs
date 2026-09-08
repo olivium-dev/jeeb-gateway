@@ -89,7 +89,7 @@ public class JwtAlgorithmReconciliationTests
             new InMemoryRefreshTokenStore(),
             new FakeUsersStoreAdapter(),
             options,
-            TimeProvider.System);
+            TimeProvider.System, new TestRefreshRoleAuthority(new FakeUsersStoreAdapter()));
     }
 
     private sealed class FakeUsersStoreAdapter : IUsersStoreAdapter

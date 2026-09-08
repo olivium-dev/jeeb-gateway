@@ -14,6 +14,41 @@ namespace JeebGateway.IntegrationTests.Requests;
 /// </summary>
 public class RequestCreateValidationTests
 {
+    [Theory]
+    [InlineData("a")]
+    [InlineData("ab  c")]
+    [InlineData("    abcd ")]
+    [InlineData("a\t\n b")]
+    public void DescriptionLength_Short_Uses_Field_Problem(string description)
+    {
+        var problem = RequestCreateValidation.ValidateDescriptionLength(description)
+            .Should().BeOfType<Microsoft.AspNetCore.Mvc.ValidationProblemDetails>().Subject;
+        problem.Status.Should().Be(400);
+        problem.Type.Should().Be("https://jeeb.dev/errors/validation");
+        problem.Errors["description"].Should().Equal("too-short");
+        problem.Extensions["field"].Should().Be("description");
+        problem.Extensions["minLength"].Should().Be(5);
+        problem.Extensions.Should().NotContainKey("maxLength");
+    }
+
+    [Theory]
+    [InlineData("abcde")]
+    [InlineData("  ab\t\ncd  ")]
+    public void DescriptionLength_Collapsed_Minimum_Is_Valid(string description) =>
+        RequestCreateValidation.ValidateDescriptionLength(description).Should().BeNull();
+
+    [Fact]
+    public void DescriptionLength_Maximum_Is_Inclusive_And_Uses_Same_Field_Problem()
+    {
+        RequestCreateValidation.ValidateDescriptionLength(new string('x', 500)).Should().BeNull();
+        var problem = RequestCreateValidation.ValidateDescriptionLength(new string('x', 501))
+            .Should().BeOfType<Microsoft.AspNetCore.Mvc.ValidationProblemDetails>().Subject;
+        problem.Errors["description"].Should().Equal("too-long");
+        problem.Extensions["maxLength"].Should().Be(500);
+        problem.Extensions["field"].Should().Be("description");
+        problem.Extensions.Should().NotContainKey("minLength");
+    }
+
     // ----- description-required (legacy + JSON surfaces) -----
 
     [Fact]

@@ -8,6 +8,8 @@ using Microsoft.AspNetCore.Mvc.Testing;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Time.Testing;
+using System.Threading.Channels;
 using Xunit;
 
 namespace JeebGateway.IntegrationTests.Geolocation;
@@ -52,10 +54,13 @@ public sealed class GeoHistoryThrottleTests
     [Fact]
     public async Task Four_Concurrent_Points_Honor_Throttle_Until_All_Are_Durable()
     {
+        var clock = new ObservedTimeProvider();
+        var interval = TimeSpan.FromMilliseconds(25);
         var handler = new IntervalRateLimitHandler(
             initialConcurrency: 4,
-            interval: TimeSpan.FromMilliseconds(25));
-        var client = Client(handler, maxThrottleDelayMs: 50, maxThrottleRetries: 4);
+            interval: interval,
+            clock: clock);
+        var client = Client(handler, maxThrottleDelayMs: 50, maxThrottleRetries: 4, clock: clock);
         var t0 = DateTimeOffset.Parse("2026-08-06T09:14:20Z");
 
         var writes = Enumerable.Range(0, 4)
@@ -68,12 +73,68 @@ public sealed class GeoHistoryThrottleTests
                 t0.AddSeconds(index))))
             .ToArray();
 
-        await Task.WhenAll(writes).WaitAsync(TimeSpan.FromSeconds(5));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        // Wait until every remaining contender has actually scheduled its retry
+        // before advancing the shared clock. Real scheduler load cannot consume
+        // another retry merely because a 25ms timer woke near a wall-clock edge.
+        for (var waiting = 3; waiting > 0; waiting--)
+        {
+            for (var i = 0; i < waiting; i++)
+                (await clock.ScheduledDelays.Reader.ReadAsync(timeout.Token)).Should().Be(interval);
+            handler.Accepted.Should().Be(4 - waiting);
+            clock.Advance(interval - TimeSpan.FromMilliseconds(1));
+            handler.Accepted.Should().Be(4 - waiting, "Retry-After must not be shortened");
+            clock.Advance(TimeSpan.FromMilliseconds(1));
+        }
+        await Task.WhenAll(writes).WaitAsync(timeout.Token);
 
         handler.Accepted.Should().Be(4,
             "each device-accepted fix must reach durable 30-day history within the bounded retry budget");
-        handler.Throttled.Should().BeGreaterThan(0,
-            "the positive control must exercise the same expected 429 path seen on MSI");
+        handler.Throttled.Should().Be(6,
+            "three, then two, then one contender must honor each throttle window");
+    }
+
+    [Fact]
+    public async Task Cancellation_Stops_A_Pending_Throttle_Without_Another_Dispatch()
+    {
+        var clock = new ObservedTimeProvider();
+        var handler = new ThrottleThenAcceptHandler(TimeSpan.FromMilliseconds(25));
+        var client = Client(handler, maxThrottleDelayMs: 50, clock: clock);
+        using var cancellation = new CancellationTokenSource();
+        var write = client.RecordTrackPointAsync(
+            "delivery-1", "courier-1", 33.9, 35.5, 4,
+            DateTimeOffset.Parse("2026-08-06T09:14:20Z"), cancellation.Token);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        (await clock.ScheduledDelays.Reader.ReadAsync(timeout.Token))
+            .Should().Be(TimeSpan.FromMilliseconds(25));
+        cancellation.Cancel();
+        Func<Task> cancelledWrite = () => write.WaitAsync(timeout.Token);
+        await cancelledWrite.Should().ThrowAsync<OperationCanceledException>()
+            .Where(error => error.CancellationToken == cancellation.Token);
+        clock.Advance(TimeSpan.FromSeconds(1));
+        handler.Attempts.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Virtual_Time_Does_Not_Extend_The_Configured_Retry_Budget()
+    {
+        var clock = new ObservedTimeProvider();
+        var handler = new TwelveThrottlesThenAcceptHandler();
+        var client = Client(handler, maxThrottleDelayMs: 50, maxThrottleRetries: 2, clock: clock);
+        var write = client.RecordTrackPointAsync(
+            "delivery-1", "courier-1", 33.9, 35.5, 4,
+            DateTimeOffset.Parse("2026-08-06T09:14:20Z"));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        for (var retry = 0; retry < 2; retry++)
+        {
+            (await clock.ScheduledDelays.Reader.ReadAsync(timeout.Token))
+                .Should().Be(TimeSpan.FromMilliseconds(5));
+            clock.Advance(TimeSpan.FromMilliseconds(5));
+        }
+        Func<Task> exhaustedWrite = () => write.WaitAsync(timeout.Token);
+        await exhaustedWrite.Should().ThrowAsync<HttpRequestException>()
+            .Where(error => error.StatusCode == HttpStatusCode.TooManyRequests);
+        handler.Attempts.Should().Be(3, "two retries must not become an unbounded loop");
     }
 
     [Fact]
@@ -118,7 +179,8 @@ public sealed class GeoHistoryThrottleTests
     private static GeoHistoryClient Client(
         HttpMessageHandler handler,
         int maxThrottleDelayMs,
-        int maxThrottleRetries = 2)
+        int maxThrottleRetries = 2,
+        TimeProvider? clock = null)
     {
         return new GeoHistoryClient(
             new HttpClient(handler) { BaseAddress = new Uri("https://geo.test/") },
@@ -128,12 +190,14 @@ public sealed class GeoHistoryThrottleTests
                 ThrottleFallbackDelayMs = 5,
                 MaxThrottleDelayMs = maxThrottleDelayMs,
             }),
-            NullLogger<GeoHistoryClient>.Instance);
+            NullLogger<GeoHistoryClient>.Instance,
+            clock ?? TimeProvider.System);
     }
 
     private sealed class IntervalRateLimitHandler(
         int initialConcurrency,
-        TimeSpan interval) : HttpMessageHandler
+        TimeSpan interval,
+        TimeProvider clock) : HttpMessageHandler
     {
         private readonly object _gate = new();
         private readonly TaskCompletionSource _initialBarrier = new(
@@ -157,7 +221,7 @@ public sealed class GeoHistoryThrottleTests
 
             lock (_gate)
             {
-                var now = DateTimeOffset.UtcNow;
+                var now = clock.GetUtcNow();
                 if (now >= _nextEligible)
                 {
                     _nextEligible = now + interval;
@@ -172,6 +236,23 @@ public sealed class GeoHistoryThrottleTests
                 };
             }
         }
+    }
+
+    private sealed class ObservedTimeProvider : TimeProvider
+    {
+        private readonly FakeTimeProvider _clock = new();
+        public Channel<TimeSpan> ScheduledDelays { get; } = Channel.CreateUnbounded<TimeSpan>();
+        public override DateTimeOffset GetUtcNow() => _clock.GetUtcNow();
+        public override long GetTimestamp() => _clock.GetTimestamp();
+        public override long TimestampFrequency => _clock.TimestampFrequency;
+        public override ITimer CreateTimer(TimerCallback callback, object? state,
+            TimeSpan dueTime, TimeSpan period)
+        {
+            var timer = _clock.CreateTimer(callback, state, dueTime, period);
+            ScheduledDelays.Writer.TryWrite(dueTime);
+            return timer;
+        }
+        public void Advance(TimeSpan amount) => _clock.Advance(amount);
     }
 
     private sealed class ThrottleThenAcceptHandler(TimeSpan retryAfter) : HttpMessageHandler

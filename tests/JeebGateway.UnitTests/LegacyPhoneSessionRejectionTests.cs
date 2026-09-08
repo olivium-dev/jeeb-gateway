@@ -122,9 +122,9 @@ public sealed class LegacyPhoneSessionRejectionTests
         // A canonical-GUID subject is never legacy-rejected: it rotates normally.
         result.Outcome.Should().Be(RefreshOutcome.Ok);
         result.Tokens.Should().NotBeNull();
-        // G5: the record carries the minted role context, so the store is not consulted.
-        users.RoleLookups.Should().Be(0);
-        users.ActiveRoleLookups.Should().Be(0);
+        // The explicit test authority must be consulted even with a snapshot.
+        users.RoleLookups.Should().Be(1);
+        users.ActiveRoleLookups.Should().Be(1);
     }
 
     [Fact]
@@ -196,7 +196,8 @@ public sealed class LegacyPhoneSessionRejectionTests
                 AccessTokenMinutes = 15,
                 RefreshTokenDays = 30,
             }),
-            TimeProvider.System);
+            TimeProvider.System,
+            new TestRefreshRoleAuthority(users));
 
     private static RefreshToken Token(string rawToken, string userId) => new()
     {

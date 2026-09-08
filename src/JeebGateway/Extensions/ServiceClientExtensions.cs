@@ -65,6 +65,7 @@ public static class ServiceClientExtensions
         services.AddTransient<Services.Clients.HeartBeatServiceAuthKeyHandler>();
         // W5-02 request-owner surface credential (delivery-service importauth bearer).
         services.AddTransient<Services.Clients.DeliveryImportCredentialHandler>();
+        services.AddTransient<Services.Clients.DeliveryServiceCredentialHandler>();
 
         // settlement-service — static SERVICE-scope bearer. The ADMIN scope is never wired here.
         services.AddTransient<Financials.SettlementServiceTokenHandler>();
@@ -132,7 +133,8 @@ public static class ServiceClientExtensions
         //   migrates: DeliveriesController, RequestsController, RequestOffersController,
         //             OffersController, CancellationController, OtpHandoverController
         //             (currently IRequestsStore + InMemoryRequestsStore)
-        AddNamedDownstreamClient(services, config, "delivery", "Services:Delivery:BaseUrl");
+        AddNamedDownstreamClient(services, config, "delivery", "Services:Delivery:BaseUrl")
+            .AddHttpMessageHandler<DeliveryServiceCredentialHandler>();
 
         // score-taking-service — DELETED (owner directive: remove completely, never use).
         // Jeeb ratings are owned by the in-gateway mutual-blind state machine with the
@@ -165,22 +167,25 @@ public static class ServiceClientExtensions
                 BindBaseAddress(http, config, "Services:Auth")));
         AttachStandardPipeline(
             services.AddHttpClient<IDeliveryServiceClient, DeliveryServiceClient>(http =>
-                BindBaseAddress(http, config, "Services:Delivery")));
+                BindBaseAddress(http, config, "Services:Delivery")))
+            .AddHttpMessageHandler<DeliveryServiceCredentialHandler>();
         // Cases authorize delivery membership at the gateway edge. Their
         // history/incident client stays on the private network and deliberately
         // carries neither caller bearer nor X-Service-Auth headers.
         AttachResilienceOnly(
             services.AddHttpClient<ICaseDeliveryClient, CaseDeliveryClient>(http =>
-                BindBaseAddress(http, config, "Services:Delivery")));
+                BindBaseAddress(http, config, "Services:Delivery")))
+            .AddHttpMessageHandler<DeliveryServiceCredentialHandler>();
         // W5-02 request-owner surface. Resilience only + the importauth bearer: the
         // standard pipeline forwards the CALLER's bearer, which is an end-user token and
-        // would fail a service-credential check. Deliberately not the
-        // X-Delivery-Service-Token handler — delivery-service does not read that header.
+        // would fail a service-credential check. The importauth bearer remains
+        // independent of the global X-Delivery-Service-Token boundary; both apply.
         AttachResilienceOnly(
             services.AddHttpClient<JeebGateway.Requests.IRequestsOwnerClient,
                                    JeebGateway.Requests.RequestsOwnerClient>(http =>
                 BindBaseAddress(http, config, "Services:Delivery")))
-            .AddHttpMessageHandler<DeliveryImportCredentialHandler>();
+            .AddHttpMessageHandler<DeliveryImportCredentialHandler>()
+            .AddHttpMessageHandler<DeliveryServiceCredentialHandler>();
         // IMatchingServiceClient typed registration — REMOVED (JEBV4-220 / E25).
         // The standalone matching-service read path is retired; nothing dials
         // Services:Matching anymore.

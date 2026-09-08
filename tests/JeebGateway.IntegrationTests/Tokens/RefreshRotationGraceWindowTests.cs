@@ -118,7 +118,7 @@ public class RefreshRotationGraceWindowTests
             RefreshRotationGraceSeconds = graceSeconds,
         });
 
-        return new TokenService(store, new FakeUsersStoreAdapter(), options, TimeProvider.System);
+        return new TokenService(store, new FakeUsersStoreAdapter(), options, TimeProvider.System, new TestRefreshRoleAuthority(new FakeUsersStoreAdapter()));
     }
 
     /// <summary>

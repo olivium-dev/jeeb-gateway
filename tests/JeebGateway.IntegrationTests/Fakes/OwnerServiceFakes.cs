@@ -21,6 +21,22 @@ internal static class OwnerServiceFakes
         services.AddSingleton<InMemoryUsersStore>();
         services.AddSingleton<IUsersStore>(sp =>
             sp.GetRequiredService<InMemoryUsersStore>());
+        // These hosts explicitly fake the identity owner. Keep refresh pointed
+        // at that same fixture; real owner HTTP/absence/fault behavior is covered
+        // by OwnerRefreshRoleAuthorityTests, not an unconfigured external URL.
+        services.RemoveAll<JeebGateway.Tokens.IRefreshRoleAuthority>();
+        services.AddSingleton<JeebGateway.Tokens.IRefreshRoleAuthority, FixtureRefreshRoles>();
+    }
+
+    private sealed class FixtureRefreshRoles(IUsersStore users) : JeebGateway.Tokens.IRefreshRoleAuthority
+    {
+        public async Task<JeebGateway.Tokens.RefreshRoleAuthorityResult> ResolveAsync(string userId, CancellationToken ct, JeebGateway.Tokens.RefreshToken? session = null)
+        {
+            var profile = await users.GetByIdAsync(userId, ct);
+            return JeebGateway.Tokens.RefreshRoleAuthorityResult.FromContext(profile is not null && !profile.IsSuspended && profile.Roles.Contains(profile.ActiveRole)
+                ? new JeebGateway.Tokens.TokenRoleContext(profile.Roles, profile.ActiveRole) : null);
+        }
+        public Task<bool> ProbeAsync(CancellationToken ct) => Task.FromResult(true);
     }
 
     public static void AllowAllAccounts(IServiceCollection services)
@@ -45,6 +61,32 @@ internal static class OwnerServiceFakes
 
     public static void UseEmptyModerationCatalog(IServiceCollection services)
         => ReplaceModerationOwner(services);
+
+    public static void UseLiveShapedModerationCatalog(IServiceCollection services)
+    {
+        services.RemoveAll<IProhibitedItemsStore>();
+        services.AddSingleton<IProhibitedItemsStore>(CreateLiveShapedModerationStore());
+    }
+
+    // Names/categories/severity from the recorded 2026-09-05 MSI catalog; no live IDs or writes.
+    public static InMemoryProhibitedItemsStore CreateLiveShapedModerationStore()
+    {
+        var store = new InMemoryProhibitedItemsStore();
+        foreach (var (name, category) in new[]
+        {
+            ("Cannabis and derivatives", "drugs"), ("Illegal narcotics", "drugs"),
+            ("Compressed gas cylinders", "hazardous_materials"),
+            ("Corrosive chemicals", "hazardous_materials"),
+            ("Flammable liquids", "hazardous_materials"),
+            ("Radioactive materials", "hazardous_materials"),
+            ("Cash and securities", "other"), ("Human remains", "other"), ("Live animals", "other"),
+            ("Controlled substances", "prescription_medication"),
+            ("Prescription medication", "prescription_medication"),
+            ("Explosives and fireworks", "weapons"), ("Firearms", "weapons"),
+            ("Knives and bladed weapons", "weapons")
+        }) Seed(store, name, category, ProhibitedSeverity.Block);
+        return store;
+    }
 
     private static InMemoryProhibitedItemsStore ReplaceModerationOwner(
         IServiceCollection services)

@@ -29,20 +29,20 @@ public sealed class AdminAuthController : ControllerBase
     internal const string CsrfCookie = AdminSessionCookies.CsrfCookie;
     internal const string CsrfHeader = AdminSessionCookies.CsrfHeader;
 
-    private readonly IUserManagementDualRoleClient _roles;
+    private readonly IRefreshRoleAuthority _roleAuthority;
     private readonly IDevSeededRoleStore _seededRoles;
     private readonly ITokenService _tokens;
     private readonly IWebHostEnvironment _environment;
     private readonly IConfiguration _configuration;
 
     public AdminAuthController(
-        IUserManagementDualRoleClient roles,
+        IRefreshRoleAuthority roleAuthority,
         IDevSeededRoleStore seededRoles,
         ITokenService tokens,
         IWebHostEnvironment environment,
         IConfiguration configuration)
     {
-        _roles = roles;
+        _roleAuthority = roleAuthority;
         _seededRoles = seededRoles;
         _tokens = tokens;
         _environment = environment;
@@ -52,6 +52,7 @@ public sealed class AdminAuthController : ControllerBase
     [HttpPost("refresh")]
     [ProducesResponseType(typeof(AdminAccessTokenResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> Refresh(CancellationToken ct)
     {
         PreventCaching();
@@ -61,7 +62,7 @@ public sealed class AdminAuthController : ControllerBase
             return ProblemResult(401, "invalid_refresh", "Sign in again.");
 
         var result = await _tokens.RefreshAsync(refresh, ResolveAdminRolesAsync, ct);
-        if (result.Outcome == RefreshOutcome.RoleResolutionFailed)
+        if (result.Outcome == RefreshOutcome.AuthorityUnavailable)
             return ProblemResult(503, "identity_unavailable", "Administrator roles could not be verified.");
         if (result.Outcome != RefreshOutcome.Ok || result.Tokens is null)
         {
@@ -76,17 +77,18 @@ public sealed class AdminAuthController : ControllerBase
 
     private async Task<TokenRoleContext?> ResolveAdminRolesAsync(string userId, CancellationToken ct)
     {
-        var result = await _roles.GetUserRolesAsync(userId, ct);
-        var roles = (result?.AvailableRoles ?? Array.Empty<string>())
-            .Union(_seededRoles.Resolve(userId, null) ?? Array.Empty<string>(), StringComparer.OrdinalIgnoreCase)
-            .Where(static role => !string.IsNullOrWhiteSpace(role))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        if (!HasPortalAccess(roles)) return null;
-        var activeRole = result?.ActiveRole;
-        if (string.IsNullOrWhiteSpace(activeRole) || !roles.Contains(activeRole, StringComparer.OrdinalIgnoreCase))
-            activeRole = roles[0];
-        return new TokenRoleContext(roles, activeRole);
+        RefreshRoleAuthorityResult result;
+        try { result = await _roleAuthority.ResolveAsync(userId, ct); }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+        catch (Exception) { throw new RefreshRoleAuthorityUnavailableException(); }
+        // Reuse the authoritative parser so a second malformed/unavailable read
+        // preserves the browser credential, while confirmed identity deletion or
+        // grant revocation remains an authentication failure.
+        if (result.Outcome == RefreshRoleAuthorityOutcome.Unavailable)
+            throw new RefreshRoleAuthorityUnavailableException();
+        if (result.Outcome != RefreshRoleAuthorityOutcome.Valid || result.Context is null
+            || !HasPortalAccess(result.Context.Roles)) return null;
+        return result.Context;
     }
 
     [HttpPost("logout")]
