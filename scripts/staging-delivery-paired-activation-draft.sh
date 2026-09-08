@@ -12,7 +12,7 @@ staging_delivery_paired_activation_draft() {
     paired_require_existing_credential paired_validate_narrow_candidates \
     paired_probe_delivery_schema paired_journal_begin paired_journal_advance \
     paired_capture_role paired_submit_role_cas paired_verify_gateway \
-    paired_verify_delivery paired_verify_authenticated_wire; do
+    paired_verify_delivery paired_verify_authenticated_wire paired_verify_both_final; do
     declare -F "$callback" >/dev/null || {
       echo 'Paired activation draft integration incomplete; no submission authorized.' >&2
       return 1
@@ -23,7 +23,6 @@ staging_delivery_paired_activation_draft() {
   paired_require_exact_daemon || return 1
   paired_require_existing_credential "$root" || return 1
   paired_validate_narrow_candidates "$root" || return 1
-  paired_probe_delivery_schema "$root" || return 1
   # Durable, exclusive begin must reject any existing activation history rather
   # than treating absent current declarations as permission to activate again.
   paired_journal_begin "$root" || return 1
@@ -41,6 +40,11 @@ staging_delivery_paired_activation_draft() {
     staging_gateway_lock_assert || return 1
     paired_require_current_protected_builds "$root" || return 1
     paired_require_exact_daemon || return 1
+    if [ "$role" = delivery ]; then
+      # Re-attest the current preserved database only after gateway readiness.
+      # A build receipt records an earlier probe, never perpetual schema approval.
+      paired_probe_delivery_schema "$root" || return 1
+    fi
     # Persist pending BEFORE POST. Failure, interruption, or lost acknowledgement
     # leaves the durable phase pending and cannot authorize automatic re-entry.
     paired_journal_advance "$role-submission-pending" "$root" || return 1
@@ -60,6 +64,7 @@ staging_delivery_paired_activation_draft() {
     paired_journal_advance "$role-verified" "$root" || return 1
   done
   staging_gateway_lock_assert || return 1
+  paired_verify_both_final "$root" || return 1
   paired_journal_advance complete "$root" || return 1
   echo 'Paired activation transaction verified.'
 }

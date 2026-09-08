@@ -29,7 +29,7 @@ class Retention(unittest.TestCase):
             metadata = [{"ID": "dedicatedid", "Spec": {"Name": NAME, "Labels": {
                 "jeeb.environment": "staging", "jeeb.purpose": "delivery-service-auth",
                 "jeeb.version": "1"}}}]
-        with tempfile.TemporaryDirectory() as temp:
+        with tempfile.TemporaryDirectory(dir=Path.home()) as temp:
             p = Path(temp)
             (p / "before").write_text(json.dumps(before))
             (p / "after").write_text(json.dumps(after if after is not None else before))
@@ -42,7 +42,7 @@ docker() {
 }
 before=$(staging_delivery_auth_snapshot "$2" "$AUTH_FIXTURE/before")
 staging_delivery_auth_assert_retained "$before" "$2" "$AUTH_FIXTURE/after"
-""", "test", str(SCRIPT), role], env={**os.environ, "AUTH_FIXTURE": temp},
+""", "test", str(SCRIPT), role], env={**os.environ, "AUTH_FIXTURE": temp, "HOME": temp},
                 capture_output=True, text=True)
             return result.returncode
 

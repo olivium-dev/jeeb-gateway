@@ -19,6 +19,7 @@ paired_probe_delivery_schema() { gate schema; }
 paired_verify_gateway() { gate gateway-proof; }
 paired_verify_delivery() { gate delivery-proof; }
 paired_verify_authenticated_wire() { gate wire-proof; }
+paired_verify_both_final() { gate both-final; }
 paired_journal_begin() {
   gate journal-begin || return 1
   [ ! -e "$FIXTURE/journal" ] || return 1
@@ -74,17 +75,30 @@ class DraftOrderingTests(unittest.TestCase):
         result, events, journal = self.run_draft()
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual(["POST-gateway", "POST-delivery"], [x for x in events if x.startswith("POST-")])
-        self.assertLess(events.index("schema"), events.index("POST-gateway"))
+        self.assertLess(events.index("gateway-proof"), events.index("schema"))
+        self.assertLess(events.index("schema"), events.index("POST-delivery"))
         self.assertLess(events.index("gateway-proof"), events.index("POST-delivery"))
         self.assertLess(events.index("wire-proof"), events.index("complete"))
         self.assertEqual("complete", journal)
 
     def test_missing_or_failed_preflight_never_submits(self):
-        for failure in ("missing-adapter", "lock", "authority", "daemon", "credential", "candidate", "schema", "journal-begin"):
+        for failure in ("missing-adapter", "lock", "authority", "daemon", "credential", "candidate", "journal-begin"):
             with self.subTest(failure=failure):
                 result, events, _ = self.run_draft(failure)
                 self.assertNotEqual(0, result.returncode)
                 self.assertFalse(any(x.startswith("POST-") for x in events))
+
+    def test_schema_after_gateway_failure_never_submits_delivery(self):
+        result, events, journal = self.run_draft("schema")
+        self.assertNotEqual(0, result.returncode)
+        self.assertEqual(["POST-gateway"], [x for x in events if x.startswith("POST-")])
+        self.assertEqual("gateway-verified", journal)
+
+    def test_final_dual_capture_failure_cannot_complete(self):
+        result, events, journal = self.run_draft("both-final")
+        self.assertNotEqual(0, result.returncode)
+        self.assertEqual("delivery-verified", journal)
+        self.assertNotIn("complete", events)
 
     def test_uncertain_or_unverified_gateway_never_activates_delivery(self):
         for failure in ("gateway-lost-ack", "gateway-proof", "gateway-verified"):

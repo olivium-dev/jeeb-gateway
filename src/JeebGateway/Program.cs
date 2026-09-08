@@ -43,6 +43,12 @@ using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
 
+if (args.Length > 0 && args[0] == "--staging-delivery-auth-probe")
+{
+    Environment.ExitCode = await DeliveryActivationProbe.RunAsync(args);
+    return;
+}
+
 var builder = WebApplication.CreateBuilder(args);
 
 // ---------------------------------------------------------------------------

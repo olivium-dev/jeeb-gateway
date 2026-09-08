@@ -1532,4 +1532,11 @@ print("Production/staging authority, immutable artifacts, and loud owner blocks 
 PY
 
 bash scripts/test-reject-staging-gateway-alias.sh
+python3 scripts/check-staging-paired-activation.py
+python3 scripts/test-staging-paired-custody.py
+python3 scripts/test-staging-paired-engine.py
+python3 scripts/test-staging-paired-build-receipt.py
+python3 scripts/test-staging-delivery-paired-activation-draft.py
+python3 scripts/test-staging-delivery-auth-retention.py
+python3 scripts/test_activation_history.py
 echo "Forward-only authority audit PASSED"
