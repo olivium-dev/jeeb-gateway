@@ -89,17 +89,20 @@ public class S03JeeberDeliveryListUpstreamAcceptTests
     }
 
     [Fact]
-    public async Task Accept_WhenNeitherEnvelopeNorIndexHasJeeber_ListStaysEmpty_AcceptStill200()
+    public async Task Accept_WhenNeitherEnvelopeNorIndexHasJeeber_CompensatesAndReturns409()
     {
-        // Degrade: no winner resolvable anywhere → the local row's JeeberId is never blanked
-        // (no-op write), the jeeber list is empty, and the committed accept still returns 200.
+        // No winner is resolvable anywhere, so the gateway cannot make the canonical
+        // assignment. It compensates the exact acceptance generation and must not
+        // report a successful accept or stamp a local assignee.
         using var factory = NewFactory(envelopeJeeberId: null);
         var requestId = await SeedRequestAsync(factory, ClientOwner);
         SeedRouting(factory, "offer-x3", requestId); // 2-arg: no jeeber recorded
 
         var accept = await ClientActor(factory, ClientOwner)
             .PostAsync("/v1/offers/offer-x3/accept", content: null);
-        accept.StatusCode.Should().Be(HttpStatusCode.OK);
+        accept.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        ((FakeAcceptOfferClient)factory.Services.GetRequiredService<IOfferServiceClient>())
+            .CompensationCalls.Should().Be(1);
 
         var deliveries = await JeeberActor(factory, Winner)
             .GetFromJsonAsync<PagedEnvelope>("/v1/deliveries");
@@ -179,6 +182,8 @@ public class S03JeeberDeliveryListUpstreamAcceptTests
     private sealed class FakeAcceptOfferClient : IOfferServiceClient
     {
         private readonly OfferAcceptResult _result;
+        public int CompensationCalls { get; private set; }
+
         public FakeAcceptOfferClient(string? envelopeJeeberId)
             => _result = new OfferAcceptResult
             {
@@ -188,11 +193,22 @@ public class S03JeeberDeliveryListUpstreamAcceptTests
                     AcceptedOfferId = "offer",
                     JeeberId = envelopeJeeberId, // null reproduces the observed live envelope
                     RejectedOfferIds = Array.Empty<string>(),
+                    AcceptanceToken = "00000000-0000-0000-0000-000000000001",
                 },
             };
 
         public Task<OfferAcceptResult> AcceptWithStatusAsync(string actingUserId, string requestId, string offerId, string idempotencyKey, CancellationToken ct)
             => Task.FromResult(_result);
+        public Task<OfferAcceptCompensationResult> CompensateAcceptedOfferAsync(
+            string actingUserId, string requestId, string offerId, string acceptIdempotencyKey,
+            string? acceptanceToken, CancellationToken ct)
+        {
+            CompensationCalls++;
+            return Task.FromResult(new OfferAcceptCompensationResult
+            {
+                Status = OfferAcceptCompensationStatus.Compensated,
+            });
+        }
         public Task<OfferAcceptWire> AcceptAsync(string actingUserId, string requestId, string offerId, string idempotencyKey, CancellationToken ct)
             => throw new NotSupportedException();
         public Task<RequestMirrorResult> MirrorRequestAsync(string actingUserId, string requestId, string clientId, CancellationToken ct)

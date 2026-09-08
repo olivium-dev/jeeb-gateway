@@ -286,11 +286,13 @@ public class OfferAcceptLifecyclePushTests
                 {
                     AcceptedOfferId = "v1-offer-win",
                     JeeberId = "v1-jeeber-winner",
-                    RejectedOfferIds = new[] { "v1-loser-a" }
+                    RejectedOfferIds = new[] { "v1-loser-a" },
+                    AcceptanceToken = "00000000-0000-0000-0000-000000000001",
                 }
             }
         };
         using var factory = NewFactory(fake, push);
+        await SeedAssignableRequestAsync(factory, "v1-req", "v1-client");
         var index = factory.Services.GetRequiredService<IOfferRequestIndex>();
         index.Record("v1-offer-win", "v1-req", "v1-jeeber-winner");
         index.Record("v1-loser-a", "v1-req", "v1-jeeber-loser-a");
@@ -327,11 +329,13 @@ public class OfferAcceptLifecyclePushTests
                     AcceptedOfferId = "v1-offer-win2",
                     JeeberId = "v1-jeeber-winner2",
                     // One resolvable loser, one NOT recorded in the index.
-                    RejectedOfferIds = new[] { "v1-offer-known", "v1-offer-unknown" }
+                    RejectedOfferIds = new[] { "v1-offer-known", "v1-offer-unknown" },
+                    AcceptanceToken = "00000000-0000-0000-0000-000000000001",
                 }
             }
         };
         using var factory = NewFactory(fake, push);
+        await SeedAssignableRequestAsync(factory, "v1-req-2", "v1-client-owner2");
         var index = factory.Services.GetRequiredService<IOfferRequestIndex>();
         index.Record("v1-offer-win2", "v1-req-2", "v1-jeeber-winner2");
         index.Record("v1-offer-known", "v1-req-2", "v1-jeeber-known");
@@ -369,11 +373,13 @@ public class OfferAcceptLifecyclePushTests
                 {
                     AcceptedOfferId = "v1-offer-boom",
                     JeeberId = "v1-jeeber-boom",
-                    RejectedOfferIds = new[] { "v1-offer-loser-boom" }
+                    RejectedOfferIds = new[] { "v1-offer-loser-boom" },
+                    AcceptanceToken = "00000000-0000-0000-0000-000000000001",
                 }
             }
         };
         using var factory = NewFactory(fake, push);
+        await SeedAssignableRequestAsync(factory, "v1-req-boom", "v1-client-boom");
         var index = factory.Services.GetRequiredService<IOfferRequestIndex>();
         index.Record("v1-offer-boom", "v1-req-boom", "v1-jeeber-boom");
         index.Record("v1-offer-loser-boom", "v1-req-boom", "v1-jeeber-loser-boom");
@@ -462,6 +468,20 @@ public class OfferAcceptLifecyclePushTests
         c.DefaultRequestHeaders.Add("X-User-Roles", "customer");
         return c;
     }
+
+    private static async Task SeedAssignableRequestAsync(
+        WebApplicationFactory<Program> factory, string requestId, string clientId)
+        => await factory.Services.GetRequiredService<IRequestsStore>().CreateAsync(
+            new CreateRequestInput
+            {
+                Id = requestId,
+                ClientId = clientId,
+                Description = "Offer lifecycle push parcel",
+                TierId = "flash",
+                PickupLocation = new GeoPoint { Lat = 33.5138, Lng = 36.2765 },
+                DropoffLocation = new GeoPoint { Lat = 33.5238, Lng = 36.2865 },
+            },
+            CancellationToken.None);
 
     private sealed record SendRecord(string UserId, object Payload);
 
