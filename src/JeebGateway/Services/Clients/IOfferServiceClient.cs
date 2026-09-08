@@ -138,6 +138,28 @@ public interface IOfferServiceClient
         CancellationToken ct);
 
     /// <summary>
+    /// Compensates exactly one accepted-auction generation after delivery-service
+    /// rejects its canonical assignment. The opaque <paramref name="acceptanceToken"/>
+    /// came from the successful accept response; it prevents a delayed retry from
+    /// reopening a later re-accept that reused the gateway's stable idempotency key.
+    ///
+    /// <para>Defaulting to <see cref="OfferAcceptCompensationStatus.NotSupported"/>
+    /// keeps existing fakes source-compatible while making an unimplemented
+    /// compensation surface fail closed — callers must never treat it as success.</para>
+    /// </summary>
+    Task<OfferAcceptCompensationResult> CompensateAcceptedOfferAsync(
+        string actingUserId,
+        string requestId,
+        string offerId,
+        string acceptIdempotencyKey,
+        string? acceptanceToken,
+        CancellationToken ct)
+        => Task.FromResult(new OfferAcceptCompensationResult
+        {
+            Status = OfferAcceptCompensationStatus.NotSupported,
+        });
+
+    /// <summary>
     /// S08 A3 — PUT /api/v1/requests/{requestId}/offers/{offerId} — a JEEBER edits
     /// their own pending bid (fee / eta / note). offer-service owns the generic
     /// edit transition (<c>Auction.edit_offer</c>, only the owning jeeber, only
@@ -350,6 +372,13 @@ public sealed class OfferAcceptWire
 
     public IReadOnlyList<string> RejectedOfferIds { get; init; } = Array.Empty<string>();
     public bool Replayed { get; init; }
+
+    /// <summary>
+    /// Opaque exact-generation token returned in offer-service's
+    /// <c>x-offer-acceptance-token</c> response header. Required only if the
+    /// gateway must compensate a canonical-delivery assignment refusal.
+    /// </summary>
+    public string? AcceptanceToken { get; init; }
 }
 
 /// <summary>Outcome of a withdraw, mirroring the upstream HTTP status mapping.</summary>
@@ -399,5 +428,34 @@ public sealed class OfferAcceptResult
     public OfferAcceptWire? Envelope { get; init; }
 
     /// <summary>offer-service error <c>code</c> for negative statuses, when the body carried one.</summary>
+    public string? UpstreamCode { get; init; }
+}
+
+/// <summary>Outcome of the additive offer-accept compensation route.</summary>
+public enum OfferAcceptCompensationStatus
+{
+    /// <summary>200 — the exact accepted generation was restored.</summary>
+    Compensated,
+
+    /// <summary>200 with x-idempotency-replay:true — it was already restored.</summary>
+    Replayed,
+
+    /// <summary>403 — caller is not the request owner.</summary>
+    NotOwner,
+
+    /// <summary>404 — request or offer is unknown.</summary>
+    NotFound,
+
+    /// <summary>409 — the accepted generation is stale or cannot be safely undone.</summary>
+    Conflict,
+
+    /// <summary>Default-interface fallback for an old/unimplemented upstream client.</summary>
+    NotSupported
+}
+
+/// <summary>Typed, status-preserving response from offer compensation.</summary>
+public sealed class OfferAcceptCompensationResult
+{
+    public required OfferAcceptCompensationStatus Status { get; init; }
     public string? UpstreamCode { get; init; }
 }

@@ -605,6 +605,12 @@ public class CommissionCollectionO1Tests
                 services.AddScoped<SwServiceWalletClient>(_ => wallet);
                 services.RemoveAll<IOfferServiceClient>();
                 services.AddSingleton<IOfferServiceClient>(new AcceptingOfferServiceClient());
+                // The wallet tests exercise post-commit commission behaviour.
+                // Model the canonical delivery claim as successful so this fixture
+                // does not depend on a live delivery-service and does not bypass
+                // the fail-closed accept invariant.
+                services.RemoveAll<IDeliveryServiceClient>();
+                services.AddSingleton<IDeliveryServiceClient>(new SuccessfulAssignmentDeliveryClient());
                 services.RemoveAll<ICommissionCollector>();
                 services.AddSingleton(collector);
             });
@@ -767,6 +773,41 @@ public class CommissionCollectionO1Tests
         public Task<OfferMutationResult> RejectAsync(
             string actingUserId, string offerId, CancellationToken ct)
             => throw new NotSupportedException();
+    }
+
+    private sealed class SuccessfulAssignmentDeliveryClient : IDeliveryServiceClient
+    {
+        public Task<DeliveryRowUpstream> CreateDeliveryRowAsync(CreateDeliveryRowUpstream body, CancellationToken ct)
+            => Task.FromResult(new DeliveryRowUpstream { Id = body.Id, TenantId = body.TenantId, Status = "Ordered" });
+
+        public Task<IReadOnlyList<JeebGateway.Tiers.DeliveryTierDto>> ListTiersAsync(CancellationToken ct) => throw new NotSupportedException();
+        public Task<ShipmentsListDto> ListShipmentsAsync(string? orderId, string? stage, int? limit, CancellationToken ct) => throw new NotSupportedException();
+        public Task<DeliveryRequestUpstream> CreateRequestAsync(CreateDeliveryRequestUpstream body, CancellationToken ct) => throw new NotSupportedException();
+        public Task<DeliveryRequestUpstream> GetDeliveryAsync(string deliveryId, CancellationToken ct) => throw new NotSupportedException();
+        public Task<DeliveryOtpVerifyResult> VerifyOtpAsync(string deliveryId, string otpCode, CancellationToken ct) => throw new NotSupportedException();
+        public Task<DeliveryTransitionUpstream> CanonicalTransitionAsync(string deliveryId, string to, string partySource, string actorId, string actorRole, CancellationToken ct) => throw new NotSupportedException();
+        public Task<DeliveryReadUpstream?> GetCanonicalDeliveryAsync(string deliveryId, CancellationToken ct) => throw new NotSupportedException();
+        public Task<DeliveryHandoverIssueResult> IssueHandoverOtpAsync(string deliveryId, string? codeHash, CancellationToken ct) => throw new NotSupportedException();
+        public Task<DeliveryHandoverVerifyResult> VerifyHandoverOtpAsync(string deliveryId, bool success, string actorId, string actorRole, CancellationToken ct) => throw new NotSupportedException();
+        public Task<DeliveryCancelResult> CancelDeliveryAsync(string deliveryId, DeliveryCancelUpstreamRequest body, CancellationToken ct) => throw new NotSupportedException();
+        public Task<JeeberAvailabilityUpstream> SetAvailabilityAsync(JeeberAvailabilityUpstreamRequest body, string jeeberId, CancellationToken ct) => throw new NotSupportedException();
+        public Task<JeeberAvailabilityUpstream?> GetAvailabilityAsync(string jeeberId, CancellationToken ct)
+            => Task.FromResult<JeeberAvailabilityUpstream?>(new JeeberAvailabilityUpstream
+            {
+                JeeberId = jeeberId,
+                Online = true,
+                VehicleType = "car",
+                Zone = "downtown",
+                Lat = InRangeGeoFixture.Lat,
+                Lng = InRangeGeoFixture.Lng,
+                LastSeenAt = DateTimeOffset.UtcNow,
+                UpdatedAt = DateTimeOffset.UtcNow,
+            });
+        public Task<JeeberAvailabilityUpstream> HeartbeatAsync(string jeeberId, double lat, double lng, CancellationToken ct) => throw new NotSupportedException();
+        public Task<IReadOnlyList<AvailableProviderUpstream>> ListAvailableProvidersAsync(double? lat, double? lng, double? radiusKm, IReadOnlyCollection<string>? vehicleTypes, int limit, CancellationToken ct) => throw new NotSupportedException();
+        public Task<IReadOnlyList<JeeberAvailabilityUpstream>> ListKnownProvidersAsync(DateTimeOffset since, int limit, CancellationToken ct) => throw new NotSupportedException();
+        public Task<DeliveryMatchingRunResult> RunMatchingAsync(DeliveryMatchingRunRequest body, CancellationToken ct) => throw new NotSupportedException();
+        public Task<int> CountActiveDeliveriesByJeeberAsync(string jeeberId, CancellationToken ct) => throw new NotSupportedException();
     }
 
     private sealed record StubCall(string Path, string? Body, string? IdempotencyKey);

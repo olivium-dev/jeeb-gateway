@@ -5,6 +5,7 @@ using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Json;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
@@ -70,12 +71,15 @@ public class JeebOffersAcceptDeliveryLegTests
     }
 
     [Fact]
-    public async Task Accept_WhenDeliveryServiceFaults_StaysHttp200_DegradeDoNotFail()
+    public async Task Accept_WhenCanonicalAssignmentHitsActiveCap_CompensatesAndReturns409WithoutLocalProjection()
     {
         var offerFake = AcceptedFake("offer-blip", "jeeber-win");
-        // Faults ONLY on the post-accept assignment (JeeberId set); create-time seed
-        // (JeeberId null) succeeds so the request row is established normally.
-        var deliveryFake = new RecordingDeliveryClient { ThrowOnJeeberAssignment = true };
+        // The create-time seed (JeeberId null) succeeds; only the canonical
+        // assignment is refused exactly as delivery-service returns at 2/2.
+        var deliveryFake = new RecordingDeliveryClient
+        {
+            AssignmentFailure = new DeliveryCreateRowException(409, "jeeber_at_active_delivery_cap"),
+        };
         using var factory = NewFactory(offerFake, deliveryFake);
 
         var requestId = await SeedRequestAsync(factory, "client-owner");
@@ -84,17 +88,86 @@ public class JeebOffersAcceptDeliveryLegTests
         var resp = await ClientActor(factory, "client-owner")
             .PostAsync("/v1/offers/offer-blip/accept", content: null);
 
-        // A delivery-service blip must NEVER convert a committed accept into a 5xx.
-        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        resp.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        var problem = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        problem.GetProperty("type").GetString().Should().Be("https://jeeb.dev/errors/jeeber-active-delivery-cap");
+        problem.GetProperty("deliveryReason").GetString().Should().Be("jeeber_at_active_delivery_cap");
         deliveryFake.JeeberAssignmentAttempts.Should().BeGreaterThanOrEqualTo(1);
+        offerFake.CompensationCallCount.Should().Be(1);
+        offerFake.LastCompensationIdempotencyKey.Should().Be(offerFake.LastAcceptIdempotencyKey);
+        offerFake.LastCompensationToken.Should().Be("00000000-0000-0000-0000-000000000001");
+
+        var local = await factory.Services.GetRequiredService<IRequestsStore>()
+            .GetAsync(requestId, CancellationToken.None);
+        local.Should().NotBeNull();
+        local!.Status.Should().Be(RequestStatus.Pending);
+        local.JeeberId.Should().BeNull("a rejected canonical assignment must never stamp the gateway projection");
     }
 
     [Fact]
-    public async Task Accept_WhenEnvelopeOmitsJeeber_DoesNotAttemptAssignment_StaysHttp200()
+    public async Task Accept_WhenCanonicalAssignmentIsUnavailable_CompensatesAndReturns502NotSuccess()
     {
-        // Saga committed but the winner is unresolvable anywhere — the envelope carried no
-        // jeeber id AND the routing index recorded none (2-arg submit) — so the gateway must
-        // never write a blank jeeber onto the delivery row; the accept still succeeds.
+        var offerFake = AcceptedFake("offer-assignment-outage", "jeeber-win");
+        var deliveryFake = new RecordingDeliveryClient
+        {
+            AssignmentFailure = new DeliveryCreateRowException(503, "delivery-service unavailable"),
+        };
+        using var factory = NewFactory(offerFake, deliveryFake);
+
+        var requestId = await SeedRequestAsync(factory, "client-owner");
+        SeedRouting(factory, "offer-assignment-outage", requestId, "jeeber-win");
+
+        var resp = await ClientActor(factory, "client-owner")
+            .PostAsync("/v1/offers/offer-assignment-outage/accept", content: null);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadGateway);
+        var problem = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        problem.GetProperty("type").GetString().Should().Be(
+            "https://jeeb.dev/errors/canonical-delivery-assignment-unavailable");
+        offerFake.CompensationCallCount.Should().Be(1);
+
+        var local = await factory.Services.GetRequiredService<IRequestsStore>()
+            .GetAsync(requestId, CancellationToken.None);
+        local!.Status.Should().Be(RequestStatus.Pending);
+        local.JeeberId.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Accept_WhenCanonicalAssignmentAuthenticationFails_CompensatesAndReturns502NotConflict()
+    {
+        var offerFake = AcceptedFake("offer-assignment-auth", "jeeber-win");
+        var deliveryFake = new RecordingDeliveryClient
+        {
+            AssignmentFailure = new DeliveryCreateRowException(403, "forbidden"),
+        };
+        using var factory = NewFactory(offerFake, deliveryFake);
+
+        var requestId = await SeedRequestAsync(factory, "client-owner");
+        SeedRouting(factory, "offer-assignment-auth", requestId, "jeeber-win");
+
+        var resp = await ClientActor(factory, "client-owner")
+            .PostAsync("/v1/offers/offer-assignment-auth/accept", content: null);
+
+        resp.StatusCode.Should().Be(HttpStatusCode.BadGateway);
+        var problem = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        problem.GetProperty("type").GetString().Should().Be(
+            "https://jeeb.dev/errors/canonical-delivery-assignment-unavailable");
+        problem.GetProperty("deliveryStatus").GetInt32().Should().Be(403);
+        offerFake.CompensationCallCount.Should().Be(1);
+
+        var local = await factory.Services.GetRequiredService<IRequestsStore>()
+            .GetAsync(requestId, CancellationToken.None);
+        local!.Status.Should().Be(RequestStatus.Pending);
+        local.JeeberId.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Accept_WhenEnvelopeAndIndexOmitJeeber_CompensatesAndDoesNotReportSuccess()
+    {
+        // The winner is unresolvable anywhere — the envelope carried no jeeber id AND
+        // the routing index recorded none (2-arg submit).  This must not be reported
+        // as an accepted offer: the gateway cannot make the canonical assignment, so
+        // it compensates the exact offer acceptance instead.
         // (The envelope-omits-BUT-index-has-it case — where the P0 fix resolves the winner
         // from the index and DOES assign — is covered in S03JeeberDeliveryListUpstreamAcceptTests.)
         var offerFake = AcceptedFake("offer-nojeeber", winningJeeberId: null);
@@ -108,34 +181,22 @@ public class JeebOffersAcceptDeliveryLegTests
         var resp = await ClientActor(factory, "client-owner")
             .PostAsync("/v1/offers/offer-nojeeber/accept", content: null);
 
-        resp.StatusCode.Should().Be(HttpStatusCode.OK);
+        resp.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        var problem = await resp.Content.ReadFromJsonAsync<JsonElement>();
+        problem.GetProperty("type").GetString().Should().Be(
+            "https://jeeb.dev/errors/canonical-delivery-assignment-refused");
+        problem.GetProperty("deliveryReason").GetString().Should().Be("winning_jeeber_missing");
         deliveryFake.Calls.Should().NotContain(c => c.JeeberId != null);
-    }
+        offerFake.CompensationCallCount.Should().Be(1);
 
-    // Retired BR-10 active-delivery cap — the /v1 accept route must not pre-count
-    // delivery-service active rows before forwarding the accept saga.
-
-    [Fact]
-    public async Task Accept_WhenWinningJeeberHasTwoActiveDeliveries_ProceedsHttp200()
-    {
-        var offerFake = AcceptedFake("offer-cap", "jeeber-busy");
-        var deliveryFake = new RecordingDeliveryClient { ActiveDeliveryCount = 2 };
-        using var factory = NewFactory(offerFake, deliveryFake);
-
-        var requestId = await SeedRequestAsync(factory, "client-owner");
-        SeedRouting(factory, "offer-cap", requestId, "jeeber-busy");
-
-        var resp = await ClientActor(factory, "client-owner")
-            .PostAsync("/v1/offers/offer-cap/accept", content: null);
-
-        resp.StatusCode.Should().Be(HttpStatusCode.OK);
-        deliveryFake.LastCountedJeeberId.Should().BeNull();
-        offerFake.AcceptCallCount.Should().Be(1);
-        deliveryFake.Calls.Should().Contain(c => c.JeeberId == "jeeber-busy");
+        var local = await factory.Services.GetRequiredService<IRequestsStore>()
+            .GetAsync(requestId, CancellationToken.None);
+        local!.Status.Should().Be(RequestStatus.Pending);
+        local.JeeberId.Should().BeNull();
     }
 
     [Fact]
-    public async Task Accept_WhenWinningJeeberHasOneActiveDelivery_ProceedsHttp200()
+    public async Task Accept_UsesCanonicalAssignmentInsteadOfGatewayPrecount()
     {
         var offerFake = AcceptedFake("offer-under", "jeeber-ok");
         var deliveryFake = new RecordingDeliveryClient { ActiveDeliveryCount = 1 };
@@ -150,6 +211,7 @@ public class JeebOffersAcceptDeliveryLegTests
         resp.StatusCode.Should().Be(HttpStatusCode.OK);
         deliveryFake.LastCountedJeeberId.Should().BeNull();
         offerFake.AcceptCallCount.Should().Be(1);
+        offerFake.CompensationCallCount.Should().Be(0);
     }
 
     // ---------------------------------------------------------------------
@@ -167,6 +229,7 @@ public class JeebOffersAcceptDeliveryLegTests
                     AcceptedOfferId = offerId,
                     JeeberId = winningJeeberId,
                     RejectedOfferIds = Array.Empty<string>(),
+                    AcceptanceToken = "00000000-0000-0000-0000-000000000001",
                 },
             },
         };
@@ -225,13 +288,32 @@ public class JeebOffersAcceptDeliveryLegTests
     private sealed class FakeAcceptOfferClient : IOfferServiceClient
     {
         public required OfferAcceptResult Result { get; init; }
+        public OfferAcceptCompensationResult CompensationResult { get; init; } = new()
+        {
+            Status = OfferAcceptCompensationStatus.Compensated,
+        };
         public int AcceptCallCount { get; private set; }
+        public int CompensationCallCount { get; private set; }
+        public string? LastAcceptIdempotencyKey { get; private set; }
+        public string? LastCompensationIdempotencyKey { get; private set; }
+        public string? LastCompensationToken { get; private set; }
 
         public Task<OfferAcceptResult> AcceptWithStatusAsync(
             string actingUserId, string requestId, string offerId, string idempotencyKey, CancellationToken ct)
         {
             AcceptCallCount++;
+            LastAcceptIdempotencyKey = idempotencyKey;
             return Task.FromResult(Result);
+        }
+
+        public Task<OfferAcceptCompensationResult> CompensateAcceptedOfferAsync(
+            string actingUserId, string requestId, string offerId, string acceptIdempotencyKey,
+            string? acceptanceToken, CancellationToken ct)
+        {
+            CompensationCallCount++;
+            LastCompensationIdempotencyKey = acceptIdempotencyKey;
+            LastCompensationToken = acceptanceToken;
+            return Task.FromResult(CompensationResult);
         }
 
         public Task<OfferAcceptWire> AcceptAsync(
@@ -278,7 +360,7 @@ public class JeebOffersAcceptDeliveryLegTests
             System.Array.Empty<JeebGateway.Services.Clients.JeeberAvailabilityUpstream>());
 
         public ConcurrentQueue<CreateDeliveryRowUpstream> Calls { get; } = new();
-        public bool ThrowOnJeeberAssignment { get; init; }
+        public DeliveryCreateRowException? AssignmentFailure { get; init; }
         public int JeeberAssignmentAttempts { get; private set; }
 
         // F2 / BR-10: when set, the pre-forward active-delivery count returns this value.
@@ -292,8 +374,8 @@ public class JeebOffersAcceptDeliveryLegTests
             if (!string.IsNullOrWhiteSpace(body.JeeberId))
             {
                 JeeberAssignmentAttempts++;
-                if (ThrowOnJeeberAssignment)
-                    throw new DeliveryCreateRowException(503, "delivery-service unavailable");
+                if (AssignmentFailure is not null)
+                    throw AssignmentFailure;
             }
             return Task.FromResult(new DeliveryRowUpstream { Id = body.Id, TenantId = body.TenantId, Status = "Ordered" });
         }

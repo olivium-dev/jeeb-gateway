@@ -33,9 +33,6 @@ namespace JeebGateway.Controllers.V1;
 [ApiController]
 public sealed class JeebOffersController : ControllerBase
 {
-    /// <summary>Retired BR-10 cap: active deliveries are unlimited.</summary>
-    private const int ActiveDeliveriesLimit = int.MaxValue;
-
     private readonly IPendingOffersStore _offers;
     private readonly IRequestsStore _requests;
     private readonly IOfferServiceClient _offerService;
@@ -238,7 +235,8 @@ public sealed class JeebOffersController : ControllerBase
 
         return result.Status switch
         {
-            OfferAcceptStatus.Accepted => await BuildAcceptedResponseAsync(requestId, offerId, result, ct),
+            OfferAcceptStatus.Accepted => await BuildAcceptedResponseAsync(
+                requestId, offerId, actorId, key, result, ct),
             OfferAcceptStatus.NotOwner => StatusCode(StatusCodes.Status403Forbidden, new ProblemDetails
             {
                 Title = "Only the request owner may accept an offer.",
@@ -386,6 +384,8 @@ public sealed class JeebOffersController : ControllerBase
     private async Task<IActionResult> BuildAcceptedResponseAsync(
         string requestId,
         string offerId,
+        string actorId,
+        string acceptIdempotencyKey,
         OfferAcceptResult result,
         CancellationToken ct)
     {
@@ -406,17 +406,45 @@ public sealed class JeebOffersController : ControllerBase
         if (string.IsNullOrWhiteSpace(winningJeeberId))
             winningJeeberId = _offerRequestIndex.ResolveJeeberId(offerId);
 
-        // S07 N7 / BR-10 — DELIVERED-leg sync. The offer-service accept saga owns the
-        // single-winner transition but NOT the delivery row (org no-coupling law:
-        // offer/delivery/chat services never call each other), so the gateway BFF is
-        // the composer that assigns the winning jeeber onto the durable delivery row.
-        // The legacy (Obsolete) OffersController did this; this thin V1 slice (the
-        // route mobile actually calls) must do it too, or the accepted delivery never
-        // counts against the jeeber's active-delivery cap and the next accept of a 3rd
-        // offer is not short-circuited. Mirrors OffersController.OrchestrateAcceptedAsync
-        // (H6c). DEGRADE-DON'T-FAIL: the saga already committed upstream, so any
-        // delivery-service blip here is logged and swallowed — the accept stays 200.
-        await SyncDeliveryLegAsync(req, winningJeeberId, ct);
+        // The delivery row is canonical for assignee/lifecycle authorization. Do not
+        // project any local "accepted + jeeber" state until its atomic claim succeeds.
+        // If the claim refuses (for example active cap 2/2), compensate the exact
+        // offer-service acceptance generation before returning a non-success result.
+        var assignment = await SyncDeliveryLegAsync(req, winningJeeberId, ct);
+        if (assignment.Outcome != DeliveryAssignmentOutcome.Assigned)
+        {
+            var compensation = await CompensateAcceptedOfferSafeAsync(
+                actorId,
+                requestId,
+                offerId,
+                acceptIdempotencyKey,
+                result.Envelope?.AcceptanceToken,
+                ct);
+
+            if (compensation is not null
+                && compensation.Status is OfferAcceptCompensationStatus.Compensated
+                    or OfferAcceptCompensationStatus.Replayed)
+            {
+                return DeliveryAssignmentRefusedResponse(assignment, compensation);
+            }
+
+            // We intentionally do not return a success if we cannot prove the
+            // rollback. The gateway has not stamped its local projection, and the
+            // upstream error carries enough evidence for a reconciler/operator.
+            return StatusCode(StatusCodes.Status502BadGateway, new ProblemDetails
+            {
+                Title = "Canonical delivery assignment could not be completed or compensated.",
+                Status = StatusCodes.Status502BadGateway,
+                Type = "https://jeeb.dev/errors/offer-accept-compensation-failed",
+                Extensions =
+                {
+                    ["deliveryReason"] = assignment.Reason,
+                    ["deliveryStatus"] = assignment.UpstreamStatusCode,
+                    ["compensationStatus"] = compensation?.Status.ToString(),
+                    ["compensationUpstreamCode"] = compensation?.UpstreamCode,
+                }
+            });
+        }
 
         // S03 — project the accepted state onto the gateway's local read-model. GET
         // /v1/requests/{id} (JeebRequestsController.Get) reads ONLY _requests, so the
@@ -735,51 +763,42 @@ public sealed class JeebOffersController : ControllerBase
         }
     }
 
+    private enum DeliveryAssignmentOutcome
+    {
+        Assigned,
+        Refused,
+        Unavailable,
+    }
+
+    private sealed record DeliveryAssignmentAttempt(
+        DeliveryAssignmentOutcome Outcome,
+        int? UpstreamStatusCode,
+        string? Reason);
+
     /// <summary>
-    /// S07 N7 / BR-10 — best-effort post-accept DELIVERED-leg assignment. After the
-    /// offer-service accept saga commits the single-winner transition, the gateway
-    /// (the SOLE cross-service composer) re-POSTs the durable delivery row carrying
-    /// <c>jeeber_id = winningJeeberId</c>. delivery-service upserts the jeeber ONLY
-    /// when the row is still unassigned (<c>WHERE jeeber_id IS NULL</c>, never steals),
-    /// so this is idempotent: it composes cleanly with the create-time matching mirror
-    /// and a retried accept. The row was seeded at request-create time
-    /// (<see cref="JeebGateway.Requests.DurableRequestsStore"/>) with
-    /// <c>deliveryId == requestId</c>, so the same id is reused here.
-    ///
-    /// DEGRADE-DON'T-FAIL: the saga already committed the canonical accept upstream, so
-    /// every failure path (winner unknown, request not locally synced, missing
-    /// tier/pickup, delivery-service fault, cancellation) is logged and swallowed — it
-    /// must NEVER convert a successful accept into a 5xx. No read-back is asserted; this
-    /// is a best-effort assignment mirror, exactly matching
-    /// <see cref="JeebGateway.Controllers.OffersController"/>'s H6c step.
+    /// Claims the canonical delivery row for the winning jeeber. The delivery
+    /// service now performs its cap decision and NULL→jeeber assignment in one
+    /// transaction, so a 2xx reply is the durable commit point. A read-back from
+    /// a lagging projection must not decide acceptance semantics.
     /// </summary>
-    private async Task SyncDeliveryLegAsync(
+    private async Task<DeliveryAssignmentAttempt> SyncDeliveryLegAsync(
         DeliveryRequest? request, string? winningJeeberId, CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(winningJeeberId))
         {
-            // The upstream envelope omitted the winning jeeber id — never write a blank
-            // jeeber onto the delivery row. Telemetry signal, not a user-facing error.
-            _logger.LogWarning(
-                "Post-accept delivery-leg sync: upstream accept envelope carried no jeeberId; "
-                + "skipping the delivery-row assignment (accept stays 200).");
-            return;
+            _logger.LogWarning("Canonical delivery assignment cannot run: winning jeeber is missing.");
+            return new(DeliveryAssignmentOutcome.Refused, null, "winning_jeeber_missing");
         }
 
-        // The matching-resolve columns (tier + pickup) are required by the create-row
-        // contract; without a locally-synced request row carrying them there is nothing
-        // to seed. delivery-service remains the authority — the cap visibility is simply
-        // deferred until a path with the full row reconciles it.
         if (request is null
             || request.PickupLocation is null
             || string.IsNullOrWhiteSpace(request.TierId)
             || string.IsNullOrWhiteSpace(request.Id))
         {
-            _logger.LogInformation(
-                "Post-accept delivery-leg sync for jeeber {JeeberId}: request row not locally "
-                + "available with tier/pickup; skipping the assignment mirror (accept stays 200).",
+            _logger.LogWarning(
+                "Canonical delivery assignment for jeeber {JeeberId} cannot run because request data is incomplete.",
                 winningJeeberId);
-            return;
+            return new(DeliveryAssignmentOutcome.Unavailable, null, "request_assignment_data_unavailable");
         }
 
         try
@@ -788,10 +807,9 @@ public sealed class JeebOffersController : ControllerBase
             if (resolvedTierId is null)
             {
                 _logger.LogWarning(
-                    "Post-accept delivery-leg sync for request {RequestId}: tier {TierId} no longer resolves; "
-                    + "skipping the assignment mirror (accept stays 200).",
+                    "Canonical delivery assignment for request {RequestId} cannot resolve tier {TierId}.",
                     request.Id, request.TierId);
-                return;
+                return new(DeliveryAssignmentOutcome.Unavailable, null, "tier_unavailable");
             }
 
             await _deliveryService.CreateDeliveryRowAsync(new CreateDeliveryRowUpstream
@@ -805,80 +823,109 @@ public sealed class JeebOffersController : ControllerBase
                 PickupLng = request.PickupLocation.Lng,
             }, ct);
 
-            // JEBV4-300 — DURABLE-BEFORE-RETURN. The upsert above is fire-and-forget
-            // against a possibly read-replica-lagged delivery-service; until its row
-            // carries jeeber_id its authorise() 403s BOTH parties, so a PATCH /status
-            // fired seconds after accept races the mirror. Confirm the assignment is
-            // visible on the canonical row before the accept returns. NEVER throws on a
-            // non-confirming read — the outer swallow keeps a committed accept at 200 and
-            // DeliveriesController's PATCH-status re-mirror (leg b) self-heals the residual.
-            await ConfirmDeliveryAssignmentVisibleAsync(request.Id, winningJeeberId, ct);
+            return new(DeliveryAssignmentOutcome.Assigned, null, null);
         }
         catch (OperationCanceledException)
         {
-            // Caller cancelled — propagate nothing; the accept response is already shaped.
+            throw;
+        }
+        // delivery-service's atomic assignment contract uses 409 for both
+        // business refusals (active cap and already assigned). Other 4xx
+        // responses are authentication, routing, or request-contract failures;
+        // exposing those as a client conflict would hide an unavailable/miswired
+        // dependency and invite an unsafe retry loop.
+        catch (DeliveryCreateRowException ex) when (ex.StatusCode == StatusCodes.Status409Conflict)
+        {
+            _logger.LogInformation(
+                "Canonical delivery assignment for request {RequestId} was refused with {Status} ({Reason}).",
+                request.Id, ex.StatusCode, ex.Reason);
+            return new(DeliveryAssignmentOutcome.Refused, ex.StatusCode, ex.Reason);
+        }
+        catch (DeliveryCreateRowException ex)
+        {
+            _logger.LogWarning(ex,
+                "Canonical delivery assignment for request {RequestId} is unavailable with {Status} ({Reason}).",
+                request.Id, ex.StatusCode, ex.Reason);
+            return new(DeliveryAssignmentOutcome.Unavailable, ex.StatusCode, ex.Reason);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex,
-                "Post-accept delivery-leg sync for request {RequestId} (jeeber {JeeberId}) failed; "
-                + "accept stays 200 — the delivery will not count toward the jeeber's active-delivery "
-                + "cap until reconciled.",
-                request.Id, winningJeeberId);
+                "Canonical delivery assignment for request {RequestId} failed before commit.", request.Id);
+            return new(DeliveryAssignmentOutcome.Unavailable, null, "delivery_assignment_unavailable");
         }
     }
 
-    // JEBV4-300 — read-back budget for the post-accept assignment mirror. Bounded so a
-    // genuinely-stuck upstream can never hang the accept: at most 3 canonical reads, the
-    // first fired immediately after the upsert, the rest ~200ms apart (≈400ms worst case).
-    private const int AssignmentReadBackAttempts = 3;
-    private static readonly TimeSpan AssignmentReadBackDelay = TimeSpan.FromMilliseconds(200);
-
-    /// <summary>
-    /// JEBV4-300 (assignment-mirror race). After the idempotent post-accept upsert seeds
-    /// <c>jeeber_id = winningJeeberId</c>, confirm it is DURABLY VISIBLE on the canonical
-    /// delivery-service row before the accept returns — reading
-    /// <see cref="IDeliveryServiceClient.GetCanonicalDeliveryAsync"/> and bounded-retrying
-    /// (<see cref="AssignmentReadBackAttempts"/> × <see cref="AssignmentReadBackDelay"/>)
-    /// until the row's <c>jeeber_id</c> equals the winner. NEVER throws on a non-confirming
-    /// read: the caller's swallow keeps a committed accept at 200 and leg (b) self-heals.
-    /// </summary>
-    private async Task ConfirmDeliveryAssignmentVisibleAsync(
-        string deliveryId, string winningJeeberId, CancellationToken ct)
+    private async Task<OfferAcceptCompensationResult?> CompensateAcceptedOfferSafeAsync(
+        string actorId,
+        string requestId,
+        string offerId,
+        string acceptIdempotencyKey,
+        string? acceptanceToken,
+        CancellationToken ct)
     {
-        for (var attempt = 1; attempt <= AssignmentReadBackAttempts; attempt++)
+        try
         {
-            DeliveryReadUpstream? row = null;
-            try
-            {
-                row = await _deliveryService.GetCanonicalDeliveryAsync(deliveryId, ct);
-            }
-            catch (OperationCanceledException)
-            {
-                return; // caller cancelled — nothing to confirm; accept response already shaped.
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex,
-                    "Post-accept assignment read-back for delivery {DeliveryId} attempt {Attempt}/{Max} faulted; retrying.",
-                    deliveryId, attempt, AssignmentReadBackAttempts);
-            }
+            return await _offerService.CompensateAcceptedOfferAsync(
+                actorId, requestId, offerId, acceptIdempotencyKey, acceptanceToken, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex,
+                "Offer acceptance compensation for request {RequestId}, offer {OfferId} failed after canonical delivery assignment refusal.",
+                requestId, offerId);
+            return null;
+        }
+    }
 
-            if (row is not null && string.Equals(row.JeeberId, winningJeeberId, StringComparison.Ordinal))
+    private static IActionResult DeliveryAssignmentRefusedResponse(
+        DeliveryAssignmentAttempt assignment,
+        OfferAcceptCompensationResult compensation)
+    {
+        if (assignment.Outcome == DeliveryAssignmentOutcome.Refused)
+        {
+            var atCap = string.Equals(
+                assignment.Reason, "jeeber_at_active_delivery_cap", StringComparison.OrdinalIgnoreCase);
+            return new ObjectResult(new ProblemDetails
             {
-                return; // durably assigned — a status transition by either party will authorise.
-            }
-
-            if (attempt < AssignmentReadBackAttempts)
+                Title = atCap
+                    ? "The winning jeeber has reached the active-delivery limit."
+                    : "The canonical delivery assignment was refused.",
+                Status = StatusCodes.Status409Conflict,
+                Type = atCap
+                    ? "https://jeeb.dev/errors/jeeber-active-delivery-cap"
+                    : "https://jeeb.dev/errors/canonical-delivery-assignment-refused",
+                Extensions =
+                {
+                    ["deliveryReason"] = assignment.Reason,
+                    ["deliveryStatus"] = assignment.UpstreamStatusCode,
+                    ["acceptanceCompensation"] = compensation.Status.ToString(),
+                }
+            })
             {
-                await Task.Delay(AssignmentReadBackDelay, ct);
-            }
+                StatusCode = StatusCodes.Status409Conflict,
+            };
         }
 
-        _logger.LogWarning(
-            "Post-accept assignment read-back for delivery {DeliveryId} did not observe jeeber_id={JeeberId} "
-            + "after {Max} attempts; accept stays 200 and the PATCH-status re-mirror (leg b) self-heals the race.",
-            deliveryId, winningJeeberId, AssignmentReadBackAttempts);
+        return new ObjectResult(new ProblemDetails
+        {
+            Title = "Canonical delivery assignment was unavailable; the offer acceptance was rolled back.",
+            Status = StatusCodes.Status502BadGateway,
+            Type = "https://jeeb.dev/errors/canonical-delivery-assignment-unavailable",
+            Extensions =
+            {
+                ["deliveryReason"] = assignment.Reason,
+                ["deliveryStatus"] = assignment.UpstreamStatusCode,
+                ["acceptanceCompensation"] = compensation.Status.ToString(),
+            }
+        })
+        {
+            StatusCode = StatusCodes.Status502BadGateway,
+        };
     }
 
     // -----------------------------------------------------------------------

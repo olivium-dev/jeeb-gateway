@@ -33,6 +33,7 @@ public sealed class OfferServiceClient : IOfferServiceClient
 
     private const string UserIdHeader = "x-user-id";
     private const string IdempotencyHeader = "Idempotency-Key";
+    private const string AcceptanceTokenHeader = "x-offer-acceptance-token";
 
     private readonly HttpClient _http;
 
@@ -195,6 +196,7 @@ public sealed class OfferServiceClient : IOfferServiceClient
 
         var replayed = response.Headers.TryGetValues("x-idempotency-replay", out var values)
                        && values.Any(v => string.Equals(v, "true", StringComparison.OrdinalIgnoreCase));
+        var acceptanceToken = ReadHeader(response, AcceptanceTokenHeader);
 
         return new OfferAcceptWire
         {
@@ -202,6 +204,7 @@ public sealed class OfferServiceClient : IOfferServiceClient
             JeeberId = wire.AcceptedOffer?.WinningActorId,
             RejectedOfferIds = wire.RejectedOfferIds ?? new List<string>(),
             Replayed = replayed,
+            AcceptanceToken = acceptanceToken,
         };
     }
 
@@ -237,6 +240,7 @@ public sealed class OfferServiceClient : IOfferServiceClient
 
                 var replayed = response.Headers.TryGetValues("x-idempotency-replay", out var values)
                                && values.Any(v => string.Equals(v, "true", StringComparison.OrdinalIgnoreCase));
+                var acceptanceToken = ReadHeader(response, AcceptanceTokenHeader);
 
                 return new OfferAcceptResult
                 {
@@ -247,6 +251,7 @@ public sealed class OfferServiceClient : IOfferServiceClient
                         JeeberId = wire.AcceptedOffer?.WinningActorId,
                         RejectedOfferIds = wire.RejectedOfferIds ?? new List<string>(),
                         Replayed = replayed,
+                        AcceptanceToken = acceptanceToken,
                     },
                 };
             }
@@ -270,6 +275,58 @@ public sealed class OfferServiceClient : IOfferServiceClient
                 response.EnsureSuccessStatusCode();
                 throw new HttpRequestException(
                     $"offer-service accept returned unexpected status {(int)response.StatusCode}.");
+        }
+    }
+
+    public async Task<OfferAcceptCompensationResult> CompensateAcceptedOfferAsync(
+        string actingUserId,
+        string requestId,
+        string offerId,
+        string acceptIdempotencyKey,
+        string? acceptanceToken,
+        CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(
+            HttpMethod.Post,
+            $"api/v1/requests/{Uri.EscapeDataString(requestId)}/offers/{Uri.EscapeDataString(offerId)}/accept/compensate");
+        SetUser(request, actingUserId);
+        request.Content = JsonContent.Create(
+            new AcceptCompensationBody
+            {
+                AcceptIdempotencyKey = acceptIdempotencyKey,
+                AcceptanceToken = acceptanceToken,
+            },
+            options: JsonOptions);
+
+        using var response = await _http.SendAsync(request, ct);
+        switch (response.StatusCode)
+        {
+            case HttpStatusCode.OK:
+            {
+                var replayed = response.Headers.TryGetValues("x-idempotency-replay", out var values)
+                               && values.Any(v => string.Equals(v, "true", StringComparison.OrdinalIgnoreCase));
+                return new OfferAcceptCompensationResult
+                {
+                    Status = replayed
+                        ? OfferAcceptCompensationStatus.Replayed
+                        : OfferAcceptCompensationStatus.Compensated,
+                };
+            }
+
+            case HttpStatusCode.Forbidden:
+                return await NegativeCompensationAsync(OfferAcceptCompensationStatus.NotOwner, response, ct);
+
+            case HttpStatusCode.NotFound:
+                return await NegativeCompensationAsync(OfferAcceptCompensationStatus.NotFound, response, ct);
+
+            case HttpStatusCode.Conflict:
+            case HttpStatusCode.BadRequest:
+                return await NegativeCompensationAsync(OfferAcceptCompensationStatus.Conflict, response, ct);
+
+            default:
+                response.EnsureSuccessStatusCode();
+                throw new HttpRequestException(
+                    $"offer-service accept compensation returned unexpected status {(int)response.StatusCode}.");
         }
     }
 
@@ -580,6 +637,15 @@ public sealed class OfferServiceClient : IOfferServiceClient
         OfferAcceptStatus status, HttpResponseMessage response, CancellationToken ct)
         => new() { Status = status, UpstreamCode = await ReadErrorCodeAsync(response, ct) };
 
+    private static async Task<OfferAcceptCompensationResult> NegativeCompensationAsync(
+        OfferAcceptCompensationStatus status, HttpResponseMessage response, CancellationToken ct)
+        => new() { Status = status, UpstreamCode = await ReadErrorCodeAsync(response, ct) };
+
+    private static string? ReadHeader(HttpResponseMessage response, string header)
+        => response.Headers.TryGetValues(header, out var values)
+            ? values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))
+            : null;
+
     private static void SetUser(HttpRequestMessage request, string actingUserId)
         => request.Headers.TryAddWithoutValidation(UserIdHeader, actingUserId);
 
@@ -684,6 +750,12 @@ public sealed class OfferServiceClient : IOfferServiceClient
     private sealed class AcceptBody
     {
         [JsonPropertyName("confirm_high_fee")] public bool ConfirmHighFee { get; init; }
+    }
+
+    private sealed class AcceptCompensationBody
+    {
+        [JsonPropertyName("accept_idempotency_key")] public string AcceptIdempotencyKey { get; init; } = string.Empty;
+        [JsonPropertyName("acceptance_token")] public string? AcceptanceToken { get; init; }
     }
 
     /// <summary>GAP-2 — the jeeber-offers feed serializer wire shape (contract-freeze §4.2).</summary>
