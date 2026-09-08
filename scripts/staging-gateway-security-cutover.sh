@@ -100,19 +100,19 @@ staging_gateway_security_cutover_forward_apply() {
     409)
       staging_gateway_security_cutover_write_result \
         "$result_file" security-cutover-cas-rejected-fix-forward
-      echo 'RED: security-cutover CAS was rejected; traffic remains frozen' >&2
+      echo 'RED: security-cutover CAS was rejected; stop and reconcile' >&2
       return 1
       ;;
     ''|000)
       staging_gateway_security_cutover_write_result \
         "$result_file" security-cutover-ambiguous-fix-forward
-      echo 'RED: security-cutover CAS outcome is ambiguous; traffic remains frozen' >&2
+      echo 'RED: security-cutover CAS outcome is ambiguous; stop and reconcile' >&2
       return 1
       ;;
     *)
       staging_gateway_security_cutover_write_result \
         "$result_file" security-cutover-unknown-state-fix-forward
-      echo 'RED: security-cutover CAS returned an unexpected status; traffic remains frozen' >&2
+      echo 'RED: security-cutover CAS returned an unexpected status; stop and reconcile' >&2
       return 1
       ;;
   esac
@@ -120,7 +120,7 @@ staging_gateway_security_cutover_forward_apply() {
   capture_remote_spec "$observed_spec" "$observed_version" "$observed_id" || {
     staging_gateway_security_cutover_write_result \
       "$result_file" security-cutover-exact-state-unavailable
-    echo 'RED: security-cutover candidate state is unavailable; traffic remains frozen' >&2
+    echo 'RED: security-cutover candidate state is unavailable; stop and reconcile' >&2
     return 1
   }
   if ! staging_gateway_security_cutover_exact_state \

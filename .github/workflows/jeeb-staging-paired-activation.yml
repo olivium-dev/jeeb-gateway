@@ -1,0 +1,221 @@
+# Fixed staging paired route. Registration is not an activation receipt.
+name: jeeb-staging-paired-activation
+"on":
+  workflow_dispatch:
+    inputs:
+      operation:
+        type: choice
+        options: [prepare, activate]
+        required: true
+      reviewed_sha:
+        description: Exact reviewed current protected gateway main
+        type: string
+        required: true
+      gateway_prepare_run:
+        description: Successful prepare run in this repository (activate only)
+        type: string
+      delivery_identity:
+        description: Reviewed delivery sourceCommit/sourceTree/imageDigest/runId/attempt/probeHelperBlobSha JSON (activate only)
+        type: string
+      secret_id:
+        description: Existing reviewed immutable v1 secret ID, or empty to provision the dedicated fixed-name key once
+        type: string
+permissions:
+  contents: read
+  actions: read
+  packages: write
+concurrency:
+  group: jeeb-staging-jeeb-gateway
+  cancel-in-progress: false
+jobs:
+  paired:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+    environment: staging
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_REF_PROTECTED: ${{ github.ref_protected }}
+      GITHUB_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+    steps:
+      - name: Require exact designated owner before checkout
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_ACTOR" = oudaykhaled ]
+          [ "$GITHUB_TRIGGERING_ACTOR" = oudaykhaled ]
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Require reviewed protected current source and hosted audit
+        id: source
+        env:
+          REVIEWED_SHA: ${{ inputs.reviewed_sha }}
+          OPERATION: ${{ inputs.operation }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          [[ "$OPERATION" = prepare || "$OPERATION" = activate ]]
+          [ "$DEFAULT_BRANCH" = main ]
+          [ "$REVIEWED_SHA" = "$GITHUB_SHA" ]
+          bash scripts/staging-paired-source-guard.sh
+          printf 'tree=%s\n' "$(git rev-parse HEAD^{tree})" >> "$GITHUB_OUTPUT"
+      - name: Run paired boundaries
+        run: |
+          set -euo pipefail
+          python3 scripts/test-staging-paired-custody.py
+          python3 scripts/test-staging-paired-engine.py
+          python3 scripts/test-staging-delivery-paired-activation-draft.py
+          bash scripts/check-forward-only-authorities.sh
+      - name: Log in to own registry for preparation
+        if: inputs.operation == 'prepare'
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Build own immutable candidate once
+        if: inputs.operation == 'prepare'
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ghcr.io/olivium-dev/jeeb-gateway:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/olivium-dev/jeeb-gateway
+            jeeb.source.tree=${{ steps.source.outputs.tree }}
+      - name: Record build-produced immutable receipt
+        if: inputs.operation == 'prepare'
+        env:
+          BUILT_IMAGE: ghcr.io/olivium-dev/jeeb-gateway@${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          bash scripts/staging-paired-source-guard.sh
+          python3 scripts/staging-paired-build-receipt.py prepare
+      - name: Publish own nonsecret build receipt
+        if: inputs.operation == 'prepare'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: gateway-paired-build-receipt
+          path: gateway-build-receipt.json
+          if-no-files-found: error
+          retention-days: 1
+      - name: Consume independently reviewed own prepare artifact
+        if: inputs.operation == 'activate'
+        env:
+          GATEWAY_PREPARE_RUN: ${{ inputs.gateway_prepare_run }}
+        run: python3 scripts/staging-paired-build-receipt.py consume
+      - name: Configure existing strict staging SSH
+        if: inputs.operation == 'activate'
+        env:
+          SSH_HOST: ${{ secrets.JEEB_STAGING_SSH_HOST }}
+          SSH_USER: ${{ secrets.JEEB_STAGING_DEPLOY_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.JEEB_STAGING_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.JEEB_STAGING_SSH_KNOWN_HOSTS }}
+        run: bash scripts/setup-staging-paired-ssh.sh
+      - name: Prepare exclusive same-host runtime custody
+        if: inputs.operation == 'activate'
+        id: custody
+        run: |
+          set -euo pipefail
+          bash scripts/staging-paired-source-guard.sh
+          remote_root=".jeeb-deploy/paired-runtime-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          [[ "$remote_root" =~ ^\.jeeb-deploy/paired-runtime-[1-9][0-9]*-[1-9][0-9]*$ ]]
+          ssh jeeb-staging python3 - "$remote_root" <<'PY'
+          import os, pathlib, re, socket, stat, sys
+          assert socket.gethostname().split('.')[0] == 'olivium-ephemerals'
+          target = sys.argv[1]
+          assert re.fullmatch(r'\.jeeb-deploy/paired-runtime-[1-9][0-9]*-[1-9][0-9]*', target)
+          home = pathlib.Path.home()
+          assert home.resolve() == home
+          fd = os.open('/', os.O_RDONLY | os.O_DIRECTORY)
+          for part in home.parts[1:]:
+              next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+              os.close(fd); fd = next_fd
+              info = os.fstat(fd)
+              assert info.st_uid in (0, os.getuid()) and not info.st_mode & 0o022
+          assert os.fstat(fd).st_uid == os.getuid()
+          deploy = os.open('.jeeb-deploy', os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+          info = os.fstat(deploy)
+          assert info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700
+          os.mkdir(target.split('/')[1], 0o700, dir_fd=deploy)
+          os.fsync(deploy)
+          os.close(deploy); os.close(fd)
+          PY
+          echo 'created=true' >> "$GITHUB_OUTPUT"
+          echo "REMOTE_PAIRED_ROOT=$remote_root" >> "$GITHUB_ENV"
+      - name: Pull only own prepared image and stage exact reviewed adapters
+        if: inputs.operation == 'activate'
+        run: |
+          set -euo pipefail
+          image=$(jq -er .image gateway-build-receipt.json)
+          [[ "$image" =~ ^ghcr\.io/olivium-dev/jeeb-gateway@sha256:[0-9a-f]{64}$ ]]
+          local_docker() {
+            ssh jeeb-staging env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_API_VERSION \
+              docker --host unix:///var/run/docker.sock --config "$REMOTE_PAIRED_ROOT" "$@"
+          }
+          local_docker info --format '{{json .}}' > gateway-local-daemon.json
+          jq -e '.Name == "olivium-ephemerals" and .Swarm.NodeAddr == "192.168.2.20" and .Swarm.ControlAvailable == true and .Swarm.LocalNodeState == "active"' gateway-local-daemon.json >/dev/null
+          printf '%s' "$GH_TOKEN" | local_docker login ghcr.io -u oudaykhaled --password-stdin >/dev/null
+          local_docker image pull "$image" >/dev/null
+          for helper in staging-paired-engine.py staging-paired-custody.py; do
+            scp -q "scripts/$helper" "jeeb-staging:$REMOTE_PAIRED_ROOT/$helper"
+            local_hash=$(sha256sum "scripts/$helper" | awk '{print $1}')
+            remote_hash=$(ssh jeeb-staging sha256sum "$REMOTE_PAIRED_ROOT/$helper" | awk '{print $1}')
+            [ "$local_hash" = "$remote_hash" ]
+          done
+          local_docker image inspect "$image" --format '{{json .}}' > gateway-local-image.json
+      - name: Join reviewed nonsecret identities and execute fixed forward transaction
+        if: inputs.operation == 'activate'
+        env:
+          DELIVERY_IDENTITY: ${{ inputs.delivery_identity }}
+          SECRET_ID: ${{ inputs.secret_id }}
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 - <<'PY'
+          import json, os, re
+          gateway = json.load(open('gateway-build-receipt.json'))
+          delivery = json.loads(os.environ['DELIVERY_IDENTITY'])
+          assert set(delivery) == {'sourceCommit','sourceTree','imageDigest','runId','attempt','probeHelperBlobSha'}
+          for key in ('sourceCommit','sourceTree','probeHelperBlobSha'): assert re.fullmatch(r'[0-9a-f]{40}', delivery[key])
+          for key in ('runId','attempt'): assert re.fullmatch(r'[1-9][0-9]*', delivery[key])
+          assert re.fullmatch(r'ghcr\.io/olivium-dev/delivery-service@sha256:[0-9a-f]{64}', delivery['imageDigest'])
+          assert os.environ['SECRET_ID'] == '' or re.fullmatch(r'[a-z0-9]{25}', os.environ['SECRET_ID'])
+          delivery['image'] = delivery['imageDigest']
+          gateway['imageId'] = json.load(open('gateway-local-image.json'))['Id']
+          gateway['buildRunId'], gateway['buildAttempt'] = gateway['runId'], gateway['attempt']
+          # Runtime run identity is this activation, build identity remains independently checked artifact.
+          gateway['runId'], gateway['attempt'] = os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT']
+          daemon = json.load(open('gateway-local-daemon.json'))
+          assert daemon['Name'] == 'olivium-ephemerals' and daemon['Swarm']['NodeAddr'] == '192.168.2.20'
+          with open('paired-payload.json','x') as output:
+              json.dump({'gateway':gateway,'delivery':delivery,'secretId':os.environ['SECRET_ID'],
+                         'daemonId':daemon['ID'],'nodeId':daemon['Swarm']['NodeID']}, output)
+          PY
+          export PAIRED_PAYLOAD_FILE="$PWD/paired-payload.json"
+          bash scripts/run-staging-paired-activation.sh
+      - name: Remove only this run's registry credential and ephemeral private evidence
+        if: always() && steps.custody.outputs.created == 'true'
+        run: |
+          set -euo pipefail
+          ssh jeeb-staging python3 - "$REMOTE_PAIRED_ROOT" <<'PY'
+          import os, pathlib, re, stat, sys
+          path = pathlib.Path(sys.argv[1])
+          assert re.fullmatch(r'\.jeeb-deploy/paired-runtime-[1-9][0-9]*-[1-9][0-9]*', str(path))
+          assert not path.parent.is_symlink()
+          fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+          info = os.fstat(fd)
+          assert info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700
+          allowed = {'config.json','runtime.json','staging-paired-engine.py','staging-paired-custody.py',
+            'security-cutover-observed-spec.json','security-cutover-observed-version','security-cutover-observed-id'}
+          allowed.update(role+'-'+suffix for role in ('gateway','delivery') for suffix in
+            ('baseline.json','incumbent.json','incumbent-id','incumbent-version','candidate.json'))
+          for name in os.listdir(fd):
+              assert name in allowed
+              info = os.stat(name,dir_fd=fd,follow_symlinks=False)
+              assert stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
+              os.unlink(name,dir_fd=fd)
+          os.close(fd); os.rmdir(path)
+          PY
