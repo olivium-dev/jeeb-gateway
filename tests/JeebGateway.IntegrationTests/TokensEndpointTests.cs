@@ -6,8 +6,10 @@ using FluentAssertions;
 using JeebGateway.Tokens;
 using JeebGateway.Users;
 using Microsoft.AspNetCore.Mvc.Testing;
+using Microsoft.AspNetCore.TestHost;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Tokens;
 using Xunit;
@@ -268,6 +270,37 @@ public class TokensEndpointTests : IClassFixture<WebApplicationFactory<Program>>
         token.Subject.Should().Be(userId);
         token.Claims.Where(claim => claim.Type == "roles").Select(claim => claim.Value)
             .Should().Contain(Roles.Admin);
+    }
+
+    [Fact]
+    public async Task RolelessMint_AfterLocalProjectionLoss_UsesDurableUserManagementRoleState()
+    {
+        const string userId = "aeaeaeae-aeae-aeae-aeae-aeaeaeaeaeae";
+        using var restartFactory = _factory.WithWebHostBuilder(builder =>
+            builder.ConfigureTestServices(services =>
+            {
+                // A fresh gateway process: no local user projection or dev-role bridge remains.
+                Fakes.OwnerServiceFakes.UseInMemoryUsers(services);
+                services.RemoveAll<IUserManagementDualRoleClient>();
+                services.RemoveAll<Fakes.TestUserManagementDualRoleClient>();
+                services.AddSingleton<Fakes.TestUserManagementDualRoleClient>();
+                services.AddSingleton<IUserManagementDualRoleClient>(provider =>
+                    provider.GetRequiredService<Fakes.TestUserManagementDualRoleClient>());
+            }));
+        restartFactory.Services.GetRequiredService<Fakes.TestUserManagementDualRoleClient>()
+            .Seed(userId, new[] { Roles.Client, Roles.Jeeber }, Roles.Jeeber);
+        var client = restartFactory.CreateClient();
+        client.DefaultRequestHeaders.Add(MintHeader, MintKey);
+
+        var response = await client.PostAsJsonAsync("/auth/tokens", new { userId });
+
+        response.StatusCode.Should().Be(HttpStatusCode.OK);
+        var pair = await response.Content.ReadFromJsonAsync<TokenPairResponse>();
+        var token = new JwtSecurityTokenHandler().ReadJwtToken(pair!.AccessToken);
+        token.Claims.Where(claim => claim.Type == "roles").Select(claim => claim.Value)
+            .Should().BeEquivalentTo(new[] { Roles.Client, Roles.Jeeber });
+        token.Claims.Single(claim => claim.Type == "active_role").Value
+            .Should().Be(Roles.Jeeber);
     }
 
     private async Task<TokenPairResponse> Issue(string userId)

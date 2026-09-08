@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Http.Json;
 using FluentAssertions;
 using JeebGateway.Availability;
+using JeebGateway.Requests;
 using JeebGateway.Services.Clients;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Testing;
@@ -72,11 +73,13 @@ public class JeebOffersAcceptHardeningTests
                 {
                     AcceptedOfferId = "offer-legit",
                     JeeberId = "jeeber-other",
-                    RejectedOfferIds = Array.Empty<string>()
+                    RejectedOfferIds = Array.Empty<string>(),
+                    AcceptanceToken = "00000000-0000-0000-0000-000000000001",
                 }
             }
         };
         using var factory = NewUpstreamFactory(fake);
+        await SeedAssignableRequestAsync(factory, "req-legit", "client-owner");
         SeedRouting(factory, offerId: "offer-legit", requestId: "req-legit", jeeberId: "jeeber-other");
 
         var resp = await ClientActor(factory, "client-owner")
@@ -101,11 +104,13 @@ public class JeebOffersAcceptHardeningTests
                 {
                     AcceptedOfferId = "offer-idem",
                     JeeberId = "jeeber-idem",
-                    RejectedOfferIds = Array.Empty<string>()
+                    RejectedOfferIds = Array.Empty<string>(),
+                    AcceptanceToken = "00000000-0000-0000-0000-000000000001",
                 }
             }
         };
         using var factory = NewUpstreamFactory(fake);
+        await SeedAssignableRequestAsync(factory, "req-idem", "client-idem");
         SeedRouting(factory, offerId: "offer-idem", requestId: "req-idem", jeeberId: "jeeber-idem");
 
         // No Idempotency-Key header on the request.
@@ -148,6 +153,20 @@ public class JeebOffersAcceptHardeningTests
     private static void SeedRouting(
         WebApplicationFactory<Program> factory, string offerId, string requestId, string jeeberId)
         => factory.Services.GetRequiredService<IOfferRequestIndex>().Record(offerId, requestId, jeeberId);
+
+    private static async Task SeedAssignableRequestAsync(
+        WebApplicationFactory<Program> factory, string requestId, string clientId)
+        => await factory.Services.GetRequiredService<IRequestsStore>().CreateAsync(
+            new CreateRequestInput
+            {
+                Id = requestId,
+                ClientId = clientId,
+                Description = "Accept hardening parcel",
+                TierId = "flash",
+                PickupLocation = new GeoPoint { Lat = 33.5138, Lng = 36.2765 },
+                DropoffLocation = new GeoPoint { Lat = 33.5238, Lng = 36.2865 },
+            },
+            CancellationToken.None);
 
     // The V1 accept caller is the request-owning CLIENT (offer.accept {client}).
     private static HttpClient ClientActor(WebApplicationFactory<Program> factory, string clientId)
@@ -238,7 +257,12 @@ public class JeebOffersAcceptHardeningTests
         public Task<DeliveryRequestUpstream> CreateRequestAsync(CreateDeliveryRequestUpstream body, CancellationToken ct)
             => throw new NotSupportedException();
         public Task<DeliveryRowUpstream> CreateDeliveryRowAsync(CreateDeliveryRowUpstream body, CancellationToken ct)
-            => throw new NotSupportedException();
+            => Task.FromResult(new DeliveryRowUpstream
+            {
+                Id = body.Id,
+                TenantId = body.TenantId,
+                Status = "Ordered",
+            });
         public Task<DeliveryRequestUpstream> GetDeliveryAsync(string deliveryId, CancellationToken ct)
             => throw new NotSupportedException();
         public Task<DeliveryOtpVerifyResult> VerifyOtpAsync(string deliveryId, string otpCode, CancellationToken ct)

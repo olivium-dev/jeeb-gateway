@@ -141,13 +141,18 @@ public sealed class UsersMeController : ControllerBase
         // from the local UM projection (same source the switch path uses), falling back to
         // the token claim only when the projection is empty. THIN: no new logic/state — the
         // user's role membership is owned by user-management; we read + translate it.
-        var (opaqueRoles, persistedActive) = await ResolveRoleStateAsync(userId, ct);
+        var (opaqueRoles, persistedActive, devProjectionActive) = await ResolveRoleStateAsync(userId, ct);
         var contractRoles = JeebRoleTranslator.ToContract(opaqueRoles);
 
-        // JEEBER-TAP fix: the persisted active_role is the AUTHORITY; the session claim is a
-        // mint-time snapshot that refresh re-pins, so it never sees a later role change.
+        // JEEBER-TAP fix: the persisted active_role is normally the AUTHORITY; the session
+        // claim is a mint-time snapshot that refresh re-pins, so it never sees a later role
+        // change. The sole exception is a [DevOnly] seed: register cannot persist its requested
+        // role in UM, but the completed gateway projection does. ResolveRoleStateAsync exposes
+        // that local active role only after proving it is a seeded, projection-held role absent
+        // from UM. Real identities and ordinary projection drift therefore retain UM precedence.
         var contractActive = JeebRoleTranslator.ToContract(
-            HoldsRole(opaqueRoles, persistedActive) ? persistedActive : tokenActive);
+            devProjectionActive
+            ?? (HoldsRole(opaqueRoles, persistedActive) ? persistedActive : tokenActive));
 
         var cacheKey = ProfileCacheKeys.ForUser(userId);
         if (!_cache.TryGetValue(cacheKey, out ProfileDisplay? display))
@@ -547,7 +552,7 @@ public sealed class UsersMeController : ControllerBase
     /// <see cref="ResolveAvailableRolesAsync"/> plus the OPAQUE active role the SAME
     /// authoritative user-management read already carries (no extra upstream call).
     /// </summary>
-    private async Task<(IReadOnlyList<string> AvailableRoles, string? ActiveRole)>
+    private async Task<(IReadOnlyList<string> AvailableRoles, string? ActiveRole, string? DevProjectionActiveRole)>
         ResolveRoleStateAsync(string userId, CancellationToken ct)
     {
         var owner = await _dualRole.GetUserRolesAsync(userId, ct);
@@ -562,7 +567,46 @@ public sealed class UsersMeController : ControllerBase
         if (seeded is { Count: > 0 })
             baseRoles = baseRoles.Union(seeded, StringComparer.OrdinalIgnoreCase).ToList();
 
-        return (baseRoles, owner.ActiveRole);
+        return (baseRoles, owner.ActiveRole,
+            await ResolveDevProjectionActiveRoleAsync(userId, owner.AvailableRoles, seeded, ct));
+    }
+
+    /// <summary>
+    /// Returns a projection active role only for the completed DevTool seed seam. A local role
+    /// can never replace UM merely because a stale projection happens to contain it: it must be
+    /// in the DevOnly bridge, be held by the projection, and be absent from UM's role set.
+    /// </summary>
+    private async Task<string?> ResolveDevProjectionActiveRoleAsync(
+        string userId,
+        IReadOnlyList<string> persistedRoles,
+        IReadOnlyList<string>? seededRoles,
+        CancellationToken ct)
+    {
+        if (seededRoles is not { Count: > 0 }) return null;
+
+        try
+        {
+            var projection = await _users.GetByIdAsync(userId, ct);
+            var active = projection?.ActiveRole;
+            return HoldsRole((IReadOnlyList<string>?)projection?.Roles ?? Array.Empty<string>(), active)
+                   && HoldsRole(seededRoles, active)
+                   && !HoldsRole(persistedRoles, active)
+                ? active
+                : null;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // This best-effort DevTool reconciliation must not turn an otherwise valid /me
+            // read into a failure. Falling back to UM is the safe default.
+            _log.LogWarning(ex,
+                "v1/users/me dev-seed projection role read failed for userId={UserId}; retaining UM active role",
+                userId);
+            return null;
+        }
     }
 
     /// <summary>True when <paramref name="role"/> is a non-blank member of <paramref name="roles"/>.</summary>

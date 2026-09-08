@@ -75,6 +75,9 @@ public class ClientVisibilityAndReceiptTests
         {
             ClientId = clientId,
             Description = "visibility parcel",
+            TierId = "flash",
+            PickupLocation = new GeoPoint { Lat = 33.5138, Lng = 36.2765 },
+            DropoffLocation = new GeoPoint { Lat = 33.5238, Lng = 36.2865 },
         }, CancellationToken.None);
 
         var offer = await offers.TrySubmitAsync(
@@ -92,6 +95,7 @@ public class ClientVisibilityAndReceiptTests
             AcceptedOfferId = offer.Id,
             JeeberId = jeeberId,
             RejectedOfferIds = Array.Empty<string>(),
+            AcceptanceToken = "00000000-0000-0000-0000-000000000001",
         };
         factory.Services.GetRequiredService<IOfferRequestIndex>()
             .Record(offer.Id, created.Id, jeeberId);
@@ -304,6 +308,9 @@ public class ClientVisibilityAndReceiptTests
         {
             ClientId = clientId,
             Description = "upstream accept parcel",
+            TierId = "flash",
+            PickupLocation = new GeoPoint { Lat = 33.5138, Lng = 36.2765 },
+            DropoffLocation = new GeoPoint { Lat = 33.5238, Lng = 36.2865 },
         }, CancellationToken.None);
 
         offerService.Envelope = new OfferAcceptWire
@@ -311,6 +318,7 @@ public class ClientVisibilityAndReceiptTests
             AcceptedOfferId = offerId,
             JeeberId = jeeberId,
             RejectedOfferIds = Array.Empty<string>(),
+            AcceptanceToken = "00000000-0000-0000-0000-000000000001",
         };
         // The owner-scoped offers list serves the accepted bid at accept time.
         offers.ListOverride = _ => new List<PendingOffer>
@@ -562,7 +570,21 @@ public class ClientVisibilityAndReceiptTests
         public Task<int> CountActiveDeliveriesByJeeberAsync(string jeeberId, CancellationToken ct)
             => Task.FromResult(0);
 
-        public Task<IReadOnlyList<DeliveryTierDto>> ListTiersAsync(CancellationToken ct) => throw new NotSupportedException();
+        public Task<IReadOnlyList<DeliveryTierDto>> ListTiersAsync(CancellationToken ct)
+            => Task.FromResult<IReadOnlyList<DeliveryTierDto>>(new[]
+            {
+                new DeliveryTierDto
+                {
+                    Id = "00000000-0000-0000-0000-0000000000f1",
+                    Name = "Flash",
+                    SlaHours = 1,
+                    RadiusKm = 8,
+                    CommissionRate = 0.10,
+                    PriceHint = "Fastest dispatch",
+                    CreatedAt = DateTimeOffset.UnixEpoch,
+                    UpdatedAt = DateTimeOffset.UnixEpoch,
+                },
+            });
         public Task<DeliveryRequestUpstream> CreateRequestAsync(CreateDeliveryRequestUpstream body, CancellationToken ct) => throw new NotSupportedException();
         public Task<DeliveryRequestUpstream> GetDeliveryAsync(string deliveryId, CancellationToken ct) => throw new NotSupportedException();
         public Task<DeliveryOtpVerifyResult> VerifyOtpAsync(string deliveryId, string otpCode, CancellationToken ct) => throw new NotSupportedException();

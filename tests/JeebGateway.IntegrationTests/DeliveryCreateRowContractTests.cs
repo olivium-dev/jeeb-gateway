@@ -58,6 +58,29 @@ public class DeliveryCreateRowContractTests
     }
 
     [Fact]
+    public async Task CreateDeliveryRowAsync_CapConflict_IsNotMisclassifiedAsAnIdempotentSeedReplay()
+    {
+        var client = ClientReturning(
+            HttpStatusCode.Conflict,
+            """{"reason":"jeeber_at_active_delivery_cap","active_count":2,"limit":2}""");
+
+        var action = () => client.CreateDeliveryRowAsync(new CreateDeliveryRowUpstream
+        {
+            Id = RowId,
+            TenantId = "tenant-1",
+            ClientId = "client-1",
+            JeeberId = "jeeber-at-cap",
+            TierId = "flash",
+            PickupLat = 25.2,
+            PickupLng = 55.3,
+        }, CancellationToken.None);
+
+        var error = await action.Should().ThrowAsync<DeliveryCreateRowException>();
+        error.Which.StatusCode.Should().Be((int)HttpStatusCode.Conflict);
+        error.Which.Reason.Should().Be("jeeber_at_active_delivery_cap");
+    }
+
+    [Fact]
     public void DeliveryRowUpstream_Deserializes_delivery_id_With_WebDefaults()
     {
         // Direct DTO bind under the SAME options the client uses

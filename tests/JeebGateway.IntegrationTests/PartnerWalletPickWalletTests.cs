@@ -8,6 +8,7 @@ using FluentAssertions;
 using JeebGateway.Admin;
 using JeebGateway.Partner;
 using JeebGateway.service.ServiceWallet;
+using JeebGateway.Users;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Xunit;
@@ -304,6 +305,54 @@ public sealed class PartnerWalletPickWalletTests
         wallet.InitiateCount.Should().Be(0);
     }
 
+    [Fact]
+    public async Task DevTool_SeededJeeber_WithExistingUserHolder_CompletesCashCreditAndTopup()
+    {
+        // The live Dev Tool sequence is: seed a Jeeber, ensure its wallet, cash-credit the
+        // partner, then top up the Jeeber. wallet-service preserves a pre-existing generic
+        // "user" holder type, so this verifies the later PartnerWallet BOPLA check does not
+        // turn a successful ensure into a misleading 502.
+        var wallet = new StubWalletClient
+        {
+            TargetHolderTypeOverride = "user",
+            HolderWallets = { Wallet(Currency, "main", isActive: true) },
+            SystemWallets = { Wallet(Currency, SystemType, isActive: true) },
+        };
+        var seededRoles = new DevSeededRoleStore();
+        seededRoles.Record(
+            TargetHolderId.ToString("D"),
+            email: null,
+            new[] { Roles.Client, Roles.Jeeber });
+        var service = Service(wallet, seededRoles);
+
+        await service.CreditPartnerFromCashAsync(
+            PartnerId, OperatorId, 25m, "devtool-cash-credit", "devtool seed", default);
+        var topup = await service.ExecuteTopupAsync(
+            PartnerId, TargetHolderId, 25m, "devtool-topup", "devtool seed", default);
+
+        topup.Status.Should().Be("executed");
+        wallet.InitiateCount.Should().Be(2,
+            "both the Dev Tool cash-credit and its follow-up Jeeber funding saga must reach wallet-service");
+    }
+
+    [Fact]
+    public async Task GenericUserHolder_WithoutDevSeededJeeberRole_RemainsRejectedBeforeMoneyMove()
+    {
+        var wallet = new StubWalletClient
+        {
+            TargetHolderTypeOverride = "user",
+            HolderWallets = { Wallet(Currency, "main", isActive: true) },
+        };
+
+        var act = async () => await Service(wallet).ExecuteTopupAsync(
+            PartnerId, TargetHolderId, 10m, "idem-generic-user", null, default);
+
+        await act.Should().ThrowAsync<PartnerWalletException>()
+            .WithMessage("*not an eligible jeeber target*");
+        wallet.InitiateCount.Should().Be(0,
+            "an unseeded generic user must not become a BOPLA top-up target");
+    }
+
     // ── helpers ───────────────────────────────────────────────────────────────────────────────
 
     private static Wallet Wallet(int currency, string? type, bool isActive, decimal amount = 100m)
@@ -316,13 +365,16 @@ public sealed class PartnerWalletPickWalletTests
             IsActive = isActive,
         };
 
-    private static PartnerWalletService Service(StubWalletClient wallet)
+    private static PartnerWalletService Service(
+        StubWalletClient wallet,
+        IDevSeededRoleStore? devSeededRoles = null)
         => new(
             wallet,
             new StubOperationStore(),
             new StubAuditLog(),
             Options.Create(new PartnerWalletOptions { CurrencyId = Currency }),
-            NullLogger<PartnerWalletService>.Instance);
+            NullLogger<PartnerWalletService>.Instance,
+            devSeededRoles ?? new DevSeededRoleStore());
 
     /// <summary>Offline stub — serves the configured wallet lists and captures the initiated saga request.</summary>
     private sealed class StubWalletClient : SwServiceWalletClient
@@ -364,7 +416,16 @@ public sealed class PartnerWalletPickWalletTests
             => SystemWalletAsync();
 
         public override Task<ExpectedTransaction> PredictAsync(TransactionRequest body)
-            => Task.FromResult(new ExpectedTransaction { GrossAmount = 0, Fees = 0, Summary = "stub" });
+        {
+            var amount = body.Transactions.Single().Amount;
+            return Task.FromResult(new ExpectedTransaction
+            {
+                GrossAmount = amount,
+                Fees = 0,
+                NetAmount = amount,
+                Summary = "stub",
+            });
+        }
 
         public override Task<ExpectedTransaction> PredictAsync(TransactionRequest body, CancellationToken ct)
             => PredictAsync(body);

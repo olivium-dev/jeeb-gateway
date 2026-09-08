@@ -79,20 +79,28 @@ public sealed class JeeberWalletProvisioningTests
     }
 
     [Fact]
-    public async Task EnsureJeeber_RejectsExistingOppositeHolderTypeBeforePut()
+    public async Task EnsureJeeber_ReplaysExistingUserHolderMetadata_Idempotently()
     {
         var handler = new ProvisioningHandler(
             existingWalletType: "legacy-cash",
-            existingHolderType: "person");
+            existingHolderType: "user");
         var provisioner = NewProvisioner(handler);
 
-        await provisioner.Invoking(value => value.EnsureAsync(
-                HolderId,
-                CancellationToken.None))
-            .Should().ThrowAsync<WalletProvisioningUnavailableException>()
-            .WithMessage("*not 'jeeber'*");
+        // A Jeeber is a regular user gaining the driver role. Wallet-service locks
+        // holder metadata during ensure, so a role grant must replay the user's
+        // existing generic holder type rather than try to rewrite it to "jeeber".
+        await provisioner.EnsureAsync(HolderId, CancellationToken.None);
+        await provisioner.EnsureAsync(HolderId, CancellationToken.None);
 
-        handler.EnsureBody.Should().BeNull();
+        using var request = JsonDocument.Parse(handler.EnsureBody!);
+        var holder = request.RootElement.GetProperty("walletHolder");
+        holder.GetProperty("holderName").GetString().Should().Be("legacy");
+        holder.GetProperty("holderType").GetString().Should().Be("user");
+        var wallets = request.RootElement.GetProperty("wallets").EnumerateArray().ToArray();
+        wallets.Single(wallet => wallet.GetProperty("currencyID").GetInt32() == 2)
+            .GetProperty("type").GetString().Should().Be("legacy-cash");
+        wallets.Single(wallet => wallet.GetProperty("currencyID").GetInt32() == 7)
+            .GetProperty("type").GetString().Should().Be("jeeb");
     }
 
     [Fact]

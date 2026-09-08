@@ -5,6 +5,7 @@ using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using JeebGateway.JeebWallet;
+using JeebGateway.Partner;
 using JeebGateway.service.ServiceWallet;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
@@ -69,15 +70,22 @@ public sealed class WalletSufficiencyGuard : IWalletSufficiencyGuard
 {
     private readonly ServiceWalletClient _wallet;
     private readonly WalletGuardOptions _options;
+    private readonly int _currencyId;
     private readonly ILogger<WalletSufficiencyGuard> _logger;
 
     public WalletSufficiencyGuard(
         ServiceWalletClient wallet,
         IOptions<WalletGuardOptions> options,
+        IOptions<PartnerWalletOptions> partnerWalletOptions,
         ILogger<WalletSufficiencyGuard> logger)
     {
         _wallet = wallet;
         _options = options.Value;
+        // Keep the affordability gate on the identical configured currency that
+        // GET /v1/jeeb/wallet presents. Picking a dominant group made an equal
+        // count tie depend on numeric CurrencyID, so the guard could see zero
+        // while the Jeeber wallet showed a funded configured wallet.
+        _currencyId = partnerWalletOptions.Value.CurrencyId;
         _logger = logger;
     }
 
@@ -104,31 +112,27 @@ public sealed class WalletSufficiencyGuard : IWalletSufficiencyGuard
             return new WalletGuardResult(_options.IsFailOpen, requiredFee, null, null, DegradedByUpstreamFailure: true);
         }
 
-        var (available, currency) = ProjectSingleCurrencyBalance(holder);
+        var (available, currency) = ProjectConfiguredCurrencyBalance(holder, _currencyId);
         return new WalletGuardResult(available >= requiredFee, requiredFee, available, currency, DegradedByUpstreamFailure: false);
     }
 
     /// <summary>
-    /// Correction 6: unlike JeebWalletProjection, sum only the DOMINANT currency group —
-    /// a compare against a single-currency fee must not blend balances across currencies.
+    /// Mirrors <see cref="JeebWalletProjection.ProjectBalance"/>'s configured-currency
+    /// filter. A compare against a single-currency fee must not blend balances across
+    /// currencies or select one by inventory shape.
     /// </summary>
-    private static (decimal Available, string? Currency) ProjectSingleCurrencyBalance(GetHolderWallets? holder)
+    private static (decimal Available, string? Currency) ProjectConfiguredCurrencyBalance(
+        GetHolderWallets? holder,
+        int currencyId)
     {
-        // R-M1 (G-01): drop non-spendable cod_* legs BEFORE the currency grouping, or COD
-        // float could both inflate the balance and flip which currency group is dominant.
-        var active = (holder?.Wallets ?? new List<Wallet>())
-            .Where(w => w.IsActive && SpendableWalletTypes.IsSpendable(w.Type))
-            .ToList();
-        if (active.Count == 0) return (0m, null);
-
-        var dominant = active
-            .GroupBy(w => w.CurrencyID)
-            .OrderByDescending(g => g.Count())
-            .ThenBy(g => g.Key)
-            .First();
+        // R-M1 (G-01): COD float never contributes to spendable balance.
+        var available = (holder?.Wallets ?? new List<Wallet>())
+            .Where(w => w is { IsActive: true } && SpendableWalletTypes.IsSpendable(w.Type))
+            .Where(w => w.CurrencyID == currencyId)
+            .Sum(w => (decimal)w.Amount);
 
         // No ISO mapping exists anywhere in this codebase (JeebWalletProjection.ResolveCurrency);
         // null is honest, not fabricated.
-        return ((decimal)dominant.Sum(w => w.Amount), null);
+        return (available, null);
     }
 }

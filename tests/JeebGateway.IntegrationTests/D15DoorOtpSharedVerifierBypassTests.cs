@@ -312,6 +312,7 @@ public class D15DoorOtpSharedVerifierBypassTests
                     AcceptedOfferId  = offerId,
                     JeeberId         = Jeeber,
                     RejectedOfferIds = Array.Empty<string>(),
+                    AcceptanceToken  = "00000000-0000-0000-0000-000000000001",
                 },
             });
 
@@ -408,7 +409,20 @@ public class D15DoorOtpSharedVerifierBypassTests
         public Task<DeliveryRequestUpstream> StatusTransitionAsync(string deliveryId, string status, CancellationToken ct)
             => throw new NotSupportedException();
         public Task<IReadOnlyList<JeebGateway.Tiers.DeliveryTierDto>> ListTiersAsync(CancellationToken ct)
-            => throw new NotSupportedException();
+            => Task.FromResult<IReadOnlyList<JeebGateway.Tiers.DeliveryTierDto>>(new[]
+            {
+                new JeebGateway.Tiers.DeliveryTierDto
+                {
+                    Id = "00000000-0000-0000-0000-0000000000f1",
+                    Name = "Flash",
+                    SlaHours = 1,
+                    RadiusKm = 8,
+                    CommissionRate = 0.10,
+                    PriceHint = "Fastest dispatch",
+                    CreatedAt = DateTimeOffset.UnixEpoch,
+                    UpdatedAt = DateTimeOffset.UnixEpoch,
+                },
+            });
         public Task<ShipmentsListDto> ListShipmentsAsync(string? orderId, string? stage, int? limit, CancellationToken ct)
             => throw new NotSupportedException();
         public Task<DeliveryRequestUpstream> CreateRequestAsync(CreateDeliveryRequestUpstream body, CancellationToken ct)

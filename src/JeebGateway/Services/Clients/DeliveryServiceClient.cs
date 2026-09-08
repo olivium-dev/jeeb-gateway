@@ -159,13 +159,20 @@ public sealed class DeliveryServiceClient : IDeliveryServiceClient
         // emits the Go-expected wire shape.
         using var response = await _http.PostAsJsonAsync("deliveries", body, JsonOptions, ct);
 
-        // Idempotent upstream: ON CONFLICT (id) DO NOTHING. A 409 means the row
-        // already exists for this id (a retried create) — the seed goal is met,
-        // so echo back the id the gateway forwarded rather than treating it as a
-        // failure. 2xx returns the upstream-echoed row.
+        // Some older delivery-service builds used 409 {reason:"already_exists"}
+        // for an idempotent seed replay. Preserve ONLY that explicit legacy
+        // outcome. A blanket 409-as-success hid canonical assignment refusals
+        // such as jeeber_at_active_delivery_cap and made the gateway falsely
+        // report an accepted delivery.
         if (response.StatusCode == System.Net.HttpStatusCode.Conflict)
         {
-            return new DeliveryRowUpstream { Id = body.Id, TenantId = body.TenantId, Status = "Ordered" };
+            var reason = await TryReadReasonAsync(response, ct);
+            if (string.Equals(reason, "already_exists", StringComparison.OrdinalIgnoreCase))
+            {
+                return new DeliveryRowUpstream { Id = body.Id, TenantId = body.TenantId, Status = "Ordered" };
+            }
+
+            throw new DeliveryCreateRowException((int)response.StatusCode, reason);
         }
 
         if (!response.IsSuccessStatusCode)
