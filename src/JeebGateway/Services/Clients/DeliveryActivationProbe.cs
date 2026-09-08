@@ -13,12 +13,12 @@ internal static class DeliveryActivationProbe
     internal static void ValidateInvocation(string[] args, string? environment, string? tokenPath, string? baseUrl)
     {
         if (args.Length != 2 || args[0] != "--staging-delivery-auth-probe" ||
-            !ValidMode(args[1]) || environment != "Production" ||
+            !IsSupportedProbeOperation(args[1]) || environment != "Production" ||
             tokenPath != MountedPath || baseUrl != BaseUrl)
             throw new InvalidOperationException();
     }
 
-    private static bool ValidMode(string mode) => mode is "credential" or "wire" or "missing" or "invalid" or "duplicate";
+    private static bool IsSupportedProbeOperation(string mode) => mode is "credential" or "wire" or "missing" or "invalid" or "duplicate";
 
     internal static async Task<int> RunAsync(string[] args)
     {
@@ -50,7 +50,7 @@ internal static class DeliveryActivationProbe
     internal static async Task ProbeAsync(string mode, IConfiguration configuration,
         HttpMessageHandler transport, CancellationToken cancellationToken)
     {
-        if (!ValidMode(mode) || configuration["Services:Delivery:BaseUrl"] != BaseUrl)
+        if (!IsSupportedProbeOperation(mode) || configuration["Services:Delivery:BaseUrl"] != BaseUrl)
             throw new InvalidOperationException();
         var environment = new ProbeEnvironment();
         var token = await DeliveryServiceCredentialHandler.ReadTokenAsync(configuration, environment, cancellationToken);
