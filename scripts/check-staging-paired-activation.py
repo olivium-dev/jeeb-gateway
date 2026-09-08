@@ -28,7 +28,10 @@ def check_engine(source):
 def main():
     inventory = {str(path.relative_to(ROOT)) for path in (ROOT/'scripts').glob('*.py')
                  if '/var/run/docker.sock' in path.read_text() and path.name != Path(__file__).name}
-    assert inventory == {'scripts/staging-paired-engine.py'}
+    # Account explicitly for the offline argv fixture's expected socket string.
+    # It substitutes both SSH and Docker with temporary executables; do not hide
+    # the literal through concatenation or exclude every test from this inventory.
+    assert inventory == {'scripts/staging-paired-engine.py', 'scripts/test-staging-paired-ssh-argv.py'}
     source = (ROOT/'scripts/staging-paired-engine.py').read_text()
     check_engine(source)
     for changed in (source.replace("'gateway': 'jeeb-staging-jeeb-gateway'", "'gateway': 'another-service'"),

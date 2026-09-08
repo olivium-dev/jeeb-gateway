@@ -63,6 +63,7 @@ jobs:
           set -euo pipefail
           python3 scripts/test-staging-paired-custody.py
           python3 scripts/test-staging-paired-engine.py
+          python3 scripts/test-staging-paired-ssh-argv.py
           python3 scripts/test-staging-delivery-paired-activation-draft.py
           bash scripts/check-forward-only-authorities.sh
       - name: Log in to own registry for preparation
@@ -152,8 +153,13 @@ jobs:
           image=$(jq -er .image gateway-build-receipt.json)
           [[ "$image" =~ ^ghcr\.io/olivium-dev/jeeb-gateway@sha256:[0-9a-f]{64}$ ]]
           local_docker() {
-            ssh jeeb-staging env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_API_VERSION \
+            # OpenSSH joins its command arguments into one remote shell string.
+            # Serialize each argument so the JSON Go template remains one argv.
+            local remote_command
+            printf -v remote_command '%q ' \
+              env -u DOCKER_HOST -u DOCKER_CONTEXT -u DOCKER_TLS_VERIFY -u DOCKER_CERT_PATH -u DOCKER_API_VERSION \
               docker --host unix:///var/run/docker.sock --config "$REMOTE_PAIRED_ROOT" "$@"
+            ssh jeeb-staging "$remote_command"
           }
           local_docker info --format '{{json .}}' > gateway-local-daemon.json
           jq -e '.Name == "olivium-ephemerals" and .Swarm.NodeAddr == "192.168.2.20" and .Swarm.ControlAvailable == true and .Swarm.LocalNodeState == "active"' gateway-local-daemon.json >/dev/null
