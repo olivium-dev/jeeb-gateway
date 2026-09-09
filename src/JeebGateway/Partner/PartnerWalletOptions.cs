@@ -36,9 +36,11 @@ public sealed class PartnerWalletOptions
     /// <summary>
     /// The wallet-service currency id the partner wallet operates in. Used only to pick the
     /// holder's matching wallet among (possibly) several; NOT a money computation.
+    /// Jeeb prices/fees are USD. ID 2 is the current owner default, verified against
+    /// wallet-service currency metadata by the fee guard rather than assumed universal.
     /// </summary>
     [Range(1, int.MaxValue)]
-    public int CurrencyId { get; init; } = 1;
+    public int CurrencyId { get; init; } = 2;
 
     /// <summary>
     /// Upper bound (inclusive) the gateway rejects a single top-up/credit ABOVE with a 400 before

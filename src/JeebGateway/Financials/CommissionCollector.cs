@@ -27,7 +27,7 @@ public sealed class CommissionCollectionOptions
     public string Tag { get; set; } = "platform-fee";
 
     /// <summary>Wallet-service currency id the fee is debited in. Matches <c>PartnerWallet:CurrencyId</c>.</summary>
-    public int CurrencyId { get; set; } = 1;
+    public int CurrencyId { get; set; } = 2;
 }
 
 /// <summary>Everything the accept transition already knows. No settlement row exists yet.</summary>
@@ -283,8 +283,8 @@ public sealed class WalletCommissionCollector : ICommissionCollector
 
     /// <summary>
     /// Joins the settlement row to the accept-time debit by wallet-service's opaque external
-    /// reference — a READ plus a first-stamp-wins stamp, never a money move. A row that ends up
-    /// unstamped is precisely a delivery that settled without its fee ever being collected.
+    /// reference — verified READs plus a first-stamp-wins stamp, never a money move. An unstamped
+    /// row means collection has not been verified; it may require reconciliation after a read fault.
     /// </summary>
     public async Task LinkSettlementAsync(Settlement settlement, CancellationToken ct)
     {
@@ -292,16 +292,18 @@ public sealed class WalletCommissionCollector : ICommissionCollector
 
         try
         {
-            var txId = await _wallet.FindByExternalReferenceAsync(
-                ExternalReferenceFor(settlement.DeliveryId), ct);
+            if (!Guid.TryParse(settlement.JeeberId, out var holderId) || holderId == Guid.Empty) return;
+            var txId = await _wallet.FindExecutedDebitAsync(new CommissionDebitLookup(
+                ExternalReferenceFor(settlement.DeliveryId), IdempotencyKeyFor(settlement.DeliveryId),
+                holderId, settlement.Commission, _options.Tag, settlement.Currency), ct);
             if (txId is null)
             {
                 BusinessOutcomeTelemetry.CommissionUnlinkedSettlements.Add(1);
                 _log.LogWarning(
                     "commission.settle.unlinked settlementId={SettlementId} deliveryId={DeliveryId} "
-                    + "commission={Commission}; no accept-time debit carries this delivery's reference, "
-                    + "so this delivery settled with its fee UNCOLLECTED.",
-                    settlement.Id, settlement.DeliveryId, settlement.Total);
+                    + "commission={Commission}; no unique executed accept-time debit matches the "
+                    + "expected accounting entry; collection remains UNVERIFIED.",
+                    settlement.Id, settlement.DeliveryId, settlement.Commission);
                 return;
             }
 

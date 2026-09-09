@@ -7,8 +7,15 @@ namespace JeebGateway.IntegrationTests.Fakes;
 public sealed class FakeWalletClient : ServiceWalletClient
 {
     public double Balance { get; set; } = 1_000_000;
-    public int CurrencyId { get; set; } = 1;
+    public int CurrencyId { get; set; } = 2;
     public bool Unreachable { get; set; }
+    public bool CurrenciesUnreachable { get; set; }
+    public int WalletReads { get; private set; }
+    public ICollection<Currency> Currencies { get; set; } = new List<Currency>
+    {
+        new() { Id = 1, Code = "Credit", Rate = 0.1 },
+        new() { Id = 2, Code = "USD", Rate = 1 },
+    };
 
     public FakeWalletClient() : base("http://localhost", new HttpClient())
     {
@@ -16,6 +23,7 @@ public sealed class FakeWalletClient : ServiceWalletClient
 
     public override Task<GetHolderWallets> WalletsAsync(Guid holderId, CancellationToken ct)
     {
+        WalletReads++;
         if (Unreachable)
         {
             throw new HttpRequestException("simulated wallet-service outage");
@@ -37,4 +45,12 @@ public sealed class FakeWalletClient : ServiceWalletClient
 
     public override Task<GetHolderWallets> WalletsAsync(Guid holderId)
         => WalletsAsync(holderId, CancellationToken.None);
+
+    public override Task<ICollection<Currency>> CurrenciesAsync(CancellationToken ct)
+        => CurrenciesUnreachable
+            ? throw new HttpRequestException("simulated currency metadata outage")
+            : Task.FromResult(Currencies);
+
+    public override Task<ICollection<Currency>> CurrenciesAsync()
+        => CurrenciesAsync(CancellationToken.None);
 }

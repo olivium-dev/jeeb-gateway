@@ -683,13 +683,9 @@ builder.Services.AddSingleton<JeebGateway.Conversations.AcceptChatSettleReconcil
 builder.Services.AddHostedService(sp =>
     sp.GetRequiredService<JeebGateway.Conversations.AcceptChatSettleReconciler>());
 
-// S08 (D / H6,N2) — the realtime membership-ticket issuer. The /v1/realtime gate
-// mints a short-lived signed ticket scoped to (conversation, viewer, role) after
-// the chat-service membership check, so realtime-comunication-service can authorize
-// the WS join without calling chat-service (no inter-service coupling). HS256 over
-// a dedicated mounted membership-ticket key in containers (Jwt:SigningKey remains
-// the native compatibility fallback). That is NOT realtime's HS512 Guardian key.
-// Singleton — the key is read once.
+// Kept for the existing operational realtime probe only. Product chat no longer
+// requests descriptors or membership tickets; Firebase is its sole realtime path.
+// The shared realtime/location transport and its Guardian issuer remain separate.
 builder.Services.AddSingleton<JeebGateway.Conversations.Realtime.IRealtimeTicketIssuer,
                               JeebGateway.Conversations.Realtime.RealtimeTicketIssuer>();
 
@@ -1264,21 +1260,14 @@ builder.Services
             + "FeatureFlags:RequestsOwnerListMode reaches \"upstream-authority\".")
     .ValidateOnStart();
 
-// Firebase chat custom-token mint (POST /v1/chat/firebase-token) — the identity hop
-// that lets the client read its own thread straight from Firestore instead of
-// re-fetching it over REST. The signing key is referenced by absolute HOST path in
-// configuration and is never committed. Deployed environments always set that path;
-// the hosted validator parses the credential during startup, so readiness cannot turn
-// green with a missing, malformed, or cross-project mount. Local development may leave
-// the path empty, in which case the authenticated route reports 503.
-builder.Services.Configure<JeebGateway.Chat.Firebase.FirebaseCustomTokenOptions>(
-    builder.Configuration.GetSection(
-        JeebGateway.Chat.Firebase.FirebaseCustomTokenOptions.SectionName));
-builder.Services.AddSingleton<JeebGateway.Chat.Firebase.FirebaseCustomTokenMinter>();
-builder.Services.AddSingleton<JeebGateway.Chat.Firebase.IFirebaseCustomTokenMinter>(services =>
-    services.GetRequiredService<JeebGateway.Chat.Firebase.FirebaseCustomTokenMinter>());
-builder.Services.AddHostedService<
-    JeebGateway.Chat.Firebase.FirebaseCustomTokenStartupValidator>();
+// Firebase identity exchange: chat-service owns signing, membership and storage.
+// The gateway has no signing material and uses the same private owner base URL.
+builder.Services.AddHttpClient<JeebGateway.Chat.Firebase.IChatFirebaseIdentityClient,
+    JeebGateway.Chat.Firebase.ChatFirebaseIdentityClient>(client =>
+{
+    var apiUrl = builder.Configuration["ChatServiceApi:BaseUrl"];
+    if (!string.IsNullOrWhiteSpace(apiUrl)) client.BaseAddress = new Uri(apiUrl);
+});
 
 // S07 / BR-10 — delivery-service typed-client tunables (active-delivery cap).
 // Bound from the existing Services:Delivery block (which holds the upstream

@@ -310,15 +310,85 @@ guard = (ROOT / "src/JeebGateway/Services/Clients/GatewayDirectPushDispatchGuard
 for token in ("BindConfiguration", "IsCanonical", "HasNoConflictingDatabaseOverride", "ValidateOnStart"):
     if token not in program:
         fail(f"runtime startup Firebase validation is missing {token}")
-for token in (
-    "FirebaseCustomTokenStartupValidator",
-    "ValidateConfiguration",
-    "AddHostedService",
-):
-    if token not in program and token not in (
-        ROOT / "src/JeebGateway/Chat/Firebase/FirebaseCustomTokenMinter.cs"
-    ).read_text(encoding="utf-8"):
-        fail(f"runtime eager Firebase credential validation is missing {token}")
+def validate_chat_identity_ownership(
+    startup: str, controller: str, client: str, identity_sources: dict[str, str]
+) -> None:
+    """Gateway-only source gate; the separately deployed chat owner signs tokens.
+
+    This does not claim to prove another repository's runtime/ingress posture.
+    Owner activation remains explicitly gated off until private isolation is
+    verified. Legacy deploy mount/rotation safeguards above remain unchanged for
+    the coordinated owner-first rollout, though this gateway no longer reads keys.
+    """
+    for name in identity_sources:
+        if Path(name).name in {
+            "FirebaseCustomTokenMinter.cs", "FirebaseCustomTokenOptions.cs"
+        }:
+            fail("gateway must not retain local Firebase signing implementation/options")
+    for marker in (
+        "FirebaseCustomTokenStartupValidator", "IFirebaseCustomTokenMinter",
+        "AddSingleton<JeebGateway.Chat.Firebase.FirebaseCustomTokenMinter",
+    ):
+        if marker in startup or marker in controller:
+            fail(f"gateway Firebase identity must not register/use local signer: {marker}")
+    for label, source in {"controller": controller, **identity_sources}.items():
+        for forbidden in (
+            "RSA.Create(", "ImportFromPem(", "new JwtSecurityToken(",
+            "new SigningCredentials(", "File.ReadAllText(",
+        ):
+            if forbidden in source:
+                fail(f"gateway Firebase identity cannot sign/read credential material: {label}: {forbidden}")
+    for marker in (
+        "AddHttpClient<JeebGateway.Chat.Firebase.IChatFirebaseIdentityClient,",
+        "JeebGateway.Chat.Firebase.ChatFirebaseIdentityClient>",
+    ):
+        if marker not in startup:
+            fail(f"gateway Firebase identity owner proxy DI is missing {marker}")
+    registration = re.search(
+        r"AddHttpClient<JeebGateway\.Chat\.Firebase\.IChatFirebaseIdentityClient,\s*"
+        r"JeebGateway\.Chat\.Firebase\.ChatFirebaseIdentityClient>\(client =>\s*"
+        r"\{(?P<body>.*?)\}\);", startup, re.DOTALL,
+    )
+    if registration is None or any(marker not in registration.group("body") for marker in (
+        'builder.Configuration["ChatServiceApi:BaseUrl"]', "client.BaseAddress = new Uri(apiUrl)",
+    )):
+        fail("gateway Firebase identity must use the existing private ChatServiceApi owner base URL")
+    for marker in (
+        "[Authorize]", "[RequireCapability(Capabilities.ChatRead)]",
+        "UserIdentity.TryGetUserId(HttpContext, out var userId",
+        "User.FindFirstValue(ClaimTypes.Sid)", 'User.FindFirstValue("sub")',
+        "string.IsNullOrWhiteSpace(claimUid)",
+        "!string.Equals(claimUid, userId, StringComparison.Ordinal)",
+        "return Unauthorized();", "await _identity.MintAsync(userId, ct)",
+        "!string.Equals(minted.Uid, userId, StringComparison.Ordinal)",
+        "string.IsNullOrWhiteSpace(minted.Token)",
+        "minted.ExpiresAt <= DateTime.UtcNow",
+        "StatusCodes.Status503ServiceUnavailable", '"private, no-store"',
+    ):
+        if marker not in controller:
+            fail(f"gateway Firebase identity subject-bound fail-closed proxy is missing {marker}")
+    for forbidden in ("[FromBody]", "[FromQuery]", "_minter.Mint("):
+        if forbidden in controller:
+            fail(f"gateway Firebase identity cannot accept caller UID or mint locally: {forbidden}")
+    for marker in (
+        'PostAsJsonAsync("api/firebase/token", new { uid }, ct)',
+        "response.EnsureSuccessStatusCode()",
+        "ReadFromJsonAsync<FirebaseTokenResponse>",
+    ):
+        if marker not in client:
+            fail(f"gateway Firebase identity owner contract is missing {marker}")
+
+
+identity_directory = ROOT / "src/JeebGateway/Chat/Firebase"
+identity_sources = {
+    path.name: path.read_text(encoding="utf-8")
+    for path in identity_directory.glob("*.cs")
+}
+identity_controller = (
+    ROOT / "src/JeebGateway/Controllers/ChatFirebaseTokenController.cs"
+).read_text(encoding="utf-8")
+identity_client = identity_sources.get("ChatFirebaseIdentityClient.cs", "")
+validate_chat_identity_ownership(program, identity_controller, identity_client, identity_sources)
 if 'FeatureFlags:PushDispatchMode is pinned to \\"local\\" (ADR-0013)' not in program:
     fail("runtime startup no longer rejects a stale gateway direct-push rung")
 for value in (EXPECTED["projectId"], EXPECTED["projectNumber"], EXPECTED["firestoreDatabaseId"], EXPECTED["pushProducer"]):

@@ -86,6 +86,7 @@ public sealed class SettlementService : ISettlementService
         {
             // Idempotent re-submission with real data: the original numbers stand. Settle is
             // idempotent on the delivery id upstream, but skipping the call keeps settled_at stable.
+            await _commission.LinkSettlementAsync(existing, ct);
             return new SettlementResult(SettlementOutcome.AlreadySettled, existing, null);
         }
 
@@ -144,6 +145,9 @@ public sealed class SettlementService : ISettlementService
         if (existing is not null
             && !string.Equals(existing.State, SettlementState.PendingSettlement, StringComparison.Ordinal))
         {
+            // A prior accounting commit can outlive a failed debit lookup/stamp. Repair only the
+            // verified audit link; this never creates or executes another wallet transaction.
+            await _commission.LinkSettlementAsync(existing, ct);
             return new SettlementResult(SettlementOutcome.AlreadySettled, existing, null);
         }
 
@@ -306,14 +310,12 @@ public sealed class SettlementService : ISettlementService
         if (result.Created)
         {
             _earningsCache.Invalidate(result.Row.JeeberId);
-
-            // O1 (ADR-0011 + the accept amendment): the fee was taken at ACCEPT, so this moves no
-            // money — it only links the row to that debit, and counts the rows that have none.
-            await _commission.LinkSettlementAsync(result.Row, ct);
-
-            return new SettlementResult(SettlementOutcome.Settled, result.Row, null);
         }
 
-        return new SettlementResult(SettlementOutcome.AlreadySettled, result.Row, null);
+        // Include an idempotent upstream replay: an earlier link attempt may have failed after
+        // accounting committed. This is read/stamp-only and never retries money movement.
+        await _commission.LinkSettlementAsync(result.Row, ct);
+        return new SettlementResult(
+            result.Created ? SettlementOutcome.Settled : SettlementOutcome.AlreadySettled, result.Row, null);
     }
 }

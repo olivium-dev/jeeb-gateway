@@ -91,6 +91,34 @@ public sealed class WalletSufficiencyGuard : IWalletSufficiencyGuard
 
     public async Task<WalletGuardResult> CheckAsync(Guid holderId, decimal requiredFee, CancellationToken ct)
     {
+        // RequiredCommission is denominated in USD, never platform Credit units.
+        // Numeric IDs are deployment metadata: verify with the wallet owner before
+        // comparing any balance. A mapping failure cannot honor fail-open because
+        // that would permit a comparison in an unknown/wrong monetary unit.
+        try
+        {
+            var currencies = await _wallet.CurrenciesAsync(ct);
+            var configured = currencies?.Where(currency => currency is not null
+                && currency.Id == _currencyId).ToArray();
+            var usd = currencies?.Where(currency => currency is not null
+                && string.Equals(currency.Code, SettlementService.CurrencyUsd,
+                    StringComparison.OrdinalIgnoreCase)).ToArray();
+            if (_currencyId <= 0 || configured is not { Length: 1 }
+                || usd is not { Length: 1 } || usd[0].Id != _currencyId
+                || !string.Equals(configured[0].Code, SettlementService.CurrencyUsd,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogWarning("WalletSufficiencyGuard: configured currency {CurrencyId} "
+                    + "does not uniquely identify USD; refusing fee comparison.", _currencyId);
+                return new WalletGuardResult(false, requiredFee, null, null, DegradedByUpstreamFailure: true);
+            }
+        }
+        catch (Exception ex) when (!ct.IsCancellationRequested)
+        {
+            _logger.LogWarning(ex, "WalletSufficiencyGuard: cannot verify the fee currency with wallet-service.");
+            return new WalletGuardResult(false, requiredFee, null, null, DegradedByUpstreamFailure: true);
+        }
+
         GetHolderWallets? holder;
         try
         {
@@ -131,8 +159,7 @@ public sealed class WalletSufficiencyGuard : IWalletSufficiencyGuard
             .Where(w => w.CurrencyID == currencyId)
             .Sum(w => (decimal)w.Amount);
 
-        // No ISO mapping exists anywhere in this codebase (JeebWalletProjection.ResolveCurrency);
-        // null is honest, not fabricated.
-        return (available, null);
+        // CheckAsync verified this configured ID against the owner's currency list.
+        return (available, SettlementService.CurrencyUsd);
     }
 }

@@ -1298,7 +1298,7 @@ public sealed class PartnerWalletEndpointsTests
 
     /// <summary>
     /// Offline fake — overrides only the (virtual) wallet-service methods the partner BFF calls.
-    /// Every holder read returns a single wallet (CurrencyID=1) so the wallet-id resolution succeeds;
+    /// Every holder read returns a single USD wallet (CurrencyID=2) so wallet-id resolution succeeds;
     /// the saga initiate returns a header id the execute then "commits".
     /// </summary>
     private sealed class FakeWalletClient : SwServiceWalletClient
@@ -1334,7 +1334,7 @@ public sealed class PartnerWalletEndpointsTests
             {
                 new()
                 {
-                    WalletId = Guid.NewGuid(), HolderId = holderId, CurrencyID = 1, Amount = Balance,
+                    WalletId = Guid.NewGuid(), HolderId = holderId, CurrencyID = 2, Amount = Balance,
                     Type = "main", IsActive = true,
                 },
             },
@@ -1356,7 +1356,7 @@ public sealed class PartnerWalletEndpointsTests
                 {
                     new()
                     {
-                        WalletId = Guid.NewGuid(), CurrencyID = 1, Amount = 1_000_000, Type = "__SYSTEM__",
+                        WalletId = Guid.NewGuid(), CurrencyID = 2, Amount = 1_000_000, Type = "__SYSTEM__",
                         IsActive = true,
                     },
                 },

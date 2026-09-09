@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Runtime.CompilerServices;
 using FluentAssertions;
 using JeebGateway.Configuration;
 using Microsoft.AspNetCore.Hosting;
@@ -98,9 +99,9 @@ public sealed class JeebFirebaseContractTests
             PushProducer = pushProducer ?? JeebFirebaseContractOptions.CanonicalPushProducer,
         };
 
-    private static string RepositoryFile(string relativePath)
+    private static string RepositoryFile(string relativePath, [CallerFilePath] string testSource = "")
     {
-        var current = new DirectoryInfo(AppContext.BaseDirectory);
+        var current = new DirectoryInfo(Path.GetDirectoryName(testSource) ?? AppContext.BaseDirectory);
         while (current is not null && !File.Exists(Path.Combine(current.FullName, relativePath)))
         {
             current = current.Parent;

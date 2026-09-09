@@ -22,6 +22,7 @@ jobs:
       - name: Validate Jeeb Firebase, Chat, and push ownership contract
         run: |
           python3 scripts/validate-jeeb-firebase-contract.py
+          python3 scripts/test-firebase-identity-ownership-contract.py
           python3 scripts/validate-chat-b-activation-authority.py
           python3 scripts/test-chat-b-activation-cancellation-contract.py
           bash scripts/test-validate-firebase-service-account.sh
