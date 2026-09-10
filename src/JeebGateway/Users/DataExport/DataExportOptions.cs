@@ -18,6 +18,13 @@ public class DataExportOptions
     public bool Enabled { get; set; } = true;
 
     /// <summary>
+    /// Startup-only execution pause. False leaves requests, status, existing downloads
+    /// and credential readiness unchanged, but prevents new claims and packaging.
+    /// Queued deadlines are not extended. Changing this value requires a restart.
+    /// </summary>
+    public bool ProcessingEnabled { get; set; } = true;
+
+    /// <summary>
     /// Maximum time between queueing a request and delivering the
     /// download link. AC: "Secure download link sent via email/push
     /// within 72 hours."

@@ -19,21 +19,30 @@ public class DataExportProcessor : BackgroundService
     private readonly TimeProvider _clock;
     private readonly IOptions<DataExportOptions> _options;
     private readonly ILogger<DataExportProcessor> _logger;
+    private readonly DataExportProcessingPolicy _processing;
 
     public DataExportProcessor(
         IServiceProvider services,
         TimeProvider clock,
         IOptions<DataExportOptions> options,
-        ILogger<DataExportProcessor> logger)
+        ILogger<DataExportProcessor> logger,
+        DataExportProcessingPolicy processing)
     {
         _services = services;
         _clock = clock;
         _options = options;
         _logger = logger;
+        _processing = processing;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        if (_processing.IsPaused)
+        {
+            _logger.LogWarning("Data export processing is PAUSED; queued work is untouched. Availability and readiness policy are unchanged.");
+            return;
+        }
+
         if (!_options.Value.Enabled)
         {
             _logger.LogWarning(
@@ -71,7 +80,7 @@ public class DataExportProcessor : BackgroundService
 
     public async Task<int> ProcessOnceAsync(CancellationToken ct)
     {
-        if (!_options.Value.Enabled)
+        if (_processing.IsPaused || !_options.Value.Enabled)
             return 0;
 
         using var scope = _services.CreateScope();

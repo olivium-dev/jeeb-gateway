@@ -52,7 +52,8 @@ public sealed class DataExportDisabledContractTests
             artifacts,
             tokens,
             DisabledOptions(),
-            new FakeTimeProvider(Now));
+            new FakeTimeProvider(Now),
+            new DataExportProcessingPolicy(DisabledOptions()));
         var item = new StateWorkItem
         {
             WorkItemId = Guid.NewGuid(),
@@ -84,7 +85,8 @@ public sealed class DataExportDisabledContractTests
             services,
             new FakeTimeProvider(Now),
             DisabledOptions(),
-            NullLogger<DataExportProcessor>.Instance);
+            NullLogger<DataExportProcessor>.Instance,
+            new DataExportProcessingPolicy(DisabledOptions()));
 
         (await processor.ProcessOnceAsync(default)).Should().Be(0);
 

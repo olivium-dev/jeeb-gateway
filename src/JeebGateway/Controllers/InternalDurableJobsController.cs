@@ -1,5 +1,6 @@
 using JeebGateway.Auth.Capabilities;
 using JeebGateway.Jobs;
+using JeebGateway.Users.DataExport;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
@@ -21,8 +22,24 @@ public sealed class InternalDurableJobsController(DurableWorkSweepExecutor execu
 
     [HttpPost("data-exports/sweep")]
     [ProducesResponseType(typeof(DurableSweepSummary), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
     public async Task<ActionResult<DurableSweepSummary>> SweepDataExports(
         [FromQuery] int? limit,
-        CancellationToken ct) =>
-        Ok(await executor.SweepAsync(DurableWorkContract.DataExportKind, limit, ct));
+        CancellationToken ct)
+    {
+        try
+        {
+            return Ok(await executor.SweepAsync(DurableWorkContract.DataExportKind, limit, ct));
+        }
+        catch (DataExportProcessingPausedException)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new ProblemDetails
+            {
+                Type = "urn:jeeb:data-export-processing-paused",
+                Title = "Data export processing is paused",
+                Status = StatusCodes.Status503ServiceUnavailable,
+                Detail = "No work was claimed. Queued deadlines remain unchanged."
+            });
+        }
+    }
 }

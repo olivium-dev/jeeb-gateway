@@ -265,7 +265,8 @@ public class GdprDurableClockRestartTests
 
         var handler = new DataExportWorkHandler(
             packager, notifier, artifacts, NewTokenProtector(),
-            Options.Create(new DataExportOptions()), clock);
+            Options.Create(new DataExportOptions()), clock,
+            new DataExportProcessingPolicy(Options.Create(new DataExportOptions())));
         return new ExportGateway(NewExecutor(durable, clock, handler), packager, notifier);
     }
 
@@ -274,7 +275,8 @@ public class GdprDurableClockRestartTests
         new(durable, [handler],
             Options.Create(new DurableWorkExecutionOptions()),
             clock,
-            NullLogger<DurableWorkSweepExecutor>.Instance);
+            NullLogger<DurableWorkSweepExecutor>.Instance,
+            new DataExportProcessingPolicy(Options.Create(new DataExportOptions())));
 
     private static StateDataExportWorkflow NewExportWorkflow(IStateWorkItemClient durable, TimeProvider clock) =>
         new(durable, NewArtifactStore(clock), NewTokenProtector(),

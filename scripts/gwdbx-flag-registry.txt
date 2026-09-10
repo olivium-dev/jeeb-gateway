@@ -121,6 +121,7 @@ Services:Delivery:ImportTokenFile                     setting -
 Services:Delivery:ServiceToken                        setting -
 Services:Delivery:ServiceTokenFile                    setting -
 Users:DataExport:Enabled                              setting -
+Users:DataExport:ProcessingEnabled                    setting - # startup-only execution pause; availability/readiness remain independent
 Users:DataExport:SourceUnavailableRetryDelay          setting -
 
 # ---- setting: bound options knobs inventoried by the D1 Configure<T> arm -----

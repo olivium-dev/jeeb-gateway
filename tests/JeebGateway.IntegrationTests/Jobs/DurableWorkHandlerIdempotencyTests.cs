@@ -169,7 +169,8 @@ public sealed class DurableWorkHandlerIdempotencyTests
             artifacts,
             tokens,
             Options.Create(new DataExportOptions()),
-            clock);
+            clock,
+            new DataExportProcessingPolicy(Options.Create(new DataExportOptions())));
         var item = WorkItem(
             DurableWorkContract.DataExportKind,
             JsonSerializer.SerializeToElement(
@@ -229,7 +230,8 @@ public sealed class DurableWorkHandlerIdempotencyTests
             artifacts,
             tokens,
             Options.Create(new DataExportOptions()),
-            new FakeTimeProvider(now));
+            new FakeTimeProvider(now),
+            new DataExportProcessingPolicy(Options.Create(new DataExportOptions())));
         var item = WorkItem(
             DurableWorkContract.DataExportKind,
             JsonSerializer.SerializeToElement(
@@ -268,7 +270,8 @@ public sealed class DurableWorkHandlerIdempotencyTests
             artifacts,
             new FixedExportTokens(workId),
             Options.Create(new DataExportOptions()),
-            new FakeTimeProvider(now));
+            new FakeTimeProvider(now),
+            new DataExportProcessingPolicy(Options.Create(new DataExportOptions())));
         var item = WorkItem(
             DurableWorkContract.DataExportKind,
             JsonSerializer.SerializeToElement(
@@ -302,7 +305,8 @@ public sealed class DurableWorkHandlerIdempotencyTests
             {
                 SourceUnavailableRetryDelay = TimeSpan.FromMinutes(20),
             }),
-            new FakeTimeProvider(now));
+            new FakeTimeProvider(now),
+            new DataExportProcessingPolicy(Options.Create(new DataExportOptions())));
         var item = WorkItem(
             DurableWorkContract.DataExportKind,
             JsonSerializer.SerializeToElement(

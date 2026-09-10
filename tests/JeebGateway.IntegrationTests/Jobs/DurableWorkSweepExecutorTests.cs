@@ -200,7 +200,9 @@ public sealed class DurableWorkSweepExecutorTests
         [handler],
         Microsoft.Extensions.Options.Options.Create(options),
         clock ?? TimeProvider.System,
-        NullLogger<DurableWorkSweepExecutor>.Instance);
+        NullLogger<DurableWorkSweepExecutor>.Instance,
+        new JeebGateway.Users.DataExport.DataExportProcessingPolicy(
+            Microsoft.Extensions.Options.Options.Create(new JeebGateway.Users.DataExport.DataExportOptions())));
 
     private static StateWorkItem Item(
         int index,

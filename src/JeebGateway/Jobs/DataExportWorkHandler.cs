@@ -13,7 +13,8 @@ public sealed class DataExportWorkHandler(
     IPrivateArtifactStore artifacts,
     IDataExportTokenProtector tokens,
     IOptions<DataExportOptions> options,
-    TimeProvider clock) : IDurableWorkItemHandler
+    TimeProvider clock,
+    DataExportProcessingPolicy processing) : IDurableWorkItemHandler
 {
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
@@ -23,6 +24,9 @@ public sealed class DataExportWorkHandler(
         StateWorkItem item,
         CancellationToken ct)
     {
+        // Defense for direct callers too; never recover/mint/package/notify while paused.
+        processing.EnsureProcessingEnabled();
+
         if (!options.Value.Enabled)
         {
             return DurableWorkExecutionResult.Deferred(

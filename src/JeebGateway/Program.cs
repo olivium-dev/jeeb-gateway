@@ -2432,6 +2432,9 @@ builder.Services.AddSingleton<IAccountDeletionStore>(sp =>
 // SLA lives in DataExportOptions.Sla. The promised Postgres worker is DEAD (W5-11 deleted the
 // schema and the worker); the lifecycle moves to state-service work items — see register #16.
 builder.Services.Configure<DataExportOptions>(builder.Configuration.GetSection(DataExportOptions.SectionName));
+// Resolved by the legacy hosted processor before startup completes; all executor
+// scopes share this snapshot. No hot reload can release queued work mid-activation.
+builder.Services.AddSingleton<DataExportProcessingPolicy>();
 // Durability register #16 — data-export (GDPR 72-hr SLA + single-use download tokens) is CLOSED:
 // the queue, the deadline and the capability hash are state-service work items. Chain unreachable.
 builder.Services.AddSingleton<InMemoryDataExportStore>();
