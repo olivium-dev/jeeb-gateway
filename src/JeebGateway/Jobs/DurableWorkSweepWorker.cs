@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using JeebGateway.Users.DataExport;
 
 namespace JeebGateway.Jobs;
 
@@ -78,6 +79,10 @@ public sealed class DurableWorkSweepWorker(
                     kind, summary.Claimed, summary.Completed, summary.Deferred,
                     summary.Retried, summary.Failed, summary.LeaseLost, summary.Errors);
             }
+        }
+        catch (DataExportProcessingPausedException)
+        {
+            logger.LogWarning("Data export processing is PAUSED; no work was claimed and queued deadlines remain unchanged.");
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {

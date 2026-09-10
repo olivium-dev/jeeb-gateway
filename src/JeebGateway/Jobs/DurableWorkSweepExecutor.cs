@@ -1,5 +1,6 @@
 using System.Text.Json;
 using JeebGateway.StateService.Work;
+using JeebGateway.Users.DataExport;
 using Microsoft.Extensions.Options;
 
 namespace JeebGateway.Jobs;
@@ -77,7 +78,8 @@ public sealed class DurableWorkSweepExecutor(
     IEnumerable<IDurableWorkItemHandler> handlers,
     IOptions<DurableWorkExecutionOptions> options,
     TimeProvider clock,
-    ILogger<DurableWorkSweepExecutor> logger)
+    ILogger<DurableWorkSweepExecutor> logger,
+    DataExportProcessingPolicy exportProcessing)
 {
     private readonly IReadOnlyDictionary<string, IDurableWorkItemHandler> _handlers =
         handlers.ToDictionary(handler => handler.Kind, StringComparer.Ordinal);
@@ -90,6 +92,11 @@ public sealed class DurableWorkSweepExecutor(
         int? requestedLimit,
         CancellationToken ct)
     {
+        // Before even a claim: a processing pause must not consume attempts,
+        // acquire leases or rewrite the queue's due dates/statuses.
+        if (string.Equals(kind, DurableWorkContract.DataExportKind, StringComparison.Ordinal))
+            exportProcessing.EnsureProcessingEnabled();
+
         if (!_handlers.TryGetValue(kind, out var handler))
             throw new InvalidOperationException($"No durable work handler is registered for kind '{kind}'.");
 
