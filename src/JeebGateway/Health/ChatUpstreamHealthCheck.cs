@@ -25,7 +25,7 @@ public sealed class ChatUpstreamHealthCheck(
         {
             return HealthCheckResult.Degraded(
                 $"chat disabled by flag ({FlagConfigurationKey}=false): every "
-                + "/v1/conversations/* and /v1/realtime/*:chat:* route returns 503");
+                + "/v1/conversations/* route returns 503 (legacy chat socket routes remain retired)");
         }
 
         if (string.IsNullOrWhiteSpace(configuration[BaseUrlConfigurationKey]))

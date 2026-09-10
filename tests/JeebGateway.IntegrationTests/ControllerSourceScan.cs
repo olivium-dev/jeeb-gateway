@@ -1,21 +1,22 @@
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 
 namespace JeebGateway.IntegrationTests;
 
 /// <summary>
 /// JEBV4-249 — shared source-scan utility for the upstream-exception sanitization guard
-/// tests. Locates a controller <c>.cs</c> from the test bin dir and counts token occurrences
+/// tests. Locates a controller <c>.cs</c> from the test source and counts token occurrences
 /// in its LIVE (comment-stripped) source, so a future single-site revert to a
 /// <c>detail: ex.Message</c> leak trips the guard. Factors out the inline grep-guard idiom
 /// from <see cref="ChatControllerErrorShapeTests"/> for the five Jeeb* BFF guard tests.
 /// </summary>
 internal static class ControllerSourceScan
 {
-    /// <summary>Walk up from the test bin dir to find src/JeebGateway/Controllers/&lt;fileName&gt;.</summary>
-    public static string? Locate(string controllerFileName)
+    /// <summary>Walk from the caller source so external --artifacts-path outputs work too.</summary>
+    public static string? Locate(string controllerFileName, [CallerFilePath] string testSource = "")
     {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        var dir = new DirectoryInfo(Path.GetDirectoryName(testSource) ?? AppContext.BaseDirectory);
         for (var i = 0; i < 10 && dir is not null; i++, dir = dir.Parent)
         {
             var candidate = Path.Combine(dir.FullName, "src", "JeebGateway", "Controllers", controllerFileName);

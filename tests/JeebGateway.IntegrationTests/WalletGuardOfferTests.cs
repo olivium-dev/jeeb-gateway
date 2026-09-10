@@ -38,7 +38,7 @@ public class WalletGuardOfferTests
         result.Allowed.Should().BeFalse();
         result.Required.Should().Be(5.0m);
         result.Available.Should().Be(1.0m);
-        result.Currency.Should().BeNull(); // no ISO mapping exists — honest, not fabricated.
+        result.Currency.Should().Be("USD"); // owner-verified, not inferred from numeric ID.
     }
 
     [Fact]
@@ -78,6 +78,74 @@ public class WalletGuardOfferTests
 
         result.Allowed.Should().BeFalse();
         result.DegradedByUpstreamFailure.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task CheckAsync_UsdCommissionUsesUsdBalance_NotCreditBalance()
+    {
+        var holder = Guid.NewGuid();
+        var funded = NewGuard(new TypedWalletClient(holder,
+            ("main", 1, 0), ("main", 2, 0.10)), "fail-closed");
+        var required = WalletGuardContract.RequiredCommission(1m);
+        var result = await funded.CheckAsync(holder, required, CancellationToken.None);
+        result.Allowed.Should().BeTrue();
+        result.Required.Should().Be(0.10m);
+        result.Available.Should().Be(0.10m);
+        result.Currency.Should().Be("USD");
+
+        var creditsOnly = NewGuard(new TypedWalletClient(holder,
+            ("main", 1, 1000), ("main", 2, 0)), "fail-closed");
+        (await creditsOnly.CheckAsync(holder, required, CancellationToken.None))
+            .Allowed.Should().BeFalse();
+    }
+
+    [Theory]
+    [InlineData("wrong-currency")]
+    [InlineData("missing-id")]
+    [InlineData("duplicate-id")]
+    [InlineData("duplicate-usd")]
+    [InlineData("missing-code")]
+    [InlineData("empty")]
+    [InlineData("unreachable")]
+    public async Task CheckAsync_InvalidCurrencyMappingFailsClosed_EvenWhenFailOpen(string scenario)
+    {
+        var wallet = new FakeWalletClient { Balance = 1_000_000 };
+        var configuredId = 2;
+        switch (scenario)
+        {
+            case "wrong-currency": configuredId = 1; break;
+            case "missing-id": configuredId = 99; break;
+            case "duplicate-id":
+                wallet.Currencies.Add(new() { Id = 2, Code = "Credit", Rate = 0.1 });
+                break;
+            case "duplicate-usd":
+                wallet.Currencies.Add(new() { Id = 3, Code = "usd", Rate = 1 });
+                break;
+            case "missing-code":
+                wallet.Currencies.Single(currency => currency.Id == 2).Code = null!;
+                break;
+            case "empty": wallet.Currencies.Clear(); break;
+            case "unreachable": wallet.CurrenciesUnreachable = true; break;
+        }
+        var result = await NewGuard(wallet, "fail-open", configuredId)
+            .CheckAsync(Guid.NewGuid(), 0.10m, CancellationToken.None);
+        result.Allowed.Should().BeFalse();
+        result.DegradedByUpstreamFailure.Should().BeTrue();
+        result.Available.Should().BeNull();
+        result.Currency.Should().BeNull();
+        wallet.WalletReads.Should().Be(0, "an unverified denomination must not be compared");
+    }
+
+    [Fact]
+    public async Task Submit_Returns503_WhenCurrencyCannotBeVerified_NotFalseInsufficiency()
+    {
+        await using var factory = NewFactory(new FakeWalletClient { CurrenciesUnreachable = true }, "fail-open");
+        var (_, requestId) = await SeedRequestAsync(factory);
+        var response = await JeeberClient(factory, Guid.NewGuid().ToString()).PostAsJsonAsync(
+            $"/requests/{requestId}/offers", new { fee = 1m, etaMinutes = 30 });
+        response.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        var body = JObject.Parse(await response.Content.ReadAsStringAsync());
+        body["type"]!.Value<string>().Should().Be("https://jeeb.dev/errors/wallet-service-unavailable");
     }
 
     [Fact]
@@ -122,7 +190,7 @@ public class WalletGuardOfferTests
     public async Task CheckAsync_Ignores_NonSpendable_Cod_Types(string codType)
     {
         var holderId = Guid.NewGuid();
-        var guard = NewGuard(new TypedWalletClient(holderId, (codType, 1, 5_000.0)), "fail-closed");
+        var guard = NewGuard(new TypedWalletClient(holderId, (codType, 2, 5_000.0)), "fail-closed");
 
         var result = await guard.CheckAsync(holderId, requiredFee: 5.0m, CancellationToken.None);
 
@@ -141,7 +209,7 @@ public class WalletGuardOfferTests
         // Control case: were the pin a blanket exclusion, this would fail closed and block
         // every legitimate offer — untyped wallets are what live holders carry today.
         var holderId = Guid.NewGuid();
-        var guard = NewGuard(new TypedWalletClient(holderId, (spendableType, 1, 5.0)), "fail-closed");
+        var guard = NewGuard(new TypedWalletClient(holderId, (spendableType, 2, 5.0)), "fail-closed");
 
         var result = await guard.CheckAsync(holderId, requiredFee: 5.0m, CancellationToken.None);
 
@@ -156,7 +224,7 @@ public class WalletGuardOfferTests
         var holderId = Guid.NewGuid();
         var guard = NewGuard(
             new TypedWalletClient(holderId,
-                (null, 1, 5.0), ("cod_earnings", 1, 900.0), ("cod_commission", 1, 900.0)),
+                (null, 2, 5.0), ("cod_earnings", 2, 900.0), ("cod_commission", 2, 900.0)),
             "fail-closed");
 
         var result = await guard.CheckAsync(holderId, requiredFee: 5.0m, CancellationToken.None);
@@ -168,7 +236,7 @@ public class WalletGuardOfferTests
     private static WalletSufficiencyGuard NewGuard(
         SwServiceWalletClient wallet,
         string failMode,
-        int currencyId = 1)
+        int currencyId = 2)
         => new(wallet,
             Options.Create(new WalletGuardOptions { FailMode = failMode }),
             Options.Create(new PartnerWalletOptions { CurrencyId = currencyId }),
@@ -199,7 +267,7 @@ public class WalletGuardOfferTests
         body.Properties().Select(property => property.Name).Should().Contain(
             ["type", "status", "needed", "available", "currency"]);
         body["status"]!.Value<int>().Should().Be(402);
-        body["currency"]!.Type.Should().Be(JTokenType.Null);
+        body["currency"]!.Value<string>().Should().Be("USD");
     }
 
     [Fact]
@@ -287,7 +355,7 @@ public class WalletGuardOfferTests
         body["status"]!.Value<int>().Should().Be(409);
         body["needed"]!.Value<decimal>().Should().Be(10.0m);
         body["available"]!.Value<decimal>().Should().Be(1.0m);
-        body["currency"]!.Type.Should().Be(JTokenType.Null);
+        body["currency"]!.Value<string>().Should().Be("USD");
         offerService.AcceptWithStatusCalled.Should().BeFalse("guard 2 must short-circuit before forwarding upstream");
     }
 
@@ -498,6 +566,9 @@ public class WalletGuardOfferTests
     /// <summary>R-M1: a holder whose wallets carry explicit (type, currency, amount) rows.</summary>
     private sealed class TypedWalletClient : SwServiceWalletClient
     {
+        public override Task<ICollection<JeebGateway.service.ServiceWallet.Currency>> CurrenciesAsync(CancellationToken ct)
+            => new FakeWalletClient().CurrenciesAsync(ct);
+
         private readonly Guid _holderId;
         private readonly (string? Type, int Currency, double Amount)[] _rows;
 
@@ -525,6 +596,9 @@ public class WalletGuardOfferTests
 
     private sealed class BreakerOpenWalletClient : SwServiceWalletClient
     {
+        public override Task<ICollection<JeebGateway.service.ServiceWallet.Currency>> CurrenciesAsync(CancellationToken ct)
+            => new FakeWalletClient().CurrenciesAsync(ct);
+
         public BreakerOpenWalletClient() : base("http://localhost", new HttpClient())
         {
         }

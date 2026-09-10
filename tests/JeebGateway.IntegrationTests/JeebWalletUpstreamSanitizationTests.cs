@@ -135,7 +135,9 @@ public class JeebWalletUpstreamSanitizationTests
             return new HttpResponseMessage(HttpStatusCode.NotFound);
         });
 
-        using var factory = NewFactoryWithWalletStub(stub);
+        // This fixture deliberately models an alternate owner deployment where
+        // USD is ID 1, rather than depending on the product's current ID 2 default.
+        using var factory = NewFactoryWithWalletStub(stub, currencyId: 1);
         var client = MintBearerClient(factory, HolderGuid);
 
         var resp = await client.GetAsync("/v1/jeeb/wallet");
@@ -282,9 +284,14 @@ public class JeebWalletUpstreamSanitizationTests
             .Should().Be(1, "the graceful empty-wallet 404 branch must remain");
     }
 
-    private static WebApplicationFactory<Program> NewFactoryWithWalletStub(HttpMessageHandler stub)
+    private static WebApplicationFactory<Program> NewFactoryWithWalletStub(HttpMessageHandler stub, int currencyId = 2)
         => new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
+            builder.ConfigureAppConfiguration((_, configuration) =>
+                configuration.AddInMemoryCollection(new Dictionary<string, string?>
+                {
+                    ["PartnerWallet:CurrencyId"] = currencyId.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                }));
             builder.ConfigureTestServices(services =>
             {
                 services.RemoveAll<ServiceWalletClient>();

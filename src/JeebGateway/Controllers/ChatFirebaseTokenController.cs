@@ -8,50 +8,24 @@ using Microsoft.AspNetCore.Mvc;
 
 namespace JeebGateway.Controllers;
 
-/// <summary>
-/// The identity hop that lets the mobile client read its own chat thread directly
-/// from Firestore instead of re-fetching it over REST.
-///
-/// <para>The client already holds a Jeeb session. Firestore does not understand Jeeb
-/// sessions — it understands Firebase identities. This route exchanges the one for
-/// the other: authenticate with the existing Jeeb JWT, receive a short-lived Firebase
-/// CUSTOM token whose <c>uid</c> is the caller's Jeeb user id. The client feeds that
-/// to <c>signInWithCustomToken</c>, and the Firestore rules deployed to
-/// <c>jeeb-5a293</c> admit it to exactly the conversations whose
-/// <c>Participants[].UserId</c> contains that uid, and to nothing else.</para>
-///
-/// <para>This route mints an identity ASSERTION only. It grants no authority of its
-/// own: every read it enables is still adjudicated by the Firestore ruleset against
-/// conversation membership. It never widens an existing Jeeb permission, and it is
-/// unreachable without a valid Jeeb session.</para>
-///
-/// <para><b>Lifetime, stated honestly.</b> <c>TokenLifetimeSeconds</c> bounds the CUSTOM
-/// token — the one-hour-max artifact this route hands out — and nothing beyond it. Once
-/// the client exchanges it at <c>signInWithCustomToken</c>, Firebase issues its own
-/// session that REFRESHES ITSELF INDEFINITELY without ever contacting this gateway. So a
-/// short custom-token lifetime is not a revocation control and must not be described as
-/// one. The only thing that actually revokes access is the Firestore membership rule:
-/// stamping <c>RemovedAt</c> on the participant row ends that user's reads on the next
-/// rules evaluation. Logging a user out of Jeeb does NOT end their Firebase session.</para>
-///
-/// <para><b>Scope of the minted identity.</b> A Firebase custom token is a PROJECT-WIDE
-/// identity, not a Firestore-scoped one. It authenticates the holder to every Firebase
-/// product on <c>jeeb-5a293</c> that keys off <c>request.auth</c> — Storage and RTDB
-/// included. Enabling this route therefore requires that those products' rules be
-/// verified too; a permissive <c>request.auth != null</c> default anywhere else in the
-/// project becomes reachable by every chat user the day the mint is switched on.</para>
+/// <summary>Authenticated BFF exchange for chat-service-owned Firebase identity.
+/// The gateway derives the opaque uid from the caller's validated claims and
+/// proxies only; it has no Firebase signing material or local mint fallback.
+/// Firebase membership/visibility rules, not token expiry, control live access.
+/// A Firebase custom token grants project-wide identity, so all Firebase product
+/// rules must be restrictive. Jeeb logout does not revoke a Firebase session.
 /// </summary>
 [ApiController]
 public sealed class ChatFirebaseTokenController : ControllerBase
 {
-    private readonly IFirebaseCustomTokenMinter _minter;
+    private readonly IChatFirebaseIdentityClient _identity;
     private readonly ILogger<ChatFirebaseTokenController> _logger;
 
     public ChatFirebaseTokenController(
-        IFirebaseCustomTokenMinter minter,
+        IChatFirebaseIdentityClient identity,
         ILogger<ChatFirebaseTokenController> logger)
     {
-        _minter = minter;
+        _identity = identity;
         _logger = logger;
     }
 
@@ -73,7 +47,7 @@ public sealed class ChatFirebaseTokenController : ControllerBase
     [ProducesResponseType(typeof(FirebaseTokenResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status503ServiceUnavailable)]
-    public IActionResult MintFirebaseToken()
+    public async Task<IActionResult> MintFirebaseToken(CancellationToken ct)
     {
         // The SAME resolver every other chat endpoint uses (sid → sub → trusted-edge
         // header). This is the whole correctness argument for the route: chat-service
@@ -109,37 +83,31 @@ public sealed class ChatFirebaseTokenController : ControllerBase
             return Unauthorized();
         }
 
+        Response.Headers.CacheControl = "private, no-store";
         try
         {
-            var minted = _minter.Mint(userId);
-
-            return Ok(new FirebaseTokenResponse
+            var minted = await _identity.MintAsync(userId, ct);
+            // Never return another actor's identity or a partial/expired grant.
+            if (!string.Equals(minted.Uid, userId, StringComparison.Ordinal)
+                || string.IsNullOrWhiteSpace(minted.Token)
+                || minted.ExpiresAt <= DateTime.UtcNow
+                || minted.ExpiresAt > DateTime.UtcNow.AddHours(1).AddMinutes(1)
+                || minted.ExpiresInSeconds is <= 0 or > 3600)
             {
-                Token = minted.Token,
-                Uid = minted.Uid,
-                ExpiresAt = minted.ExpiresAt.UtcDateTime,
-                ExpiresInSeconds = (int)Math.Max(
-                    0, Math.Round((minted.ExpiresAt - DateTimeOffset.UtcNow).TotalSeconds)),
-            });
+                throw new InvalidOperationException("Chat owner identity binding was invalid.");
+            }
+            return Ok(minted);
         }
-        catch (FirebaseCustomTokenUnavailableException ex)
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            // Misconfiguration is an operator problem, not a client problem: 503, and the
-            // reason is logged rather than returned so a probe cannot map the host's
-            // credential layout.
-            _logger.LogError("Firebase custom-token mint unavailable: {Reason}", ex.Message);
-
-            return Problem(
-                title: "Firebase chat token minting is not available.",
-                statusCode: StatusCodes.Status503ServiceUnavailable,
-                type: "https://jeeb.dev/errors/firebase-token-unavailable");
+            throw;
         }
-        catch (ArgumentException)
+        catch (Exception ex) when (ex is HttpRequestException or InvalidOperationException
+            or System.Text.Json.JsonException or OperationCanceledException)
         {
-            // The resolved Jeeb user id is not usable as a Firebase uid (empty, or over
-            // the 128-byte limit). Nothing the caller can fix by retrying.
-            _logger.LogError("Resolved Jeeb user id is not a valid Firebase uid.");
-
+            // Deliberately omit upstream bodies/exceptions: they may contain tokens.
+            _logger.LogWarning("Chat owner Firebase identity unavailable ({ErrorType}).",
+                ex.GetType().Name);
             return Problem(
                 title: "Firebase chat token minting is not available.",
                 statusCode: StatusCodes.Status503ServiceUnavailable,

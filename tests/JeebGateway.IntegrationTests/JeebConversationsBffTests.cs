@@ -1,23 +1,17 @@
 using System.Collections.Generic;
-using System.IdentityModel.Tokens.Jwt;
 using System.Net;
 using System.Net.Http;
 using System.Net.Http.Json;
-using System.Security.Claims;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using FluentAssertions;
 using JeebGateway.Auth.OtpSignIn;
 using JeebGateway.Conversations.Client;
-using JeebGateway.Realtime;
 using JeebGateway.Services;
 using JeebGateway.Services.Clients;
 using Microsoft.AspNetCore.Mvc.Testing;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.DependencyInjection.Extensions;
-using Microsoft.IdentityModel.Tokens;
 using Newtonsoft.Json.Linq;
 using Xunit;
 
@@ -35,10 +29,9 @@ namespace JeebGateway.IntegrationTests;
 ///   • H3  POST /v1/conversations/{id}/messages -> 201 {message_id, kind, subtype, author_id} — author from BEARER
 ///   • H5  GET  /v1/conversations/{id}/messages -> 200 viewer-filtered (gateway forwards viewer, never filters)
 ///   • N1  GET  /v1/conversations/{id}/messages (non-member) -> 403 forwarded verbatim (never empty-200)
-///   • N2  GET  /v1/realtime/jeeb:chat:{id} (non-member) -> 403 not_in_membership
-///   • H6  GET  /v1/realtime/jeeb:chat:{id} (member) -> 200 channel descriptor (REST pre-check; socket not proxied)
+///   • legacy GET /v1/realtime/jeeb:chat:{id} -> authenticated 410 without owner calls or credentials
 ///   • H2  GET  /v1/conversations?correlationKey={id} -> 200 {participants[], phase}
-///   • flag-gate: every route -> 503 ProblemDetails while FeatureFlags:UseUpstream:Chat is off
+///   • flag-gate: conversation routes -> 503 while chat is off; retired socket routes remain 410
 ///   • auth: missing bearer -> 401
 ///
 /// The gateway computes NO visibility and holds NO conversation state — the fake
@@ -47,9 +40,6 @@ namespace JeebGateway.IntegrationTests;
 /// </summary>
 public sealed class JeebConversationsBffTests
 {
-    private const string RealtimeGuardianSecret =
-        "test-only-chat-guardian-secret-0123456789-abcdefghijklmnopqrstuvwxyz";
-    private const string RealtimeSocketUrl = "wss://realtime.test/socket/websocket";
 
     // ---------------------------------------------------------------------
     // H1 — create
@@ -391,463 +381,45 @@ public sealed class JeebConversationsBffTests
     }
 
     // ---------------------------------------------------------------------
-    // N2 / H6 — realtime visibility gate
+    // Retired Phoenix compatibility seam: no credentials and no owner calls.
     // ---------------------------------------------------------------------
 
-    [Fact]
-    public async Task N2_NonMember_RealtimeGate_Returns403_NotInMembership()
-    {
-        var fake = new FakeJeebConversationClient
-        {
-            Membership = new JeebConversationMembership { IsMember = false },
-        };
-        using var factory = MakeFactory(fake, chatEnabled: true);
-        var http = factory.CreateClient();
-        var (token, outsiderUserId) = await MintSession(http, "+9613001806");
-
-        var msg = new HttpRequestMessage(HttpMethod.Get, "/v1/realtime/jeeb:chat:conv-1");
-        msg.Headers.Authorization = Bearer(token);
-
-        var resp = await http.SendAsync(msg);
-
-        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
-        var body = await resp.Content.ReadAsStringAsync();
-        body.Should().Contain("not_in_membership");
-        // The gateway asked chat-service about the BEARER viewer.
-        fake.LastMembershipViewer.Should().Be(outsiderUserId);
-        fake.LastMembershipConversationId.Should().Be("conv-1");
-    }
-
-    [Fact]
-    public async Task N2_RemovedMember_RealtimeGate_Returns403_FailClosed()
-    {
-        // A removed participant (removed_at set) may still REST-read up-to-cutoff
-        // history, but the LIVE socket is for active members only -> 403.
-        var fake = new FakeJeebConversationClient
-        {
-            Membership = new JeebConversationMembership
-            {
-                IsMember = true,
-                RoleInConvo = "jeeber_offerer",
-                RemovedAt = System.DateTimeOffset.UtcNow,
-            },
-        };
-        using var factory = MakeFactory(fake, chatEnabled: true);
-        var http = factory.CreateClient();
-        var (token, _) = await MintSession(http, "+9613001807");
-
-        var msg = new HttpRequestMessage(HttpMethod.Get, "/v1/realtime/jeeb:chat:conv-1");
-        msg.Headers.Authorization = Bearer(token);
-
-        var resp = await http.SendAsync(msg);
-        resp.StatusCode.Should().Be(HttpStatusCode.Forbidden);
-        (await resp.Content.ReadAsStringAsync()).Should().Contain("not_in_membership");
-    }
-
     [Theory]
-    [InlineData("client")]
-    [InlineData("jeeber_offerer")]
-    [InlineData("jeeber_winner")]
-    public async Task H6_Member_RealtimeGate_Returns200_WithActiveRoleInDescriptorAndTicket(
-        string activeRole)
-    {
-        var fake = new FakeJeebConversationClient
-        {
-            // The deployed chat membership shape has no role field. The role must
-            // come from the authoritative conversation roster, not this DTO.
-            Membership = new JeebConversationMembership { IsMember = true },
-        };
-        using var factory = MakeFactory(fake, chatEnabled: true);
-        var http = factory.CreateClient();
-        var (token, viewerId) = await MintSession(http, "+9613001808");
-        fake.ConversationById = ConversationWithParticipant("conv-1", viewerId, activeRole);
-
-        var msg = new HttpRequestMessage(
-            HttpMethod.Get,
-            "/v1/realtime/jeeb:chat:conv-1?viewerId=spoofed-user&viewer_id=spoofed-user");
-        msg.Headers.Authorization = Bearer(token);
-
-        var resp = await http.SendAsync(msg);
-
-        resp.StatusCode.Should().Be(HttpStatusCode.OK);
-        resp.Headers.CacheControl.Should().NotBeNull();
-        resp.Headers.CacheControl!.Private.Should().BeTrue();
-        resp.Headers.CacheControl.NoStore.Should().BeTrue();
-        var json = JObject.Parse(await resp.Content.ReadAsStringAsync());
-        json["topic"]!.Value<string>().Should().Be("jeeb:chat:conv-1");
-        json["conversationId"]!.Value<string>().Should().Be("conv-1");
-        json["viewerId"]!.Value<string>().Should().Be(viewerId,
-            "the descriptor actor comes only from the authenticated bearer");
-        json["roleInConvo"]!.Value<string>().Should().Be(activeRole);
-        json["socketUrl"]!.Value<string>().Should().Be(RealtimeSocketUrl);
-        json["expiresAt"]!.Value<DateTime>().Should().BeAfter(DateTime.UtcNow);
-
-        var ticket = json["ticket"]!.Value<string>();
-        ticket.Should().NotBeNullOrWhiteSpace();
-        var jwt = new JwtSecurityTokenHandler().ReadJwtToken(ticket);
-        jwt.Subject.Should().Be(viewerId);
-        jwt.Issuer.Should().Be("jeeb-gateway");
-        jwt.Audiences.Should().ContainSingle().Which.Should().Be("jeeb-realtime");
-        jwt.Claims.Should().Contain(
-            claim => claim.Type == "conv" && claim.Value == json["conversationId"]!.Value<string>());
-        var expectedRealtimeRole = activeRole == "client" ? "client" : "jeeber";
-        jwt.Claims.Should().Contain(
-            claim => claim.Type == "role" && claim.Value == expectedRealtimeRole);
-
-        var guardian = json["token"]!.Value<string>();
-        guardian.Should().NotBeNullOrWhiteSpace();
-        var guardianPayload = DecodeJwtPayload(guardian!);
-        guardianPayload["sub"]!.Value<string>().Should().Be(viewerId);
-        guardianPayload["role"]!.Value<string>().Should().Be("user");
-        guardianPayload["scopes"]!.Values<string>().Should().Equal("subscribe");
-        guardianPayload["topics"]!.Values<string>().Should().Equal("jeeb:chat:conv-1");
-        fake.LastMembershipViewer.Should().Be(viewerId);
-        fake.LastMembershipConversationId.Should().Be("conv-1");
-        fake.LastByIdConversationId.Should().Be("conv-1");
-    }
-
-    [Fact]
-    public async Task RealtimeGate_MissingGuardianSecret_Returns503_NoPartialDescriptor()
-    {
-        var fake = new FakeJeebConversationClient
-        {
-            Membership = new JeebConversationMembership { IsMember = true },
-        };
-        using var factory = MakeFactory(fake, chatEnabled: true, guardianSecret: null);
-        var http = factory.CreateClient();
-        var (token, viewerId) = await MintSession(http, "+9613001855");
-        fake.ConversationById = ConversationWithParticipant(
-            "conv-no-guardian", viewerId, "client");
-
-        var msg = new HttpRequestMessage(
-            HttpMethod.Get, "/v1/realtime/jeeb:chat:conv-no-guardian");
-        msg.Headers.Authorization = Bearer(token);
-
-        var resp = await http.SendAsync(msg);
-
-        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
-        var body = await resp.Content.ReadAsStringAsync();
-        body.Should().Contain("GuardianSecret");
-        body.Should().NotContain("\"ticket\"");
-        body.Should().NotContain("\"token\"");
-    }
-
-    [Fact]
-    public async Task RealtimeGate_NonWssPublicUrl_Returns503_NoPartialDescriptor()
-    {
-        var fake = new FakeJeebConversationClient
-        {
-            Membership = new JeebConversationMembership { IsMember = true },
-        };
-        using var factory = MakeFactory(
-            fake, chatEnabled: true, publicSocketUrl: "ws://realtime.test/socket/websocket");
-        var http = factory.CreateClient();
-        var (token, viewerId) = await MintSession(http, "+9613001856");
-        fake.ConversationById = ConversationWithParticipant(
-            "conv-cleartext", viewerId, "client");
-
-        var msg = new HttpRequestMessage(
-            HttpMethod.Get, "/v1/realtime/jeeb:chat:conv-cleartext");
-        msg.Headers.Authorization = Bearer(token);
-
-        var resp = await http.SendAsync(msg);
-
-        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
-        var body = await resp.Content.ReadAsStringAsync();
-        body.Should().Contain("absolute wss URL");
-        body.Should().NotContain("\"ticket\"");
-        body.Should().NotContain("\"token\"");
-    }
-
-    [Fact]
-    public async Task RealtimeGate_MemberWithBlankRosterRole_Returns503_NoDescriptor()
-    {
-        var fake = new FakeJeebConversationClient
-        {
-            Membership = new JeebConversationMembership { IsMember = true },
-        };
-        using var factory = MakeFactory(fake, chatEnabled: true);
-        var http = factory.CreateClient();
-        var (token, viewerId) = await MintSession(http, "+9613001854");
-        fake.ConversationById = ConversationWithParticipant("conv-blank-role", viewerId, " ");
-
-        var msg = new HttpRequestMessage(
-            HttpMethod.Get, "/v1/realtime/jeeb:chat:conv-blank-role");
-        msg.Headers.Authorization = Bearer(token);
-
-        var resp = await http.SendAsync(msg);
-
-        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
-        var body = await resp.Content.ReadAsStringAsync();
-        body.Should().Contain("canonical Jeeb conversation roles");
-        body.Should().NotContain("\"topic\"");
-    }
-
-    [Fact]
-    public async Task RealtimeGate_CrossConversationProjection_Returns503_NoCredentials()
-    {
-        var fake = new FakeJeebConversationClient
-        {
-            Membership = new JeebConversationMembership { IsMember = true },
-        };
-        using var factory = MakeFactory(fake, chatEnabled: true);
-        var http = factory.CreateClient();
-        var (token, viewerId) = await MintSession(http, "+9613001858");
-        fake.ConversationById = ConversationWithParticipant(
-            "conv-other", viewerId, "client");
-
-        var msg = new HttpRequestMessage(
-            HttpMethod.Get, "/v1/realtime/jeeb:chat:conv-requested");
-        msg.Headers.Authorization = Bearer(token);
-
-        var resp = await http.SendAsync(msg);
-
-        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
-        var body = await resp.Content.ReadAsStringAsync();
-        body.Should().Contain("does not match");
-        body.Should().NotContain("\"viewerId\"");
-        body.Should().NotContain("\"ticket\"");
-        body.Should().NotContain("\"token\"");
-    }
-
-    [Theory]
-    [InlineData(true, false)]
-    [InlineData(false, true)]
-    [InlineData(false, false)]
-    public async Task RealtimeGate_MembershipBindingMismatch_Returns503_BeforeRosterRead(
-        bool matchingConversation,
-        bool matchingViewer)
-    {
-        var fake = new FakeJeebConversationClient
-        {
-            EchoMembershipBinding = false,
-            Membership = new JeebConversationMembership { IsMember = true },
-        };
-        using var factory = MakeFactory(fake, chatEnabled: true);
-        var http = factory.CreateClient();
-        var (token, viewerId) = await MintSession(http, "+9613001861");
-        fake.Membership.ConversationId = matchingConversation ? "conv-bound" : "conv-other";
-        fake.Membership.ViewerId = matchingViewer ? viewerId : "viewer-other";
-        fake.ConversationById = ConversationWithParticipant("conv-bound", viewerId, "client");
-
-        var msg = new HttpRequestMessage(
-            HttpMethod.Get, "/v1/realtime/jeeb:chat:conv-bound");
-        msg.Headers.Authorization = Bearer(token);
-
-        var resp = await http.SendAsync(msg);
-
-        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
-        (await resp.Content.ReadAsStringAsync()).Should().Contain("membership decision");
-        fake.ByIdCalls.Should().Be(0,
-            "an unbound owner membership decision must fail before loading the roster");
-    }
-
-    [Fact]
-    public async Task RealtimeGate_MembershipWithoutBinding_Returns503_BeforeRosterRead()
-    {
-        var fake = new FakeJeebConversationClient
-        {
-            EchoMembershipBinding = false,
-            Membership = new JeebConversationMembership { IsMember = true },
-        };
-        using var factory = MakeFactory(fake, chatEnabled: true);
-        var http = factory.CreateClient();
-        var (token, _) = await MintSession(http, "+9613001862");
-
-        var msg = new HttpRequestMessage(
-            HttpMethod.Get, "/v1/realtime/jeeb:chat:conv-unbound");
-        msg.Headers.Authorization = Bearer(token);
-
-        var resp = await http.SendAsync(msg);
-
-        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
-        (await resp.Content.ReadAsStringAsync()).Should().Contain("membership decision");
-        fake.ByIdCalls.Should().Be(0);
-    }
-
-    [Fact]
-    public async Task RealtimeGate_MembershipAndRosterRoleMismatch_Returns503_NoCredentials()
-    {
-        var fake = new FakeJeebConversationClient
-        {
-            Membership = new JeebConversationMembership
-            {
-                IsMember = true,
-                RoleInConvo = "client",
-            },
-        };
-        using var factory = MakeFactory(fake, chatEnabled: true);
-        var http = factory.CreateClient();
-        var (token, viewerId) = await MintSession(http, "+9613001859");
-        fake.ConversationById = ConversationWithParticipant(
-            "conv-role-mismatch", viewerId, "jeeber_winner");
-
-        var msg = new HttpRequestMessage(
-            HttpMethod.Get, "/v1/realtime/jeeb:chat:conv-role-mismatch");
-        msg.Headers.Authorization = Bearer(token);
-
-        var resp = await http.SendAsync(msg);
-
-        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
-        var body = await resp.Content.ReadAsStringAsync();
-        body.Should().Contain("inconsistent active roles");
-        body.Should().NotContain("\"ticket\"");
-        body.Should().NotContain("\"token\"");
-    }
-
-    [Theory]
-    [InlineData("jeeber")]
-    [InlineData("admin")]
-    [InlineData("CLIENT")]
-    public async Task RealtimeGate_NonCanonicalRosterRole_Returns503_NoDescriptor(
-        string nonCanonicalRole)
-    {
-        var fake = new FakeJeebConversationClient
-        {
-            Membership = new JeebConversationMembership { IsMember = true },
-        };
-        using var factory = MakeFactory(fake, chatEnabled: true);
-        var http = factory.CreateClient();
-        var (token, viewerId) = await MintSession(http, "+9613001860");
-        fake.ConversationById = ConversationWithParticipant(
-            "conv-bad-role", viewerId, nonCanonicalRole);
-
-        var msg = new HttpRequestMessage(
-            HttpMethod.Get, "/v1/realtime/jeeb:chat:conv-bad-role");
-        msg.Headers.Authorization = Bearer(token);
-
-        var resp = await http.SendAsync(msg);
-
-        resp.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
-        var body = await resp.Content.ReadAsStringAsync();
-        body.Should().Contain("canonical Jeeb conversation roles");
-        body.Should().NotContain("\"topic\"");
-    }
-
-    [Theory]
-    [InlineData("client", "client")]
-    [InlineData("client", "jeeber_winner")]
-    public async Task RealtimeGate_DuplicateActiveViewerRows_Returns503_WithoutUsingListOrder(
-        string firstRole,
-        string secondRole)
-    {
-        var fake = new FakeJeebConversationClient
-        {
-            Membership = new JeebConversationMembership { IsMember = true },
-        };
-        using var factory = MakeFactory(fake, chatEnabled: true);
-        var http = factory.CreateClient();
-        var (token, viewerId) = await MintSession(http, "+9613001863");
-        fake.ConversationById = ConversationWithParticipant(
-            "conv-duplicate-viewer", viewerId, firstRole);
-        fake.ConversationById.Participants.Add(new JeebConversationParticipant
-        {
-            UserId = viewerId,
-            RoleInConvo = secondRole,
-            RemovedAt = null,
-        });
-
-        var msg = new HttpRequestMessage(
-            HttpMethod.Get, "/v1/realtime/jeeb:chat:conv-duplicate-viewer");
-        msg.Headers.Authorization = Bearer(token);
-
-        var resp = await http.SendAsync(msg);
-
-        await AssertRosterProjectionFault(resp);
-    }
-
-    [Fact]
-    public async Task RealtimeGate_ActiveMembershipWithNoViewerRosterRow_Returns503()
-    {
-        var fake = new FakeJeebConversationClient
-        {
-            Membership = new JeebConversationMembership { IsMember = true },
-        };
-        using var factory = MakeFactory(fake, chatEnabled: true);
-        var http = factory.CreateClient();
-        var (token, viewerId) = await MintSession(http, "+9613001864");
-        fake.ConversationById = ConversationWithParticipant(
-            "conv-missing-viewer", "different-viewer", "client");
-
-        var msg = new HttpRequestMessage(
-            HttpMethod.Get, "/v1/realtime/jeeb:chat:conv-missing-viewer");
-        msg.Headers.Authorization = Bearer(token);
-
-        var resp = await http.SendAsync(msg);
-
-        await AssertRosterProjectionFault(resp);
-        fake.LastMembershipViewer.Should().Be(viewerId);
-    }
-
-    [Fact]
-    public async Task RealtimeGate_ActiveMembershipWithNullParticipants_Returns503()
-    {
-        var fake = new FakeJeebConversationClient
-        {
-            Membership = new JeebConversationMembership { IsMember = true },
-        };
-        using var factory = MakeFactory(fake, chatEnabled: true);
-        var http = factory.CreateClient();
-        var (token, _) = await MintSession(http, "+9613001865");
-        fake.ConversationById = new JeebConversationResponse
-        {
-            ConversationId = "conv-null-roster",
-            CorrelationKey = "req-conv-null-roster",
-            Phase = "accepted",
-            Participants = null!,
-        };
-
-        var msg = new HttpRequestMessage(
-            HttpMethod.Get, "/v1/realtime/jeeb:chat:conv-null-roster");
-        msg.Headers.Authorization = Bearer(token);
-
-        var resp = await http.SendAsync(msg);
-
-        await AssertRosterProjectionFault(resp);
-    }
-
-    [Fact]
-    public async Task RealtimeGate_AuthenticatedBearerWithoutCanonicalSubject_Returns401()
+    [InlineData("/v1/realtime/jeeb:chat:conv-1")]
+    [InlineData("/realtime/jeeb:chat:conv-1")]
+    public async Task Chat_descriptor_is_gone_without_dialing_owner(string route)
     {
         var fake = new FakeJeebConversationClient();
         using var factory = MakeFactory(fake, chatEnabled: true);
         var http = factory.CreateClient();
-        var msg = new HttpRequestMessage(
-            HttpMethod.Get, "/v1/realtime/jeeb:chat:conv-no-subject");
-        msg.Headers.Authorization = Bearer(MintBearerWithoutSubject(factory));
-
-        var resp = await http.SendAsync(msg);
-
-        resp.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
-        fake.MembershipCalls.Should().Be(0,
-            "a principal without a canonical subject must fail before owner-service access");
+        var (token, _) = await MintSession(http, "+9613001806");
+        using var msg = new HttpRequestMessage(HttpMethod.Get, route);
+        msg.Headers.Authorization = Bearer(token);
+        var response = await http.SendAsync(msg);
+        response.StatusCode.Should().Be(HttpStatusCode.Gone);
+        var body = await response.Content.ReadAsStringAsync();
+        body.Should().Contain("chat-socket-retired");
+        body.Should().NotContain("socketUrl").And.NotContain("ticket");
+        fake.MembershipCalls.Should().Be(0);
     }
 
     [Fact]
-    public async Task RealtimeDescriptor_OpenApiPinsBearerViewerCanonicalRolesAndOwnerTopic()
+    public async Task Retired_chat_descriptor_still_requires_authentication()
+    {
+        using var factory = MakeFactory(new FakeJeebConversationClient(), chatEnabled: true);
+        var response = await factory.CreateClient().GetAsync("/v1/realtime/jeeb:chat:conv-1");
+        response.StatusCode.Should().Be(HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
+    public async Task Retired_chat_fanout_never_publishes()
     {
         using var factory = MakeFactory(new FakeJeebConversationClient(), chatEnabled: true);
         var http = factory.CreateClient();
-        var document = JObject.Parse(await http.GetStringAsync("/swagger/v1/swagger.json"));
-        var schema = document["components"]!["schemas"]!["RealtimeChannelDescriptor"]!;
-        var properties = (JObject)schema["properties"]!;
-
-        properties.Properties().Select(property => property.Name).Should().BeEquivalentTo(
-            "conversationId", "viewerId", "topic", "roleInConvo", "ticket",
-            "socketUrl", "token", "expiresAt");
-        schema["required"]!.Values<string>().Should().BeEquivalentTo(
-            "conversationId", "viewerId", "topic", "roleInConvo", "ticket",
-            "socketUrl", "token", "expiresAt");
-        properties["viewerId"]!["description"]!.Value<string>()
-            .Should().Contain("authenticated bearer");
-        properties["roleInConvo"]!["enum"]!.Values<string>().Should().Equal(
-            "client", "jeeber_offerer", "jeeber_winner");
-        properties["topic"]!["pattern"]!.Value<string>()
-            .Should().Be("^[A-Za-z0-9_-]+:chat:[A-Za-z0-9_-]+$");
-
-        document["paths"]!["/v1/realtime/{tenant}:chat:{conversationId}"]!["get"]!
-            ["responses"]!["200"]!["content"]!["application/json"]!["schema"]!["$ref"]!
-            .Value<string>().Should().Be("#/components/schemas/RealtimeChannelDescriptor");
+        var (token, _) = await MintSession(http, "+9613001807");
+        http.DefaultRequestHeaders.Authorization = Bearer(token);
+        var response = await http.PostAsJsonAsync("/realtime/chat/fanout", new { recipientId = "other", messageId = "m", type = "text" });
+        response.StatusCode.Should().Be(HttpStatusCode.Gone);
     }
 
     // ---------------------------------------------------------------------
@@ -1046,7 +618,7 @@ public sealed class JeebConversationsBffTests
     // ---------------------------------------------------------------------
 
     [Fact]
-    public async Task FlagOff_AllRoutes_Return503_ProblemDetails()
+    public async Task FlagOff_ChatRoutes_Return503_AndRetiredDescriptorRemains410()
     {
         var fake = new FakeJeebConversationClient();
         using var factory = MakeFactory(fake, chatEnabled: false); // flag OFF
@@ -1066,7 +638,7 @@ public sealed class JeebConversationsBffTests
 
         var gate = new HttpRequestMessage(HttpMethod.Get, "/v1/realtime/jeeb:chat:conv-1");
         gate.Headers.Authorization = Bearer(token);
-        (await http.SendAsync(gate)).StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
+        (await http.SendAsync(gate)).StatusCode.Should().Be(HttpStatusCode.Gone);
 
         // Flag off must NOT have dialed chat-service.
         fake.CreateCalls.Should().Be(0);
@@ -1181,9 +753,12 @@ public sealed class JeebConversationsBffTests
         return count;
     }
 
-    private static string? LocateJeebConversationsControllerSource()
+    private static string? LocateJeebConversationsControllerSource(
+        [System.Runtime.CompilerServices.CallerFilePath] string testSource = "")
     {
-        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        // CallerFilePath also works when build outputs live in a private artifacts
+        // directory outside the source checkout.
+        var dir = new DirectoryInfo(Path.GetDirectoryName(testSource) ?? AppContext.BaseDirectory);
         for (var i = 0; i < 10 && dir is not null; i++, dir = dir.Parent)
         {
             var candidate = Path.Combine(
@@ -1203,22 +778,6 @@ public sealed class JeebConversationsBffTests
     private static System.Net.Http.Headers.AuthenticationHeaderValue Bearer(string token) =>
         new("Bearer", token);
 
-    private static async Task AssertRosterProjectionFault(HttpResponseMessage response)
-    {
-        response.StatusCode.Should().Be(HttpStatusCode.ServiceUnavailable);
-        response.Content.Headers.ContentType.Should().NotBeNull();
-        response.Content.Headers.ContentType!.MediaType.Should().Be("application/problem+json");
-
-        var problem = JObject.Parse(await response.Content.ReadAsStringAsync());
-        problem["title"]!.Value<string>().Should()
-            .Be("Realtime chat credentials are unavailable.");
-        problem["status"]!.Value<int>().Should().Be(503);
-        problem["detail"]!.Value<string>().Should().Contain("exactly one active participant");
-        problem["topic"].Should().BeNull();
-        problem["viewerId"].Should().BeNull();
-        problem["ticket"].Should().BeNull();
-        problem["token"].Should().BeNull();
-    }
 
     private static JeebConversationResponse ConversationWithParticipant(
         string conversationId,
@@ -1243,9 +802,7 @@ public sealed class JeebConversationsBffTests
 
     private static WebApplicationFactory<Program> MakeFactory(
         IJeebConversationClient fake,
-        bool chatEnabled,
-        string? guardianSecret = RealtimeGuardianSecret,
-        string publicSocketUrl = RealtimeSocketUrl) =>
+        bool chatEnabled) =>
         new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
         {
             builder.ConfigureServices(services =>
@@ -1268,20 +825,9 @@ public sealed class JeebConversationsBffTests
                     o.ApplicationId = AppId;
                     o.TtlSeconds = 300;
                 });
-                services.Configure<RealtimeGuardianOptions>(o =>
-                {
-                    o.GuardianSecret = guardianSecret;
-                    o.PublicSocketUrl = publicSocketUrl;
-                });
             });
         });
 
-    private static JObject DecodeJwtPayload(string token)
-    {
-        var segment = token.Split('.')[1].Replace('-', '+').Replace('_', '/');
-        segment = segment.PadRight(segment.Length + ((4 - segment.Length % 4) % 4), '=');
-        return JObject.Parse(Encoding.UTF8.GetString(Convert.FromBase64String(segment)));
-    }
 
     /// <summary>Mints a real session via the OTP verify path; returns (accessToken, userId == sub).</summary>
     private static async Task<(string Token, string UserId)> MintSession(HttpClient http, string phone)
@@ -1296,22 +842,6 @@ public sealed class JeebConversationsBffTests
         return (token, userId);
     }
 
-    private static string MintBearerWithoutSubject(WebApplicationFactory<Program> factory)
-    {
-        var configuration = factory.Services.GetRequiredService<IConfiguration>();
-        var credentials = new SigningCredentials(
-            new SymmetricSecurityKey(
-                Encoding.UTF8.GetBytes(configuration["Jwt:SigningKey"]!)),
-            SecurityAlgorithms.HmacSha256);
-        var token = new JwtSecurityToken(
-            issuer: configuration["Jwt:Issuer"],
-            audience: configuration["Jwt:Audience"],
-            claims: new[] { new Claim("roles", "client") },
-            notBefore: DateTime.UtcNow.AddMinutes(-1),
-            expires: DateTime.UtcNow.AddMinutes(5),
-            signingCredentials: credentials);
-        return new JwtSecurityTokenHandler().WriteToken(token);
-    }
 
     /// <summary>
     /// In-memory stand-in for chat-service's conversation aggregate. Records the

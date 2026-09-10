@@ -129,9 +129,31 @@ the uniqueness the settlement id was wanted for.
 (`GET Transaction/by-external-reference/{ref}`) and stamps the transaction id onto the settlement
 row. No money moves at settle.
 
-A row that ends up **unstamped is exactly a delivery that settled with its fee never collected** —
-`settlement.commission.unlinked`. That is the per-row, automatic version of the finding OA-30 had to
-excavate by hand across 275 wallet holders.
+An **unstamped row means collection is unverified**, not necessarily uncollected: a successful
+debit can outlive a failed lookup or stamp. Linking now requires one executed transaction with the
+matching service, tag, acceptance key, delivery reference, exact commission amount, source owner,
+USD currency, and a single fee leg into the reserved `Guid.Empty` / `__SYSTEM__` holder. Pending,
+aborted, incomplete, or ambiguous entries are not evidence of collection. Replayed completion and
+already-settled reads through the settlement flow retry this read-and-stamp link without settling
+again or initiating/executing another debit.
+
+### Currency and counterparty correction — 2026-09-09
+
+Jeeb fee amounts are **USD**, not Platform Credit units. The wallet owner's seeded metadata maps
+Credit to ID 1 and USD to ID 2. Both `PartnerWallet:CurrencyId` and
+`CommissionCollection:CurrencyId` now default to 2, but numeric defaults are not proof: offer guards
+and commission wallet resolution verify the configured ID uniquely maps to USD using
+`GET /Fees/currencies`. Missing, conflicting, or unavailable metadata fails closed; the balance
+guard's fail-open setting cannot authorize a comparison in an unknown monetary unit. No FX
+conversion was added.
+
+New debits require exactly one active, owned, non-COD USD source and exactly one active USD wallet
+owned by the reserved system holder. Historical executed entries may still be verified after a
+wallet is deactivated. The collection switch remains **off by default**. Existing deployments with
+an explicit old currency override need a reviewed configuration update; merging does not correct a
+running override or enable collection. Any one-off reconciliation requires exact delivery/actor/
+currency/ledger validation and preserves the original acceptance key, rather than enabling all
+future debits or inventing a replacement key.
 
 ### 2. How is the fee computed? — **not my call; already an owner ruling.**
 

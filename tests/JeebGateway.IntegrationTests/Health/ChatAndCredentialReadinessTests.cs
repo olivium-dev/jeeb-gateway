@@ -226,9 +226,10 @@ public sealed class ChatAndCredentialReadinessTests
 
     // ------------------------------------------------------------ helpers
 
-    private static string RepositoryRoot()
+    private static string RepositoryRoot(
+        [System.Runtime.CompilerServices.CallerFilePath] string testSource = "")
     {
-        var directory = new DirectoryInfo(AppContext.BaseDirectory);
+        var directory = new DirectoryInfo(Path.GetDirectoryName(testSource) ?? AppContext.BaseDirectory);
         while (directory is not null && !Directory.Exists(Path.Combine(directory.FullName, "src")))
         {
             directory = directory.Parent;

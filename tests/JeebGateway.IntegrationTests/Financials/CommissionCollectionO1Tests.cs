@@ -358,6 +358,10 @@ public class CommissionCollectionO1Tests
 
         settlements.Rows[row.DeliveryId].WalletTxId
             .Should().Be(WalletCommissionCollector.ExternalRefPrefix + txId.ToString("D"));
+        wallet.Lookups.Should().ContainSingle().Which.Should().Be(new CommissionDebitLookup(
+            WalletCommissionCollector.ExternalReferenceFor(row.DeliveryId),
+            WalletCommissionCollector.IdempotencyKeyFor(row.DeliveryId),
+            Jeeber, row.Commission, "platform-fee", row.Currency));
         wallet.Initiated.Should().BeEmpty("linking is a read plus a stamp");
         wallet.Executed.Should().BeEmpty();
     }
@@ -400,6 +404,34 @@ public class CommissionCollectionO1Tests
     // ─────────────────────────────────────────────────────────────────────────
     // The wire contract with wallet-service.
     // ─────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task Repeated_completion_repairs_a_missing_link_without_another_settlement_or_debit()
+    {
+        var row = SettledRow(commission: 0.10m);
+        var settlements = new FakeSettlementServiceClient();
+        settlements.Rows[row.DeliveryId] = row;
+        var wallet = new FakeDebitClient { FeeWallet = FeeWallet, SystemWallet = SystemWallet };
+        var collector = NewCollector(wallet, enabled: false, settlements);
+        var service = new SettlementService(settlements, new InMemoryRequestsStore(TimeProvider.System),
+            new SuccessfulAssignmentDeliveryClient(), new EarningsCacheInvalidator(), collector,
+            NullLogger<SettlementService>.Instance);
+
+        (await service.SettleOnCompletionAsync(row.DeliveryId, default)).Outcome
+            .Should().Be(SettlementOutcome.AlreadySettled);
+        row.WalletTxId.Should().BeNull();
+        var txId = Guid.NewGuid();
+        wallet.ByExternalReference[$"delivery:{row.DeliveryId}"] = txId;
+
+        var recovered = await service.SettleOnCompletionAsync(row.DeliveryId, default);
+        recovered.Outcome.Should().Be(SettlementOutcome.AlreadySettled);
+        recovered.Settlement!.WalletTxId.Should().Be("wallet-tx:" + txId.ToString("D"));
+        await service.SettleOnCompletionAsync(row.DeliveryId, default);
+        settlements.Settles.Should().BeEmpty("an audit-link retry must not re-settle");
+        wallet.Initiated.Should().BeEmpty();
+        wallet.Executed.Should().BeEmpty();
+        wallet.Aborted.Should().BeEmpty();
+    }
 
     [Fact]
     public async Task Initiate_Sends_The_Idempotency_Header_The_External_Reference_And_Suppresses_Wallet_Fees()
@@ -544,7 +576,7 @@ public class CommissionCollectionO1Tests
     private static WalletSufficiencyGuard NewGuard(double balance)
         => new(new FakeWalletClient { Balance = balance },
             Options.Create(new WalletGuardOptions { FailMode = "fail-closed" }),
-            Options.Create(new PartnerWalletOptions { CurrencyId = 1 }),
+            Options.Create(new PartnerWalletOptions { CurrencyId = 2 }),
             NullLogger<WalletSufficiencyGuard>.Instance);
 
     private static WalletCommissionCollector NewCollector(
@@ -579,9 +611,11 @@ public class CommissionCollectionO1Tests
     private static string Wallets(params (Guid Id, int Currency, string Type, bool Active)[] wallets)
         => JsonSerializer.Serialize(new
         {
+            walletHolder = new { holderId = Jeeber },
             wallets = wallets.Select(w => new
             {
                 walletId = w.Id,
+                holderId = Jeeber,
                 currencyID = w.Currency,
                 type = w.Type,
                 isActive = w.Active,
@@ -672,6 +706,7 @@ public class CommissionCollectionO1Tests
         public List<InitiatedLeg> Initiated { get; } = new();
         public List<Guid> Executed { get; } = new();
         public List<Guid> Aborted { get; } = new();
+        public List<CommissionDebitLookup> Lookups { get; } = new();
 
         public Task<Guid?> ResolveFeeWalletAsync(Guid holderId, CancellationToken ct)
         {
@@ -681,8 +716,11 @@ public class CommissionCollectionO1Tests
 
         public Task<Guid?> ResolveSystemWalletAsync(CancellationToken ct) => Task.FromResult(SystemWallet);
 
-        public Task<Guid?> FindByExternalReferenceAsync(string externalReference, CancellationToken ct)
-            => Task.FromResult(ByExternalReference.TryGetValue(externalReference, out var id) ? id : (Guid?)null);
+        public Task<Guid?> FindExecutedDebitAsync(CommissionDebitLookup expected, CancellationToken ct)
+        {
+            Lookups.Add(expected);
+            return Task.FromResult(ByExternalReference.TryGetValue(expected.ExternalReference, out var id) ? id : (Guid?)null);
+        }
 
         public Task<Guid> InitiateAsync(
             Guid sourceWalletId, Guid destinationWalletId, decimal amount,
@@ -840,7 +878,9 @@ public class CommissionCollectionO1Tests
                 };
             }
 
-            var payload = path.Contains("/wallets", StringComparison.Ordinal)
+            var payload = path == "/Fees/currencies"
+                ? "[{\"id\":1,\"code\":\"USD\"}]"
+                : path.Contains("/wallets", StringComparison.Ordinal)
                           || path.EndsWith("system-wallet", StringComparison.Ordinal)
                 ? HolderWallets
                 : "{\"transactionHeader\":{\"txId\":\"33333333-3333-4333-8333-333333333333\"}}";
