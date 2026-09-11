@@ -396,9 +396,13 @@ class MigrationTests(unittest.TestCase):
     def test_explicit_policy_rejects_added_mutation_or_removed_claim_authority(self):
         policy = load("migration_policy", "check-staging-chat-private-migration.py")
         source = (ROOT / "scripts/staging-chat-private-migration.py").read_text()
-        policy.check_source(source)
+        with patch.object(policy.ast, "unparse", side_effect=AssertionError("formatting is not authority")):
+            policy.check_source(source)
         for changed in (
             source.replace("&registryAuthFrom=spec", ""),
+            source.replace('"/api/firebase/token"', '"/api/firebase/other"'),
+            source.replace("/update?version={version}", "/remove?version={version}"),
+            source.replace("{original['ID']}/update", "{original['Name']}/update"),
             source.replace('require(operation == "migrate-private")', 'require(True)'),
             source.replace('journal.advance("chat-submission-pending")', 'pass'),
             source.replace('expected_seal=self.approved_seal', 'expected_seal=None'),

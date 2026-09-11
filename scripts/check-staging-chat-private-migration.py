@@ -16,8 +16,12 @@ def check_source(source):
     assert len(requests) == 4
     posts = [node for node in requests if ast.literal_eval(node.args[0]) == 'POST']
     assert len(posts) == 2
-    assert {ast.unparse(node.args[1]) for node in posts} == {
+    # Compare syntax structure, not unparse's version-dependent quote choices.
+    expected_targets = {
         "'/api/firebase/token'", 'f"/v1.52/services/{original[\'ID\']}/update?version={version}&registryAuthFrom=spec"'}
+    assert {ast.dump(node.args[1], include_attributes=False) for node in posts} == {
+        ast.dump(ast.parse(expression, mode='eval').body, include_attributes=False)
+        for expression in expected_targets}
     functions = {node.name: ast.get_source_segment(source, node) for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
     assert 'require(operation == "migrate-private")' in functions['validate_operation']
     assert 'expected_seal=self.approved_seal' in functions['retention']
