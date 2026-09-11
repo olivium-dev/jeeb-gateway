@@ -648,5 +648,88 @@ class DiagnosticTests(unittest.TestCase):
         baseline.c.held_lock.assert_not_called()
 
 
+class MainFailureTests(unittest.TestCase):
+    ARGS = ["helper", "migrate-private", "a" * 40, "123", "2", "b" * 64]
+    WARNING = "Private chat operation stopped. Any submission claim is consumed; reconcile before further action. Identity activation remains unauthorized."
+
+    def assert_report(self, output, error, source=True):
+        self.assertEqual(self.WARNING + "\n", error.getvalue())
+        self.assertNotIn(SECRET, output.getvalue() + error.getvalue())
+        report = json.loads(output.getvalue())
+        self.assertEqual("stopped", report["status"])
+        for field in ("mutationAuthorized", "retryAuthorized", "identityActivationAuthorized"):
+            self.assertIs(report[field], False)
+        if source:
+            self.assertEqual(("a" * 40, "123", "2"), (report["sourceCommit"], report["runId"], report["attempt"]))
+        else:
+            self.assertTrue({"sourceCommit", "runId", "attempt"}.isdisjoint(report))
+        self.assertFalse(report["failure"]["passed"])
+        return report
+
+    def test_validated_source_and_safe_real_helper_location_without_private_locals(self):
+        baseline = Mock()
+        baseline.c.held_lock.return_value = contextlib.nullcontext()
+        def fail(*_):
+            private_spec = {"Name": SECRET, "unrelated": SECRET}
+            m.gateway_candidate(private_spec)
+        with (patch.object(m.sys, "argv", self.ARGS), patch.dict(m.sys.modules, {"migration_baseline": baseline}),
+              patch.object(m, "Runtime"), patch.object(m, "Journal"), patch.object(m, "migrate", side_effect=fail) as migrate,
+              contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as error):
+            self.assertEqual(1, m.main())
+        report = self.assert_report(output, error)
+        location = report["failure"]
+        self.assertEqual("staging-chat-private-migration.py", location["helper"])
+        self.assertEqual("gateway_candidate", location["function"])
+        self.assertIsInstance(location["line"], int)
+        line = (ROOT / "scripts/staging-chat-private-migration.py").read_text().splitlines()[location["line"] - 1]
+        self.assertIn('require(spec["Name"] == SERVICES["gateway"])', line)
+        migrate.assert_called_once()
+
+    def test_unvalidated_arguments_never_gain_source_binding_or_reach_mutation(self):
+        variants = [["helper"], ["helper", "validate-operation", SECRET]]
+        for index in range(1, len(self.ARGS)):
+            args = self.ARGS.copy()
+            args[index] = SECRET
+            variants.append(args)
+        for args in variants:
+            with (self.subTest(args=args), patch.object(m.sys, "argv", args),
+                  patch.object(m, "Runtime") as runtime, patch.object(m, "Journal") as journal,
+                  patch.object(m, "migrate") as migrate,
+                  contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as error):
+                self.assertEqual(1, m.main())
+            self.assert_report(output, error, source=False)
+            runtime.assert_not_called()
+            journal.assert_not_called()
+            migrate.assert_not_called()
+
+    def test_failed_claimed_posts_keep_exit_one_and_exact_existing_claims_without_retry(self):
+        for failure, expected in (("gateway-post", ["gateway"]), ("chat-post", ["gateway", "chat"])):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                home = Path(temporary).resolve()
+                (home / ".jeeb-deploy").mkdir(mode=0o700)
+                journal = m.Journal(home, c)
+                runtime = FakeRuntime(journal, failure)
+                submitted, at_failure = runtime.submit, {}
+                def submit(*args):
+                    try:
+                        submitted(*args)
+                    except Exception:
+                        at_failure.update({path.name: path.read_bytes() for path in journal.path.iterdir()})
+                        raise
+                runtime.submit = submit
+                baseline = Mock()
+                baseline.c.held_lock.return_value = contextlib.nullcontext()
+                with (patch.object(m.sys, "argv", self.ARGS), patch.dict(m.sys.modules, {"migration_baseline": baseline}),
+                      patch.object(m.Path, "home", return_value=home), patch.object(m, "Runtime", return_value=runtime),
+                      patch.object(m, "Journal", return_value=journal), patch.object(m, "http_probe"),
+                      contextlib.redirect_stdout(io.StringIO()) as output, contextlib.redirect_stderr(io.StringIO()) as error):
+                    self.assertEqual(1, m.main())
+                self.assert_report(output, error)
+                self.assertEqual(expected, runtime.posts)
+                self.assertTrue(at_failure)
+                self.assertEqual(at_failure, {path.name: path.read_bytes() for path in journal.path.iterdir()})
+                self.assertFalse((journal.path / "05-complete.json").exists())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -643,6 +643,7 @@ def bundle():
 
 
 def main():
+    validated_source = {}
     try:
         args = sys.argv[1:]
         if args == ["bundle"]:
@@ -658,6 +659,7 @@ def main():
         identifier(run, r"[1-9][0-9]*")
         identifier(attempt, r"[1-9][0-9]*")
         identifier(seal, r"[0-9a-f]{64}")
+        validated_source = {"sourceCommit": source, "runId": run, "attempt": attempt}
         require("migration_baseline" in sys.modules)
         baseline = sys.modules["migration_baseline"]
         if operation == "diagnose-private":
@@ -671,8 +673,12 @@ def main():
             result = migrate(runtime, Journal(home, baseline.c), source, run, attempt, seal)
         print(json.dumps(result, sort_keys=True))
         return 0
-    except Exception:
+    except Exception as error:
         print("Private chat operation stopped. Any submission claim is consumed; reconcile before further action. Identity activation remains unauthorized.", file=sys.stderr)
+        report = {"status": "stopped", "mutationAuthorized": False, "retryAuthorized": False,
+                  "identityActivationAuthorized": False, "failure": diagnostic_failure("operation", error),
+                  **validated_source}
+        print(json.dumps(report, sort_keys=True))
         return 1
 
 
