@@ -76,6 +76,7 @@ public class RequestOffersController : ControllerBase
     private readonly IWalletSufficiencyGuard _walletGuard;
     private readonly UpstreamFeatureFlags _flags;
     private readonly TimeProvider _clock;
+    private readonly OfferDeadlineProjector _deadlines;
     private readonly JeebGateway.Services.Clients.IDeliveryServiceClient _delivery;
     private readonly JeebGateway.Tiers.ITierCatalogResolver _tiers;
     private readonly ILogger<RequestOffersController> _logger;
@@ -91,6 +92,7 @@ public class RequestOffersController : ControllerBase
         IWalletSufficiencyGuard walletGuard,
         IOptions<UpstreamFeatureFlags> flags,
         TimeProvider clock,
+        OfferDeadlineProjector deadlines,
         JeebGateway.Services.Clients.IDeliveryServiceClient delivery,
         JeebGateway.Tiers.ITierCatalogResolver tiers,
         ILogger<RequestOffersController> logger)
@@ -107,6 +109,7 @@ public class RequestOffersController : ControllerBase
         _walletGuard = walletGuard;
         _flags = flags.Value;
         _clock = clock;
+        _deadlines = deadlines;
         _logger = logger;
     }
 
@@ -205,6 +208,27 @@ public class RequestOffersController : ControllerBase
             {
                 Title = "Request is no longer accepting offers.",
                 Detail = $"Current status: {request.Status}.",
+                Status = StatusCodes.Status409Conflict,
+                Type = "https://jeeb.dev/errors/request-not-open-for-offers"
+            });
+        }
+
+        // The request-owner projection can briefly (or, after a long outage, indefinitely)
+        // retain `pending` after the canonical tier-TTL transition. Status alone must therefore
+        // never authorize a bid. Use the exact same effective deadline as the Jeeber feed and
+        // reject at the boundary before wallet, radius, offer-service, chat, or push side effects.
+        var offerWindow = await _deadlines.ProjectAsync(request, _clock.GetUtcNow(), ct);
+        if (offerWindow.Seconds is not > 0)
+        {
+            _logger.LogInformation(
+                "event={event} jeeberId={JeeberId} requestId={RequestId} status={Status} "
+                + "createdAt={CreatedAt} offerDeadlineAt={OfferDeadlineAt}",
+                "offer.submit.window_elapsed", jeeberId, requestId, request.Status,
+                request.CreatedAt, offerWindow.At);
+            return Conflict(new ProblemDetails
+            {
+                Title = "Request is no longer accepting offers.",
+                Detail = "The request's offer window has elapsed.",
                 Status = StatusCodes.Status409Conflict,
                 Type = "https://jeeb.dev/errors/request-not-open-for-offers"
             });

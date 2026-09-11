@@ -150,9 +150,6 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
             //   (2) typed "request not open"     -> RequestNotOpenForOffersException (409 request-not-open-for-offers)
             //   (3) generic/unknown conflict     -> OfferSubmitConflictException (409 offer-submit-conflict)
             // The retired 20-offer cap must not be inferred from an unknown upstream code.
-            // Fidelity gap: current offer-service submit renders request_not_open and
-            // already_submitted as generic code=conflict, so the specific branches are
-            // unreachable until offer-service emits typed error codes.
             // offer-service submit has no count cap: unique (request_id, jeeber_id) only; 409s are state conflicts; edit cap is 422.
             if (IsDuplicateCode(ex.UpstreamCode))
             {
@@ -483,21 +480,13 @@ public sealed class UpstreamPendingOffersStore : IPendingOffersStore
         _ => PendingOfferStatus.Withdrawn
     };
 
-    // Fidelity gap: current offer-service submit emits generic code=conflict for
-    // request_not_open and already_submitted. These typed-code matchers are
-    // forward-compatible only; real code=conflict maps to OfferSubmitConflictException
-    // until the separate offer-service-contract fix emits typed error codes.
+    // Keep this vocabulary exact. Unknown 409 codes must stay generic rather than
+    // accidentally becoming a duplicate merely because they contain "already".
     private static bool IsDuplicateCode(string? code)
-        => code is not null
-           && (code.Contains("duplicate", StringComparison.OrdinalIgnoreCase)
-               || code.Contains("already", StringComparison.OrdinalIgnoreCase)
-               || code.Contains("offer_exists", StringComparison.OrdinalIgnoreCase));
+        => string.Equals(code, "already_submitted", StringComparison.OrdinalIgnoreCase)
+           || string.Equals(code, "offer_already_exists", StringComparison.OrdinalIgnoreCase)
+           || string.Equals(code, "duplicate_offer", StringComparison.OrdinalIgnoreCase);
 
-    // Forward-compatible with the future typed-code contract: match request_not_open
-    // and the looser not_open form case-insensitively so a closed auction can map
-    // to its own 409 once offer-service stops emitting generic conflict here.
     private static bool IsRequestNotOpenCode(string? code)
-        => code is not null
-           && (code.Contains("request_not_open", StringComparison.OrdinalIgnoreCase)
-               || code.Contains("not_open", StringComparison.OrdinalIgnoreCase));
+        => string.Equals(code, "request_not_open", StringComparison.OrdinalIgnoreCase);
 }

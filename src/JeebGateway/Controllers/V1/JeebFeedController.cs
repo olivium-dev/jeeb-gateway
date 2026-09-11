@@ -145,6 +145,51 @@ public sealed class JeebFeedController : ControllerBase
             .OrderBy(r => r.CreatedAt)
             .ToList();
 
+        // A stored `pending` token is not sufficient proof that the auction is still open:
+        // delivery-service may already have authored the TTL transition while the request-owner
+        // projection is waiting to reconcile. Filter on the same effective deadline that is sent
+        // to the handset, before doing radius/profile/offer work. In particular, never publish a
+        // pending row with zero seconds remaining — the mobile correctly renders that as
+        // "Expired", which made stale projection rows appear as newly-expired orders.
+        Func<DeliveryRequest, (DateTimeOffset? At, int? Seconds)> project;
+        try
+        {
+            project = await _deadlines.ProjectorForAsync(feedNow, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Discovery is actionable: if the open window cannot be established, fail closed
+            // instead of inviting an offer that may already be invalid.
+            _logger.LogWarning(ex,
+                "jeeber.feed offer-window resolve failed; excluding pending requests.");
+            project = _ => (null, null);
+        }
+
+        var openDeadlines = new Dictionary<string, (DateTimeOffset? At, int? Seconds)>(
+            StringComparer.Ordinal);
+        visible = visible
+            .Where(request =>
+            {
+                var deadline = project(request);
+                if (deadline.Seconds is not > 0)
+                {
+                    _logger.LogInformation(
+                        "event={event} requestId={RequestId} status={Status} createdAt={CreatedAt} "
+                        + "offerDeadlineAt={OfferDeadlineAt} reason={Reason}",
+                        "jeeber.feed.excluded", request.Id, request.Status, request.CreatedAt,
+                        deadline.At, "offer_window_elapsed");
+                    return false;
+                }
+
+                openDeadlines[request.Id] = deadline;
+                return true;
+            })
+            .ToList();
+
         // (2b) D2 fail-CLOSED tier-radius cut. An unknown distance is an EXCLUSION, never a
         // pass-through: the 9,000 km request that reached a 25 km jeeber got there this way.
         var tierCatalog = await LoadTierCatalogAsync(ct);
@@ -198,23 +243,9 @@ public sealed class JeebFeedController : ControllerBase
         // / email are NEVER projected — only the short display form + an absolute-https avatar.
         var sendersByClient = await ResolveSendersAsync(visible, ct);
 
-        // P7 (G-H): resolve the tier-TTL projector ONCE for the whole page.
-        // Degrade-don't-fail, like every other feed annotation: a blip yields null
-        // deadlines, never a feed failure.
-        Func<DeliveryRequest, (DateTimeOffset? At, int? Seconds)> project;
-        try
-        {
-            project = await _deadlines.ProjectorForAsync(feedNow, ct);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogWarning(ex, "jeeber.feed offerDeadline decoration failed; serving null deadlines");
-            project = _ => (null, null);
-        }
-
         var items = visible
             .Select(r => ToFeedItem(
-                r, offersByRequest, sendersByClient, project(r), distancesByRequest[r.Id],
+                r, offersByRequest, sendersByClient, openDeadlines[r.Id], distancesByRequest[r.Id],
                 tierCatalog.Resolve(r.TierId)))
             .ToList();
 
