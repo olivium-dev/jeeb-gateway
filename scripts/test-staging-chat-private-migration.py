@@ -480,6 +480,176 @@ class MigrationTests(unittest.TestCase):
 
 
 class DiagnosticTests(unittest.TestCase):
+    def recorded_fixture(self, home):
+        baseline, values = self.fixture()
+        initial = {role: m.verified_runtime(role, values[("service", m.SERVICES[role])],
+                   lambda kind, key: values[(kind, key)], m.manifest(), False) for role in m.SERVICES}
+        gateway = values[("service", m.SERVICES["gateway"]) ]
+        chat = values[("service", m.SERVICES["chat"]) ]
+        saved = baseline.load_seal.return_value[1]["snapshot"]
+        saved["roles"] = {"gateway": {"image": copy.deepcopy(values[("image", initial["gateway"]["image"])]),
+                                     "tasks": copy.deepcopy(values[("tasks", gateway["ID"])])}}
+        metadata = {"schemaVersion": 1, "sourceCommit": "a333ff9b96116aa4833bf0fdeec0a9720e041ce1",
+                    "runId": "34605416479", "attempt": "1", "currentBaselineSeal": "b" * 64,
+                    "chatBuild": m.manifest(), "baseline": initial, "identityActivationAuthorized": False,
+                    "candidateSpecSha256": {"gateway": m.digest(m.gateway_candidate(gateway["Spec"])),
+                                            "chat": m.digest(m.chat_candidate(chat["Spec"]))}}
+        journal = m.Journal(home, c)
+        journal.begin(metadata)
+        journal.advance("gateway-submission-pending")
+        gateway["PreviousSpec"] = copy.deepcopy(gateway["Spec"])
+        gateway["Spec"] = m.gateway_candidate(gateway["Spec"])
+        gateway["Version"]["Index"] += 1
+        task = values[("tasks", gateway["ID"])][0]
+        task["ID"] = "u" * 25
+        task["Spec"]["ContainerSpec"] = copy.deepcopy(gateway["Spec"]["TaskTemplate"]["ContainerSpec"])
+        values[("container", "d" * 64)]["Config"]["Env"] = copy.deepcopy(gateway["Spec"]["TaskTemplate"]["ContainerSpec"]["Env"])
+        return baseline, values, journal
+
+    def rewrite_recorded_metadata(self, journal, change):
+        prepared_path = journal.path / "00-prepared.json"
+        pending_path = journal.path / "01-gateway-submission-pending.json"
+        prepared, pending = (json.loads(path.read_text()) for path in (prepared_path, pending_path))
+        change(prepared["metadata"])
+        pending["metadata"] = copy.deepcopy(prepared["metadata"])
+        pending["previousSha256"] = m.digest(prepared)
+        for path, value in ((prepared_path, prepared), (pending_path, pending)):
+            path.chmod(0o600)
+            path.write_text(json.dumps(value))
+            path.chmod(0o400)
+
+    def test_recorded_gateway_candidate_is_readonly_and_never_continuation_authority(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home, _ = self.make_home(temporary)
+            baseline, values, journal = self.recorded_fixture(home)
+            files = {path.name: path.read_bytes() for path in journal.path.iterdir()}
+            captured = copy.deepcopy(values)
+            with (patch.object(m, "engine_get", side_effect=lambda kind, value: copy.deepcopy(values[(kind, value)])),
+                  patch.object(m, "Journal", side_effect=AssertionError("mutation")),
+                  patch.object(m, "Runtime", side_effect=AssertionError("mutation")),
+                  patch.object(m, "migrate", side_effect=AssertionError("mutation")),
+                  patch.object(m, "http_probe", side_effect=AssertionError("probe")),
+                  patch.object(c, "held_lock", side_effect=AssertionError("mutation")),
+                  patch.object(c, "write_exclusive", side_effect=AssertionError("mutation"))):
+                report = m.diagnose(baseline, home, "b" * 64)
+            self.assertEqual("matched", report["recordedCandidate"]["status"], report)
+            self.assertTrue(report["snapshotStable"] and report["readOnly"])
+            self.assertFalse(report["mutationAuthorized"] or report["retryAuthorized"] or report["identityActivationAuthorized"])
+            self.assertFalse(report["continuationAuthorized"])
+            self.assertTrue(any(row["stage"] == "baseline-match" and not row["passed"] for row in report["checks"]),
+                            "an observed candidate must not relabel the original exact baseline as unchanged")
+            self.assertNotIn(SECRET, json.dumps(report))
+            self.assertTrue(all(type(value) is bool for key, value in report["recordedCandidate"].items() if key != "status"))
+            self.assertEqual(files, {path.name: path.read_bytes() for path in journal.path.iterdir()})
+            self.assertEqual(captured, values)
+            baseline.verify_retention.assert_not_called()
+
+    def test_recorded_candidate_rejects_metadata_identity_hash_and_build_mismatch(self):
+        changes = {"source": lambda x: x.update(sourceCommit="f" * 40),
+                   "run": lambda x: x.update(runId="34605510221"), "attempt": lambda x: x.update(attempt="2"),
+                   "seal": lambda x: x.update(currentBaselineSeal="f" * 64),
+                   "build": lambda x: x["chatBuild"].update(sourceCommit="f" * 40),
+                   "extra": lambda x: x.update(extra=SECRET), "missing": lambda x: x.pop("chatBuild"),
+                   "gateway-hash": lambda x: x["candidateSpecSha256"].update(gateway="f" * 64),
+                   "chat-hash": lambda x: x["candidateSpecSha256"].update(chat="f" * 64)}
+        for role in m.SERVICES:
+            for key, value in (("serviceId", "x" * 25), ("version", 9), ("version", True), ("specSha256", "f" * 64),
+                               ("imageId", "sha256:" + "f" * 64), ("taskId", "x" * 25), ("nodeId", "x" * 25), ("overlayId", "x" * 25)):
+                changes[role + key + str(value)] = lambda x, role=role, key=key, value=value: x["baseline"][role].update({key: value})
+        for name, change in changes.items():
+            with self.subTest(change=name), tempfile.TemporaryDirectory() as temporary:
+                home, _ = self.make_home(temporary)
+                baseline, values, journal = self.recorded_fixture(home)
+                self.rewrite_recorded_metadata(journal, change)
+                with patch.object(m, "engine_get", side_effect=lambda kind, value: copy.deepcopy(values[(kind, value)])):
+                    report = m.diagnose(baseline, home, "b" * 64)
+                self.assertEqual("unproven", report["recordedCandidate"]["status"])
+                self.assertFalse(report["mutationAuthorized"] or report["retryAuthorized"])
+                self.assertNotIn(SECRET, json.dumps(report))
+
+    def test_recorded_candidate_rejects_current_or_previous_spec_and_runtime_drift(self):
+        for failure in ("previous-missing", "previous-extra", "gateway-spec", "gateway-version", "gateway-id",
+                        "chat-spec", "chat-version", "chat-task", "delivery", "seal", "checkpoint"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                home, _ = self.make_home(temporary)
+                baseline, values, _ = self.recorded_fixture(home)
+                gateway, chat = (values[("service", m.SERVICES[role])] for role in ("gateway", "chat"))
+                if failure == "previous-missing": gateway.pop("PreviousSpec")
+                if failure == "previous-extra": gateway["PreviousSpec"]["extra"] = SECRET
+                if failure == "gateway-version": gateway["Version"]["Index"] = 10
+                if failure == "gateway-id": gateway["ID"] = "x" * 25
+                if failure == "chat-version": chat["Version"]["Index"] += 1
+                if failure == "chat-task": values[("tasks", chat["ID"])][0]["ID"] = "x" * 25
+                if failure in ("gateway-spec", "chat-spec"):
+                    current = gateway if failure == "gateway-spec" else chat
+                    declaration = current["Spec"]["TaskTemplate"]["ContainerSpec"]
+                    declaration["Env"].append("extra=" + SECRET)
+                    values[("tasks", current["ID"])][0]["Spec"]["ContainerSpec"] = copy.deepcopy(declaration)
+                    cid = "d" * 64 if failure == "gateway-spec" else "c" * 64
+                    values[("container", cid)]["Config"]["Env"] = copy.deepcopy(declaration["Env"])
+                if failure == "delivery": baseline.a.collect.return_value["services"]["delivery"]["ID"] = "x" * 25
+                if failure == "seal":
+                    original = baseline.load_seal.return_value
+                    baseline.load_seal.side_effect = [original, original, ({"changed": True}, original[1])]
+                if failure == "checkpoint": baseline.stable_runtime.side_effect = ["before", "after"]
+                with patch.object(m, "engine_get", side_effect=lambda kind, value: copy.deepcopy(values[(kind, value)])):
+                    report = m.diagnose(baseline, home, "b" * 64)
+                self.assertEqual("unproven", report["recordedCandidate"]["status"], report)
+                self.assertFalse(report["mutationAuthorized"] or report["retryAuthorized"])
+
+    def test_recorded_candidate_rejects_missing_unsupported_or_changed_claim_prefix(self):
+        for failure in ("absent", "prepared-only", "gateway-verified", "chat-claimed", "pending-evidence", "late-journal"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                home, _ = self.make_home(temporary)
+                baseline, values, journal = self.recorded_fixture(home)
+                if failure in ("absent", "prepared-only"):
+                    (journal.path / "01-gateway-submission-pending.json").unlink()
+                    if failure == "absent":
+                        (journal.path / "00-prepared.json").unlink()
+                        journal.path.rmdir()
+                if failure in ("gateway-verified", "chat-claimed"):
+                    journal.advance("gateway-verified")
+                    if failure == "chat-claimed": journal.advance("chat-submission-pending")
+                if failure == "pending-evidence":
+                    path = journal.path / "01-gateway-submission-pending.json"
+                    value = json.loads(path.read_text())
+                    value["evidence"] = {"extra": SECRET}
+                    path.chmod(0o600)
+                    path.write_text(json.dumps(value))
+                    path.chmod(0o400)
+                if failure == "late-journal":
+                    snapshot = baseline.a.collect.return_value
+                    def collect(_):
+                        if baseline.a.collect.call_count == 2: journal.advance("gateway-verified")
+                        return snapshot
+                    baseline.a.collect.side_effect = collect
+                with patch.object(m, "engine_get", side_effect=lambda kind, value: copy.deepcopy(values[(kind, value)])):
+                    report = m.diagnose(baseline, home, "b" * 64)
+                self.assertEqual("unproven", report["recordedCandidate"]["status"])
+                self.assertFalse(report["mutationAuthorized"] or report["retryAuthorized"])
+
+    def test_recorded_candidate_is_cleared_on_exit_time_lock_or_owner_change(self):
+        for change in ("owner", "lock"):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as temporary:
+                home, lock = self.make_home(temporary)
+                baseline, values, _ = self.recorded_fixture(home)
+                real_lock = m.diagnostic_lock
+                @contextlib.contextmanager
+                def changed_at_exit(home, custody):
+                    with real_lock(home, custody):
+                        yield
+                        if change == "owner":
+                            lock.with_suffix(".owner").touch(mode=0o600)
+                        else:
+                            lock.unlink()
+                            lock.touch(mode=0o600)
+                with (patch.object(m, "engine_get", side_effect=lambda kind, value: copy.deepcopy(values[(kind, value)])),
+                      patch.object(m, "diagnostic_lock", changed_at_exit)):
+                    report = m.diagnose(baseline, home, "b" * 64)
+                self.assertFalse(report["snapshotStable"])
+                self.assertEqual("unproven", report["recordedCandidate"]["status"])
+                self.assertFalse(report["mutationAuthorized"] or report["retryAuthorized"] or report["continuationAuthorized"])
+
     def make_home(self, temporary):
         home = Path(temporary).resolve()
         deploy = home / ".jeeb-deploy"

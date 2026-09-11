@@ -547,10 +547,78 @@ def diagnostic_journal(home, custody, approved_seal):
         return report, None
 
 
+def recorded_candidate_reconciliation(baseline, home, approved_seal, snapshot, journal, fingerprints, services, runtimes):
+    """Observe only the exact interrupted migration; never infer execution authority."""
+    require(journal.get("state") == "prefix" and journal.get("phases") == list(PHASES[:2])
+            and journal.get("gatewayClaimPresent") is True and journal.get("chatClaimPresent") is False)
+    require(isinstance(fingerprints, list) and len(fingerprints) == 2)
+    path = Path(home) / ".jeeb-deploy/paired-releases" / JOURNAL_NAME
+    prepared = baseline.c.read_private(path / "00-prepared.json", 0o400)
+    pending = baseline.c.read_private(path / "01-gateway-submission-pending.json", 0o400)
+    require([digest(prepared), digest(pending)] == fingerprints)
+    require(pending["evidence"] == {})
+    metadata = prepared["metadata"]
+    require(set(metadata) == {"schemaVersion", "sourceCommit", "runId", "attempt", "currentBaselineSeal",
+                              "chatBuild", "baseline", "candidateSpecSha256", "identityActivationAuthorized"})
+    require(metadata["sourceCommit"] == "a333ff9b96116aa4833bf0fdeec0a9720e041ce1"
+            and metadata["runId"] == "34605416479" and metadata["attempt"] == "1"
+            and metadata["currentBaselineSeal"] == approved_seal and metadata["chatBuild"] == manifest()
+            and type(metadata["schemaVersion"]) is int and metadata["schemaVersion"] == 1
+            and metadata["identityActivationAuthorized"] is False)
+    require(set(metadata["baseline"]) == set(SERVICES) and set(metadata["candidateSpecSha256"]) == set(SERVICES))
+    require(set(services) == set(SERVICES) and set(runtimes) == set(SERVICES))
+    sealed, evidence = baseline.load_seal(home)
+    require(baseline.digest(sealed) == approved_seal)
+    baseline.verified(snapshot, initial=False)
+    require(baseline.origin(home, snapshot["metadata"]) == evidence["originals"])
+    saved = evidence["snapshot"]
+    require(snapshot["metadata"] == saved["metadata"] and snapshot["secret"] == saved["secret"])
+    require(snapshot["info"]["ID"] == saved["info"]["ID"]
+            and snapshot["info"]["Swarm"]["NodeID"] == saved["info"]["Swarm"]["NodeID"])
+    require(snapshot["services"]["gateway"] == services["gateway"])
+    require({role: value for role, value in snapshot["services"].items() if role != "gateway"}
+            == {role: value for role, value in saved["services"].items() if role != "gateway"})
+    for role in SERVICES:
+        initial, current = metadata["baseline"][role], runtimes[role]
+        require(set(initial) == {"serviceId", "version", "specSha256", "image", "imageId", "taskId", "nodeId", "overlayId"})
+        require(type(initial["version"]) is int and initial["version"] > 0)
+        for key in ("serviceId", "taskId", "nodeId", "overlayId"): identifier(initial[key])
+        identifier(initial["specSha256"], r"[0-9a-f]{64}")
+        identifier(initial["imageId"], r"sha256:[0-9a-f]{64}")
+        identifier(metadata["candidateSpecSha256"][role], r"[0-9a-f]{64}")
+        require(current["nodeId"] == initial["nodeId"] == saved["info"]["Swarm"]["NodeID"]
+                and current["overlayId"] == initial["overlayId"] == NETWORK_ID)
+        require(current["serviceId"] == initial["serviceId"] and current["image"] == initial["image"]
+                and current["imageId"] == initial["imageId"])
+    gateway, chat = services["gateway"], services["chat"]
+    original_gateway = saved["services"]["gateway"]
+    initial_gateway = metadata["baseline"]["gateway"]
+    require(initial_gateway["serviceId"] == original_gateway["ID"]
+            and initial_gateway["version"] == original_gateway["Version"]["Index"]
+            and initial_gateway["specSha256"] == digest(original_gateway["Spec"])
+            and initial_gateway["image"] == original_gateway["Spec"]["TaskTemplate"]["ContainerSpec"]["Image"]
+            and initial_gateway["imageId"] == saved["roles"]["gateway"]["image"]["Id"])
+    require(len(saved["roles"]["gateway"]["tasks"]) == 1
+            and initial_gateway["taskId"] == saved["roles"]["gateway"]["tasks"][0]["ID"])
+    require(gateway.get("PreviousSpec") == original_gateway["Spec"])
+    candidate = gateway_candidate(gateway["PreviousSpec"])
+    require(gateway["Spec"] == candidate and digest(candidate) == metadata["candidateSpecSha256"]["gateway"]
+            and runtimes["gateway"]["version"] > initial_gateway["version"])
+    # Chat has no full historical Spec in the Delivery seal. Its immutable
+    # prepared digest/version/identity, not invented history, is the witness.
+    require(runtimes["chat"] == metadata["baseline"]["chat"])
+    require(digest(chat["Spec"]) == metadata["baseline"]["chat"]["specSha256"]
+            and digest(chat_candidate(chat["Spec"])) == metadata["candidateSpecSha256"]["chat"])
+    return {"status": "matched", "supportedPrefix": True, "metadataMatches": True,
+            "gatewayPreviousMatchesSeal": True, "gatewayMatchesRecordedCandidate": True,
+            "chatMatchesRecordedInitial": True, "runtimeMatches": True}, (sealed, evidence["originals"])
+
+
 def diagnose(baseline, home, approved_seal):
     """GET-only diagnosis. Evidence does not grant mutation or retry authority."""
-    report = {"readOnly": True, "mutationAuthorized": False, "retryAuthorized": False,
-              "identityActivationAuthorized": False, "snapshotStable": False, "checks": [], "runtimeFormats": {}}
+    report = {"readOnly": True, "mutationAuthorized": False, "retryAuthorized": False, "continuationAuthorized": False,
+              "identityActivationAuthorized": False, "snapshotStable": False, "checks": [], "runtimeFormats": {},
+              "recordedCandidate": {"status": "unproven", "supportedPrefix": False}}
     stage = "existing-lock"
     try:
         with diagnostic_lock(home, baseline.c):
@@ -575,7 +643,7 @@ def diagnose(baseline, home, approved_seal):
                 report["checks"].append({"stage": stage, "passed": True})
             except Exception as error:
                 report["checks"].append(diagnostic_failure(stage, error))
-            services, observed = {}, {}
+            services, runtimes, observed = {}, {}, {}
             def observed_get(kind, value):
                 current = engine_get(kind, value)
                 normalized = stable_container(current) if kind == "container" else current
@@ -599,7 +667,18 @@ def diagnose(baseline, home, approved_seal):
                                if role == "gateway" else not spec.get("EndpointSpec", {}).get("Ports"))
                     result = verified_runtime(role, service, observed_get, manifest(), private)
                     require(result["nodeId"] == before["info"]["Swarm"]["NodeID"])
+                    runtimes[role] = result
                     report["checks"].append({"stage": stage, "passed": True, "privateTopology": private})
+                except Exception as error:
+                    report["checks"].append(diagnostic_failure(stage, error))
+            candidate_projection = None
+            if journal.get("state") == "prefix" and journal.get("phases") == list(PHASES[:2]):
+                stage = "recorded-candidate"
+                report["recordedCandidate"]["supportedPrefix"] = True
+                try:
+                    candidate_projection, baseline_witness = recorded_candidate_reconciliation(
+                        baseline, home, approved_seal, before, journal, journal_fingerprint, services, runtimes)
+                    report["checks"].append({"stage": stage, "passed": True})
                 except Exception as error:
                     report["checks"].append(diagnostic_failure(stage, error))
             stage = "stable-checkpoint"
@@ -616,9 +695,12 @@ def diagnose(baseline, home, approved_seal):
                 current = engine_get(kind, value)
                 require((stable_container(current) if kind == "container" else current) == captured)
             report["snapshotStable"] = True
+            if candidate_projection is not None:
+                report["recordedCandidate"] = candidate_projection
             report["checks"].append({"stage": stage, "passed": True})
     except Exception as error:
         report["snapshotStable"] = False
+        report["recordedCandidate"] = {"status": "unproven", "supportedPrefix": report["recordedCandidate"]["supportedPrefix"]}
         report["checks"].append(diagnostic_failure(stage, error))
     return report
 
