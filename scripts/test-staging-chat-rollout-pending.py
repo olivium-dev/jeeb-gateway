@@ -56,10 +56,12 @@ class RolloutPendingTests(unittest.TestCase):
             runtime = m.Runtime(Mock(), m.manifest(), "a" * 64, Path("/unused"), "b" * 64)
             current = copy.deepcopy(original)
             current["UpdateStatus"] = status
+            observe = Mock()
             with (patch.object(m, "engine_get", return_value=current) as get,
                   patch.object(runtime, "verify") as verify, patch.object(m.time, "sleep") as sleep):
-                with self.assertRaises(ValueError): runtime.wait("gateway", expected, True)
+                with self.assertRaises(ValueError): runtime.wait("gateway", expected, True, observe=observe)
                 self.assertEqual(40, get.call_count)
+                self.assertEqual(40, observe.call_count)
                 self.assertEqual(39, sleep.call_count)
                 verify.assert_not_called()
         for failure in ("paused", "rollback_started", "rollback_completed", "failed", "unknown", "malformed", "wrong-spec", "replaced-id", "completed-guard"):
@@ -78,6 +80,10 @@ class RolloutPendingTests(unittest.TestCase):
                 self.assertEqual(2, get.call_count)
                 self.assertEqual(1 if failure == "completed-guard" else 0, verify.call_count)
                 sleep.assert_not_called()
+        with patch.object(runtime, "inspect") as inspect:
+            with self.assertRaises(ValueError):
+                runtime.wait("gateway", expected, True, observe=Mock(side_effect=ValueError("gateway witness drift")))
+            inspect.assert_not_called()
 
 
 if __name__ == "__main__":
