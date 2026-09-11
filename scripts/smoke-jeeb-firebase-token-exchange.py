@@ -9,9 +9,13 @@ in this process only; none are printed or placed in command-line arguments.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import json
 import os
+import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -25,11 +29,56 @@ ALLOWED_GATEWAY_ORIGINS = {
     "https://jeeb.fds-1.com",
 }
 MAX_RESPONSE_BYTES = 1_048_576
+MAX_ID_TOKEN_BYTES = 16_384
 OpenUrl = Callable[..., Any]
 
 
 class SmokeFailure(RuntimeError):
     """Sanitized smoke failure; never include a response body or credential."""
+
+
+def _identity_claims_bound(token: str, uid: str) -> None:
+    """Bind claims from Firebase's successful HTTPS exchange response only.
+
+    This is NOT local signature verification and must not be used to authenticate
+    caller-supplied tokens. No decoded claims or parsing errors leave this helper.
+    """
+    def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError()
+            result[key] = value
+        return result
+
+    try:
+        if len(token) > MAX_ID_TOKEN_BYTES:
+            raise ValueError()
+        parts = token.split(".")
+        if len(parts) != 3 or any(re.fullmatch(r"[A-Za-z0-9_-]+", part) is None
+                                  for part in parts):
+            raise ValueError()
+        # Validate compact base64url shape, but do not interpret the signature.
+        decoded = [base64.b64decode(part + "=" * (-len(part) % 4),
+                                   altchars=b"-_", validate=True) for part in parts]
+        header = json.loads(decoded[0].decode("utf-8"), object_pairs_hook=unique_object)
+        if not isinstance(header, dict) or header.get("alg") != "RS256":
+            raise ValueError()
+        claims = json.loads(decoded[1].decode("utf-8"), object_pairs_hook=unique_object)
+        if not isinstance(claims, dict):
+            raise ValueError()
+        if (claims.get("aud") != PROJECT_ID
+                or claims.get("iss") != f"https://securetoken.google.com/{PROJECT_ID}"
+                or claims.get("sub") != uid):
+            raise ValueError()
+        expiry = claims.get("exp")
+        # Freshly exchanged Firebase ID tokens last one hour. Allow one minute
+        # of forward clock skew, but never accept an already expired token.
+        now = time.time()
+        if type(expiry) is not int or not now < expiry <= now + 3660:
+            raise ValueError()
+    except (ValueError, UnicodeError, binascii.Error, RecursionError):
+        raise SmokeFailure("Firebase Identity Toolkit returned an invalid identity binding") from None
 
 
 def _required_secret(environment: dict[str, str], name: str) -> str:
@@ -139,6 +188,7 @@ def run_smoke(
         raise SmokeFailure("Firebase Identity Toolkit returned the wrong uid")
     if not isinstance(exchanged.get("idToken"), str) or not exchanged["idToken"]:
         raise SmokeFailure("Firebase Identity Toolkit omitted idToken")
+    _identity_claims_bound(exchanged["idToken"], uid)
 
 
 def main() -> int:
