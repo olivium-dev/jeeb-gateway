@@ -309,6 +309,47 @@ public class RequestOffersEndpointTests : IClassFixture<Fakes.FakeOfferStoreWebA
     }
 
     [Fact]
+    public async Task Submit_When_Stored_Pending_But_Offer_Window_Elapsed_Returns_409_Without_Offer()
+    {
+        // Isolated factory: advancing its singleton clock must not affect the class fixture used
+        // by the other endpoint tests.
+        using var factory = new Fakes.FakeOfferStoreWebApplicationFactory();
+        var store = factory.Services.GetRequiredService<IRequestsStore>();
+        var request = await store.CreateAsync(new CreateRequestInput
+        {
+            ClientId = $"client-{Guid.NewGuid()}",
+            Description = "stale pending request",
+            TierId = Fakes.InRangeGeoFixture.TierId,
+            PickupLocation = new GeoPoint
+            {
+                Lat = Fakes.InRangeGeoFixture.Lat,
+                Lng = Fakes.InRangeGeoFixture.Lng,
+            },
+        }, CancellationToken.None);
+        var jeeberId = $"jeeber-{Guid.NewGuid()}";
+        var jeeber = factory.CreateClient();
+        jeeber.DefaultRequestHeaders.Add("X-User-Id", jeeberId);
+        jeeber.DefaultRequestHeaders.Add("X-User-Roles", "driver");
+
+        // Urgent is 30 minutes. Keep the row's stored status pending, reproducing the
+        // reconciliation gap, and cross the effective deadline.
+        factory.Services
+            .GetRequiredService<JeebGateway.TestControlPlane.FakeTimeProvider>()
+            .AdvanceBy(TimeSpan.FromMinutes(31));
+
+        var response = await jeeber.PostAsJsonAsync(
+            $"/requests/{request.Id}/offers",
+            new { fee = 5m, etaMinutes = 20 });
+
+        response.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        var problem = await response.Content.ReadFromJsonAsync<ProblemDetails>();
+        problem!.Type.Should().Be("https://jeeb.dev/errors/request-not-open-for-offers");
+        factory.Services.GetRequiredService<Fakes.FakePendingOffersStore>()
+            .PeekForTest(jeeberId).Should().BeEmpty(
+                "the deadline gate runs before wallet, offer-service, chat, and push side effects");
+    }
+
+    [Fact]
     public async Task Submit_Without_Identity_Returns_401()
     {
         var (_, requestId) = await SeedRequestAsync();

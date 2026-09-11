@@ -69,6 +69,36 @@ public class JeebFeedTests
     }
 
     [Fact]
+    public async Task Feed_Excludes_A_Stored_Pending_Request_Whose_Offer_Window_Has_Elapsed()
+    {
+        using var factory = Factory();
+        var jeeber = JeeberClient(factory, out var jeeberId);
+        await SetOnlineAsync(factory, jeeberId, online: true);
+
+        var stale = await SeedPendingRequestAsync(
+            factory,
+            clientId: "client-stale",
+            description: "must not be advertised",
+            tierId: "standard");
+
+        // The standard tier's effective offer window is 24 hours. Leave the owner row
+        // deliberately pending to reproduce a missed expiry-projection reconciliation.
+        factory.Services
+            .GetRequiredService<JeebGateway.TestControlPlane.FakeTimeProvider>()
+            .AdvanceBy(TimeSpan.FromHours(25));
+
+        var feed = await (await jeeber.GetAsync(FeedPath)).Content
+            .ReadFromJsonAsync<FeedResponse>();
+
+        feed!.Items.Should().NotContain(item => item.RequestId == stale.Id,
+            "an elapsed deadline must not be published as pending with zero seconds remaining");
+        (await factory.Services.GetRequiredService<IRequestsStore>()
+                .GetAsync(stale.Id, CancellationToken.None))!
+            .Status.Should().Be(RequestStatus.Pending,
+                "the read guard must be safe even before asynchronous reconciliation repairs state");
+    }
+
+    [Fact]
     public async Task Offline_Jeeber_Gets_Empty_Feed()
     {
         // Gate B negative (contract-freeze §8 C): an offline (never-online) jeeber → {items:[],total:0},

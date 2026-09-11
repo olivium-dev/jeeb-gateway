@@ -22,12 +22,9 @@ namespace JeebGateway.IntegrationTests;
 
 /// <summary>
 /// sprint-009 Lane E — 409 fidelity on submit. offer-service reuses HTTP 409 for
-/// distinct conflicts, but its current fallback controller emits the generic JSON
-/// error code <c>conflict</c> for both request-not-open and duplicate submit. The
-/// source-of-truth reality cases below pin today's gateway behavior: generic
-/// <c>offer-submit-conflict</c> 409, not the specific duplicate/request-not-open
-/// signals. The typed-code tests are forward-compatibility guards for a future
-/// offer-service contract fix.
+/// distinct conflicts and emits exact codes for request-not-open and duplicate
+/// submissions. Unknown codes remain generic and must never be inferred as either
+/// typed conflict (or as the retired offer-count cap).
 /// </summary>
 public class RequestNotOpen409FidelityTests
 {
@@ -35,18 +32,15 @@ public class RequestNotOpen409FidelityTests
     // Store-level unit tests (the mechanism)
     // -----------------------------------------------------------------
 
-    [Theory]
-    [InlineData("request_not_open")]
-    [InlineData("already_submitted")]
-    public async Task Submit_OfferServiceRealConflictCode_Throws_GenericConflict_NotSpecific(string upstreamScenario)
+    [Fact]
+    public async Task Submit_UnknownConflictCode_Throws_GenericConflict_NotSpecific()
     {
         var store = new UpstreamPendingOffersStore(new ConflictClient("conflict"));
 
         Func<Task> act = () => store.TrySubmitAsync(
             "req-1", "jeeber-1", 5m, 10, null, 20, DateTimeOffset.UtcNow, CancellationToken.None);
 
-        var ex = (await act.Should().ThrowAsync<OfferSubmitConflictException>(
-            $"offer-service currently emits code=conflict for {upstreamScenario}")).Which;
+        var ex = (await act.Should().ThrowAsync<OfferSubmitConflictException>()).Which;
         ex.UpstreamCode.Should().Be("conflict");
         await act.Should().NotThrowAsync<RequestNotOpenForOffersException>();
         await act.Should().NotThrowAsync<DuplicateOfferException>();
@@ -54,10 +48,8 @@ public class RequestNotOpen409FidelityTests
     }
 
     [Fact]
-    public async Task Submit_HypotheticalTypedRequestNotOpenCode_Throws_RequestNotOpen_NotCap()
+    public async Task Submit_ExactRequestNotOpenCode_Throws_RequestNotOpen_NotCap()
     {
-        // Forward-compat typed-code contract only. offer-service does not
-        // currently emit request_not_open on submit; see the real conflict case.
         var store = new UpstreamPendingOffersStore(new ConflictClient("request_not_open"));
 
         Func<Task> act = () => store.TrySubmitAsync(
@@ -70,11 +62,9 @@ public class RequestNotOpen409FidelityTests
     }
 
     [Fact]
-    public async Task Submit_HypotheticalTypedDuplicateCode_Still_Throws_Duplicate()
+    public async Task Submit_ExactAlreadySubmittedCode_Throws_Duplicate()
     {
-        // Forward-compat typed-code contract only. offer-service does not
-        // currently emit offer_already_exists on submit; see the real conflict case.
-        var store = new UpstreamPendingOffersStore(new ConflictClient("offer_already_exists"));
+        var store = new UpstreamPendingOffersStore(new ConflictClient("already_submitted"));
 
         Func<Task> act = () => store.TrySubmitAsync(
             "req-1", "jeeber-1", 5m, 10, null, 20, DateTimeOffset.UtcNow, CancellationToken.None);
@@ -98,10 +88,8 @@ public class RequestNotOpen409FidelityTests
     // Controller E2E — the rendered ProblemDetails
     // -----------------------------------------------------------------
 
-    [Theory]
-    [InlineData("request_not_open")]
-    [InlineData("already_submitted")]
-    public async Task Submit_WhenOfferServiceRealConflictCode_Renders_GenericConflict_ProblemDetails(string upstreamScenario)
+    [Fact]
+    public async Task Submit_WhenOfferServiceReturnsUnknownGenericConflict_Renders_GenericConflict_ProblemDetails()
     {
         var fake = new ConflictClient("conflict");
         using var factory = new WebApplicationFactory<Program>()
@@ -137,7 +125,7 @@ public class RequestNotOpen409FidelityTests
                     Lng = Fakes.InRangeGeoFixture.Lng,
                 },
                 ClientId = clientId,
-                Description = $"offer-service generic conflict for {upstreamScenario}",
+                Description = "unknown offer-service conflict",
             }, default);
             requestId = created.Id;
         }
@@ -152,18 +140,15 @@ public class RequestNotOpen409FidelityTests
 
         resp.StatusCode.Should().Be(HttpStatusCode.Conflict);
         var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
-        problem!.Type.Should().Be("https://jeeb.dev/errors/offer-submit-conflict",
-            $"offer-service currently emits only code=conflict for {upstreamScenario}");
+        problem!.Type.Should().Be("https://jeeb.dev/errors/offer-submit-conflict");
         problem.Type.Should().NotBe("https://jeeb.dev/errors/request-not-open-for-offers");
         problem.Type.Should().NotBe("https://jeeb.dev/errors/offer-already-exists");
         problem.Type.Should().NotBe("https://jeeb.dev/errors/offers-per-request-exceeded");
     }
 
     [Fact]
-    public async Task Submit_WhenHypotheticalTypedRequestNotOpenCode_Renders_RequestNotOpen_ProblemDetails_NotCap()
+    public async Task Submit_WhenExactRequestNotOpenCode_Renders_RequestNotOpen_ProblemDetails_NotCap()
     {
-        // Forward-compat typed-code contract only. offer-service does not
-        // currently emit request_not_open on submit; see the real conflict case.
         var fake = new ConflictClient("request_not_open");
         using var factory = new WebApplicationFactory<Program>()
             .WithWebHostBuilder(builder =>
@@ -184,9 +169,7 @@ public class RequestNotOpen409FidelityTests
             });
 
         // The LOCAL request row is pending (pre-acceptance), so the controller's local
-        // gate passes and the submit reaches the upstream store. This typed
-        // request_not_open code is hypothetical until offer-service changes its
-        // fallback JSON error code away from generic conflict.
+        // gate passes and the submit reaches the upstream store.
         var clientId = $"client-{Guid.NewGuid()}";
         string requestId;
         using (var scope = factory.Services.CreateScope())
@@ -219,6 +202,60 @@ public class RequestNotOpen409FidelityTests
         var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
         problem!.Type.Should().Be("https://jeeb.dev/errors/request-not-open-for-offers",
             "an upstream request_not_open must render its own reason, not the 20-offer cap");
+        problem.Type.Should().NotBe("https://jeeb.dev/errors/offers-per-request-exceeded");
+    }
+
+    [Fact]
+    public async Task Submit_WhenExactAlreadySubmittedCode_Renders_DuplicateOffer_ProblemDetails()
+    {
+        var fake = new ConflictClient("already_submitted");
+        using var factory = new WebApplicationFactory<Program>()
+            .WithWebHostBuilder(builder =>
+            {
+                builder.ConfigureAppConfiguration((_, cfg) =>
+                    cfg.AddInMemoryCollection(new Dictionary<string, string?>
+                    {
+                        { "FeatureFlags:UseUpstream:Offer", "true" }
+                    }));
+                builder.ConfigureTestServices(services =>
+                {
+                    services.RemoveAll<IOfferServiceClient>();
+                    services.AddSingleton<IOfferServiceClient>(fake);
+                    Fakes.InRangeGeoFixture.UseInRangePresence(services);
+                    UseRealUpstreamOfferStore(services);
+                });
+            });
+
+        string requestId;
+        using (var scope = factory.Services.CreateScope())
+        {
+            var store = scope.ServiceProvider.GetRequiredService<IRequestsStore>();
+            var created = await store.CreateAsync(new CreateRequestInput
+            {
+                TierId = Fakes.InRangeGeoFixture.TierId,
+                PickupLocation = new GeoPoint
+                {
+                    Lat = Fakes.InRangeGeoFixture.Lat,
+                    Lng = Fakes.InRangeGeoFixture.Lng,
+                },
+                ClientId = $"client-{Guid.NewGuid()}",
+                Description = "duplicate offer upstream",
+            }, default);
+            requestId = created.Id;
+        }
+
+        var jeeber = factory.CreateClient();
+        jeeber.DefaultRequestHeaders.Add("X-User-Id", $"jeeber-{Guid.NewGuid()}");
+        jeeber.DefaultRequestHeaders.Add("X-User-Roles", "driver");
+
+        var resp = await jeeber.PostAsJsonAsync(
+            $"/requests/{requestId}/offers",
+            new { fee = 9m, etaMinutes = 20 });
+
+        resp.StatusCode.Should().Be(HttpStatusCode.Conflict);
+        var problem = await resp.Content.ReadFromJsonAsync<ProblemDetails>();
+        problem!.Type.Should().Be("https://jeeb.dev/errors/offer-already-exists");
+        problem.Type.Should().NotBe("https://jeeb.dev/errors/offer-submit-conflict");
         problem.Type.Should().NotBe("https://jeeb.dev/errors/offers-per-request-exceeded");
     }
 

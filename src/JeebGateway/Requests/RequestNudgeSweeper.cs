@@ -73,18 +73,22 @@ public class RequestNudgeSweeper : BackgroundService
         var now = _clock.GetUtcNow();
         var tierTtls = await _windows.LoadTierTtlsAsync(tiers, ct);
         var scanCutoff = now - _options.Value.NoOfferNudgeWindow;
+        // The store's durable candidate index is on CreatedAt. That is a safe superset:
+        // ActivatedAt is never earlier than CreatedAt, so a row whose effective offer-window
+        // start is due also satisfies this coarse cutoff. The exact cutoff is applied below.
         var candidates = await store.ListPendingCreatedAtOrBeforeAsync(scanCutoff, ct);
 
         foreach (var req in candidates)
         {
             if (req.Status != RequestStatus.Pending) continue;
-            if (req.CreatedAt > now - _options.Value.NoOfferNudgeWindow) continue;
+            var offerWindowStartedAt = RequestExpiryMath.OfferWindowStartedAt(req);
+            if (offerWindowStartedAt > scanCutoff) continue;
 
             // Do not nudge a request that is already past its terminal tier TTL —
             // it is about to get (or already got) the harsher "expired" push and
             // a simultaneous "try expanding tier" would be confusing. This
             // preserves the exact precedence the old combined sweeper had.
-            if (req.CreatedAt <= now - _windows.ResolveExpiryWindow(req, tierTtls)) continue;
+            if (offerWindowStartedAt <= now - _windows.ResolveExpiryWindow(req, tierTtls)) continue;
 
             // FR-6.6 defines this nudge for a request with ZERO offers. Once a jeeber has
             // bid, "Still looking — try a faster tier" is simply wrong on the client's screen.

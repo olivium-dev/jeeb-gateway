@@ -14,6 +14,15 @@ namespace JeebGateway.Requests;
 public static class RequestExpiryMath
 {
     /// <summary>
+    /// Instant the offer window actually opened. Immediate requests open at creation;
+    /// scheduled requests open only when the activator moves them to pending. Using creation
+    /// for both makes every scheduled request older than its tier TTL expire the instant it
+    /// becomes visible to Jeeber users.
+    /// </summary>
+    public static DateTimeOffset OfferWindowStartedAt(DeliveryRequest r)
+        => r.ActivatedAt ?? r.CreatedAt;
+
+    /// <summary>
     /// Absolute UTC instant the offer-wait window closes for <paramref name="r"/>,
     /// or <c>null</c> unless the row is in the offer-wait window
     /// (<see cref="RequestStatus.PreAcceptanceStates"/> = {pending, matched}).
@@ -23,7 +32,7 @@ public static class RequestExpiryMath
         IReadOnlyDictionary<string, TimeSpan> ttls,
         TierExpiryWindowResolver windows)
         => RequestStatus.IsPreAcceptance(r.Status)
-            ? r.CreatedAt + windows.ResolveExpiryWindow(r, ttls)
+            ? OfferWindowStartedAt(r) + windows.ResolveExpiryWindow(r, ttls)
             : null;
 
     /// <summary>
