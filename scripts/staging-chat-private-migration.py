@@ -5,6 +5,8 @@ Every Engine submission has an exclusive durable claim before the POST. No retry
 reset, historical journal completion, secret reading, or container exec is offered.
 """
 import copy
+import contextlib
+import fcntl
 import hashlib
 import http.client
 import json
@@ -447,10 +449,182 @@ def manifest():
     return value
 
 
+@contextlib.contextmanager
+def diagnostic_lock(home, custody):
+    """Shared observation of the existing canonical lock; never create anything."""
+    home = Path(home)
+    require(home.is_absolute() and home.resolve() == home)
+    custody.directory(home / ".jeeb-deploy")
+    root = custody.directory(home / ".jeeb-deploy/locks")
+    with custody.open_directory(root) as directory:
+        fd = os.open("jeeb-staging-gateway.lock", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        try:
+            info = os.fstat(fd)
+            require(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
+                    and stat.S_IMODE(info.st_mode) == 0o600)
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            def unchanged():
+                current = os.stat("jeeb-staging-gateway.lock", dir_fd=directory, follow_symlinks=False)
+                require((current.st_dev, current.st_ino, current.st_mode, current.st_uid, current.st_nlink)
+                        == (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_nlink))
+                try:
+                    os.stat("jeeb-staging-gateway.owner", dir_fd=directory, follow_symlinks=False)
+                except FileNotFoundError:
+                    return
+                require(False)
+            unchanged()
+            yield
+            unchanged()
+        finally:
+            os.close(fd)
+
+
+def diagnostic_failure(stage, error):
+    result = {"stage": stage, "passed": False, "code": "guard_failed"}
+    if isinstance(error, PermissionError): result["code"] = "permission_denied"
+    elif isinstance(error, FileNotFoundError): result["code"] = "missing_evidence"
+    elif isinstance(error, BlockingIOError): result["code"] = "lock_busy"
+    allowed = {"staging-chat-private-migration.py", "staging-delivery-current-baseline.py",
+               "staging-paired-readonly-audit.py", "staging-paired-custody.py"}
+    trace = error.__traceback__
+    while trace:
+        filename = Path(trace.tb_frame.f_code.co_filename).name
+        function = trace.tb_frame.f_code.co_name
+        if filename in allowed and function != "require" and re.fullmatch(r"[a-z_]+", function):
+            result.update(helper=filename, function=function, line=trace.tb_lineno)
+        trace = trace.tb_next
+    return result
+
+
+def diagnostic_journal(home, custody, approved_seal):
+    """Fixed, private phase-chain projection, never its bodies or arbitrary names."""
+    report = {"state": "absent", "phases": [], "gatewayClaimPresent": False, "chatClaimPresent": False}
+    path = Path(home) / ".jeeb-deploy/paired-releases" / JOURNAL_NAME
+    try:
+        custody.directory(path)
+    except FileNotFoundError:
+        return report, None
+    except Exception as error:
+        report.update(state="invalid", gatewayClaimPresent=None, chatClaimPresent=None,
+                      failure=diagnostic_failure("journal", error))
+        return report, None
+    report.update(state="invalid", gatewayClaimPresent=None, chatClaimPresent=None)
+    try:
+        with custody.open_directory(path) as directory:
+            with os.scandir(directory) as entries:
+                names = set()
+                for _ in range(7):
+                    entry = next(entries, None)
+                    if entry is None: break
+                    names.add(entry.name)
+        expected = [f"{index:02d}-{phase}.json" for index, phase in enumerate(PHASES)]
+        require(len(names) <= 6)
+        report["gatewayClaimPresent"] = expected[1] in names
+        report["chatClaimPresent"] = expected[3] in names
+        require(0 < len(names) <= len(expected) and names == set(expected[:len(names)]))
+        previous, fingerprints = None, []
+        for index, name in enumerate(expected[:len(names)]):
+            value = custody.read_private(path / name, 0o400)
+            require(value["phase"] == PHASES[index] and isinstance(value["metadata"], dict))
+            metadata = value["metadata"]
+            require(type(metadata.get("schemaVersion")) is int and metadata["schemaVersion"] == 1
+                    and metadata.get("identityActivationAuthorized") is False
+                    and metadata.get("currentBaselineSeal") == approved_seal)
+            identifier(metadata.get("sourceCommit"), r"[0-9a-f]{40}")
+            for key in ("runId", "attempt"): identifier(metadata.get(key), r"[1-9][0-9]*")
+            require(set(value) == ({"phase", "metadata"} if index == 0 else {"phase", "metadata", "previousSha256", "evidence"}))
+            if previous is not None:
+                require(value["metadata"] == previous["metadata"] and value["previousSha256"] == digest(previous))
+                require(isinstance(value["evidence"], dict))
+            fingerprints.append(digest(value))
+            previous = value
+        report.update(state="complete" if len(names) == len(expected) else "prefix", phases=list(PHASES[:len(names)]))
+        return report, fingerprints
+    except Exception as error:
+        report["failure"] = diagnostic_failure("journal", error)
+        return report, None
+
+
+def diagnose(baseline, home, approved_seal):
+    """GET-only diagnosis. Evidence does not grant mutation or retry authority."""
+    report = {"readOnly": True, "mutationAuthorized": False, "retryAuthorized": False,
+              "identityActivationAuthorized": False, "snapshotStable": False, "checks": [], "runtimeFormats": {}}
+    stage = "existing-lock"
+    try:
+        with diagnostic_lock(home, baseline.c):
+            stage = "host-and-baseline-snapshot"
+            before = baseline.a.collect(home)  # Existing host guard runs before any journal read.
+            stage = "journal"
+            journal, journal_fingerprint = diagnostic_journal(home, baseline.c, approved_seal)
+            report["journal"] = journal
+            stage = "baseline-match"
+            baseline_witness = None
+            try:
+                sealed, evidence = baseline.load_seal(home)
+                require(baseline.digest(sealed) == approved_seal)
+                baseline.verified(before, initial=False)
+                require(baseline.origin(home, before["metadata"]) == evidence["originals"])
+                saved = evidence["snapshot"]
+                require(before["metadata"] == saved["metadata"] and before["secret"] == saved["secret"])
+                require(before["info"]["ID"] == saved["info"]["ID"] and
+                        before["info"]["Swarm"]["NodeID"] == saved["info"]["Swarm"]["NodeID"])
+                require(before["services"] == saved["services"])
+                baseline_witness = (sealed, evidence["originals"])
+                report["checks"].append({"stage": stage, "passed": True})
+            except Exception as error:
+                report["checks"].append(diagnostic_failure(stage, error))
+            services, observed = {}, {}
+            def observed_get(kind, value):
+                current = engine_get(kind, value)
+                normalized = stable_container(current) if kind == "container" else current
+                require(observed.setdefault((kind, value), normalized) == normalized)
+                return current
+            for role in SERVICES:
+                stage = role + "-runtime"
+                try:
+                    service = engine_get("service", SERVICES[role])
+                    services[role] = service
+                    spec = service["Spec"]
+                    declaration = spec["TaskTemplate"]["ContainerSpec"]
+                    formats = {"serviceUserAbsent": "User" not in declaration,
+                               "serviceUserExplicitEmpty": declaration.get("User") == ""}
+                    if role == "chat":
+                        targets = [item.get("File", {}).get("Name") for item in declaration.get("Secrets", [])]
+                        formats.update(signingTargetBasename="jeeb-firebase-adminsdk.json" in targets,
+                                       signingTargetAbsolute="/run/secrets/jeeb-firebase-adminsdk.json" in targets)
+                    report["runtimeFormats"][role] = formats
+                    private = (env_map(spec["TaskTemplate"]["ContainerSpec"].get("Env", [])).get("ChatServiceApi__BaseUrl") == PRIVATE_URL
+                               if role == "gateway" else not spec.get("EndpointSpec", {}).get("Ports"))
+                    result = verified_runtime(role, service, observed_get, manifest(), private)
+                    require(result["nodeId"] == before["info"]["Swarm"]["NodeID"])
+                    report["checks"].append({"stage": stage, "passed": True, "privateTopology": private})
+                except Exception as error:
+                    report["checks"].append(diagnostic_failure(stage, error))
+            stage = "stable-checkpoint"
+            after = baseline.a.collect(home)
+            journal_after, fingerprint_after = diagnostic_journal(home, baseline.c, approved_seal)
+            require(journal_after == journal and fingerprint_after == journal_fingerprint)
+            require(journal["state"] != "invalid")
+            require(baseline.stable_runtime(before) == baseline.stable_runtime(after))
+            if baseline_witness is not None:
+                require(baseline.load_seal(home)[0] == baseline_witness[0]
+                        and baseline.origin(home, after["metadata"]) == baseline_witness[1])
+            require(len(services) == len(SERVICES) and all(engine_get("service", SERVICES[role]) == service for role, service in services.items()))
+            for (kind, value), captured in observed.items():
+                current = engine_get(kind, value)
+                require((stable_container(current) if kind == "container" else current) == captured)
+            report["snapshotStable"] = True
+            report["checks"].append({"stage": stage, "passed": True})
+    except Exception as error:
+        report["snapshotStable"] = False
+        report["checks"].append(diagnostic_failure(stage, error))
+    return report
+
+
 def validate_operation(operation):
     # Inventory remains unproven; neither its successful run nor a migrated
     # topology is a substitute for the still-required positive ingress proof.
-    require(operation == "migrate-private")
+    require(operation in ("migrate-private", "diagnose-private"))
 
 
 def bundle():
@@ -463,7 +637,7 @@ def bundle():
         print(f"m=types.ModuleType({name!r});m.BASELINE_BUNDLED=True;sys.modules[{name!r}]=m")
         print(f"exec(compile({source!r},{filename!r},'exec'),m.__dict__)")
     print("BUNDLED_CHAT_BUILD=" + repr(manifest()))
-    print(Path(__file__).read_text())
+    print(f"exec(compile({Path(__file__).read_text()!r},'staging-chat-private-migration.py','exec'),globals())")
 
 
 def main():
@@ -484,6 +658,11 @@ def main():
         identifier(seal, r"[0-9a-f]{64}")
         require("migration_baseline" in sys.modules)
         baseline = sys.modules["migration_baseline"]
+        if operation == "diagnose-private":
+            report = diagnose(baseline, Path.home(), seal)
+            report.update(sourceCommit=source, runId=run, attempt=attempt)
+            print(json.dumps(report, sort_keys=True))
+            return 0
         owner, home = secrets.token_hex(32), Path.home()
         with baseline.c.held_lock(home, owner):
             runtime = Runtime(baseline, manifest(), owner, home, seal)

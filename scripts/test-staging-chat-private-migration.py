@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import copy
 import contextlib
+import fcntl
 import importlib.util
 import io
 import json
@@ -403,7 +404,9 @@ class MigrationTests(unittest.TestCase):
             source.replace('"/api/firebase/token"', '"/api/firebase/other"'),
             source.replace("/update?version={version}", "/remove?version={version}"),
             source.replace("{original['ID']}/update", "{original['Name']}/update"),
-            source.replace('require(operation == "migrate-private")', 'require(True)'),
+            source.replace('require(operation in ("migrate-private", "diagnose-private"))', 'require(True)'),
+            source.replace('def diagnose(baseline, home, approved_seal):',
+                           'def diagnose(baseline, home, approved_seal):\n    Journal(home, baseline.c)'),
             source.replace('journal.advance("chat-submission-pending")', 'pass'),
             source.replace('expected_seal=self.approved_seal', 'expected_seal=None'),
             source + '\nconnection.request("POST", "/v1.52/services/create")\n',
@@ -420,6 +423,154 @@ class MigrationTests(unittest.TestCase):
             self.assertIn(marker, workflow)
         for forbidden in ("packages: write", "scp ", "docker login", "docker exec", "secrets: inherit"):
             self.assertNotIn(forbidden, workflow)
+
+
+class DiagnosticTests(unittest.TestCase):
+    def make_home(self, temporary):
+        home = Path(temporary).resolve()
+        deploy = home / ".jeeb-deploy"
+        deploy.mkdir(mode=0o700)
+        (deploy / "paired-releases").mkdir(mode=0o700)
+        (deploy / "locks").mkdir(mode=0o700)
+        lock = deploy / "locks/jeeb-staging-gateway.lock"
+        lock.touch(mode=0o600)
+        return home, lock
+
+    def fixture(self):
+        gateway, gv = runtime_fixture("gateway", False)
+        chat, cv = runtime_fixture("chat", False)
+        container = gv.pop(("container", "c" * 64))
+        container["Id"] = "d" * 64
+        gv[("container", "d" * 64)] = container
+        gv[("tasks", gateway["ID"])][0]["Status"]["ContainerStatus"]["ContainerID"] = "d" * 64
+        values = {**gv, **cv}
+        baseline = Mock(c=c)
+        snapshot = {"metadata": {"redactionCanary": SECRET}, "secret": {"ID": "s" * 25},
+                    "info": {"ID": "daemon", "Swarm": {"NodeID": NODE}},
+                    "services": {"gateway": gateway, "delivery": {"ID": "v" * 25}}}
+        baseline.a.collect.return_value = snapshot
+        baseline.load_seal.return_value = ({"canary": SECRET}, {"snapshot": copy.deepcopy(snapshot), "originals": {}})
+        baseline.digest.return_value = "b" * 64
+        baseline.origin.return_value = {}
+        baseline.stable_runtime.side_effect = lambda value: copy.deepcopy(value)
+        return baseline, values
+
+    def test_existing_lock_is_shared_readonly_and_never_creates_or_overwrites(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home, lock = self.make_home(temporary)
+            before = lock.stat()
+            with m.diagnostic_lock(home, c):
+                with open(lock, "rb") as stream:
+                    fcntl.flock(stream, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.assertFalse(lock.with_suffix(".owner").exists())
+            self.assertEqual((before.st_ino, before.st_mtime_ns, before.st_size),
+                             (lock.stat().st_ino, lock.stat().st_mtime_ns, lock.stat().st_size))
+            with open(lock, "rb") as stream:
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                with self.assertRaises(BlockingIOError):
+                    with m.diagnostic_lock(home, c): pass
+            lock.with_suffix(".owner").touch(mode=0o600)
+            with self.assertRaises(ValueError):
+                with m.diagnostic_lock(home, c): pass
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary).resolve()
+            with self.assertRaises(FileNotFoundError):
+                with m.diagnostic_lock(home, c): pass
+            self.assertEqual([], list(home.iterdir()))
+
+    def test_fixed_journal_missing_prefix_invalid_and_complete_are_readonly(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home, _ = self.make_home(temporary)
+            self.assertEqual("absent", m.diagnostic_journal(home, c, "b" * 64)[0]["state"])
+            journal = m.Journal(home, c)
+            journal.begin({"redactionCanary": SECRET, "schemaVersion": 1, "identityActivationAuthorized": False,
+                           "currentBaselineSeal": "b" * 64, "sourceCommit": "a" * 40, "runId": "1", "attempt": "1"})
+            journal.advance("gateway-submission-pending")
+            before = {p.name: p.read_bytes() for p in journal.path.iterdir()}
+            report, _ = m.diagnostic_journal(home, c, "b" * 64)
+            self.assertEqual("prefix", report["state"])
+            self.assertTrue(report["gatewayClaimPresent"])
+            self.assertNotIn(SECRET, json.dumps(report))
+            self.assertEqual(before, {p.name: p.read_bytes() for p in journal.path.iterdir()})
+            for phase in m.PHASES[2:]: journal.advance(phase)
+            self.assertEqual("complete", m.diagnostic_journal(home, c, "b" * 64)[0]["state"])
+            self.assertEqual("invalid", m.diagnostic_journal(home, c, "f" * 64)[0]["state"])
+            with patch.object(c, "read_private", side_effect=ValueError(SECRET)):
+                report, _ = m.diagnostic_journal(home, c, "b" * 64)
+            self.assertEqual("invalid", report["state"])
+            self.assertNotIn(SECRET, json.dumps(report))
+            with patch.object(c, "directory", side_effect=PermissionError(SECRET)):
+                report, _ = m.diagnostic_journal(home, c, "b" * 64)
+            self.assertIsNone(report["gatewayClaimPresent"])
+            (journal.path / SECRET).touch()
+            report, _ = m.diagnostic_journal(home, c, "b" * 64)
+            self.assertEqual("invalid", report["state"])
+            self.assertIsNone(report["chatClaimPresent"])
+            self.assertNotIn(SECRET, json.dumps(report))
+
+    def test_diagnostic_valid_baseline_without_mutation_or_probe_reachability(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home, _ = self.make_home(temporary)
+            baseline, values = self.fixture()
+            with (patch.object(m, "engine_get", side_effect=lambda kind, value: copy.deepcopy(values[(kind, value)])),
+                  patch.object(m, "Journal", side_effect=AssertionError("mutation")),
+                  patch.object(m, "Runtime", side_effect=AssertionError("mutation")),
+                  patch.object(m, "migrate", side_effect=AssertionError("mutation")),
+                  patch.object(m, "http_probe", side_effect=AssertionError("probe")),
+                  patch.object(c, "held_lock", side_effect=AssertionError("mutation")),
+                  patch.object(c, "write_exclusive", side_effect=AssertionError("mutation"))):
+                report = m.diagnose(baseline, home, "b" * 64)
+            self.assertTrue(report["readOnly"] and report["snapshotStable"])
+            self.assertFalse(report["mutationAuthorized"] or report["retryAuthorized"])
+            self.assertTrue(all(check["passed"] for check in report["checks"]), report)
+            self.assertNotIn(SECRET, json.dumps(report))
+            baseline.verify_retention.assert_not_called()
+
+    def test_guard_details_are_reviewed_source_only_and_checkpoint_detects_drift(self):
+        for failure in ("empty-user", "absolute-secret", "both-formats", "host", "checkpoint"):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+                home, _ = self.make_home(temporary)
+                baseline, values = self.fixture()
+                chat = values[("service", m.SERVICES["chat"])]
+                declaration = chat["Spec"]["TaskTemplate"]["ContainerSpec"]
+                if failure in ("empty-user", "both-formats"): declaration["User"] = ""
+                if failure in ("absolute-secret", "both-formats"): declaration["Secrets"][0]["File"]["Name"] = "/run/secrets/jeeb-firebase-adminsdk.json"
+                values[("tasks", chat["ID"])][0]["Spec"]["ContainerSpec"] = copy.deepcopy(declaration)
+                if failure == "host": baseline.a.collect.side_effect = ValueError(SECRET)
+                if failure == "checkpoint": baseline.stable_runtime.side_effect = ["before", "after"]
+                with patch.object(m, "engine_get", side_effect=lambda kind, value: copy.deepcopy(values[(kind, value)])):
+                    report = m.diagnose(baseline, home, "b" * 64)
+                failed = [check for check in report["checks"] if not check["passed"]]
+                self.assertTrue(failed)
+                self.assertNotIn(SECRET, json.dumps(report))
+                self.assertFalse(report["mutationAuthorized"] or report["retryAuthorized"])
+                if failure in ("empty-user", "absolute-secret", "both-formats"):
+                    self.assertEqual("verified_runtime", failed[0]["function"])
+                    self.assertEqual("staging-chat-private-migration.py", failed[0]["helper"])
+                    self.assertIsInstance(failed[0]["line"], int)
+                    formats = report["runtimeFormats"]["chat"]
+                    self.assertEqual(failure in ("empty-user", "both-formats"), formats["serviceUserExplicitEmpty"])
+                    self.assertEqual(failure in ("absolute-secret", "both-formats"), formats["signingTargetAbsolute"])
+                if failure == "host":
+                    baseline.load_seal.assert_not_called()
+                    self.assertNotIn("journal", report)
+                if failure == "checkpoint": self.assertFalse(report["snapshotStable"])
+
+    def test_main_diagnostic_reports_validated_run_without_constructing_mutation_authority(self):
+        baseline = Mock()
+        result = {"readOnly": True, "mutationAuthorized": False, "retryAuthorized": False}
+        output = io.StringIO()
+        with (patch.object(m.sys, "argv", ["helper", "diagnose-private", "a" * 40, "123", "2", "b" * 64]),
+              patch.dict(m.sys.modules, {"migration_baseline": baseline}), patch.object(m, "diagnose", return_value=result),
+              patch.object(m, "Runtime", side_effect=AssertionError("mutation")),
+              patch.object(m, "Journal", side_effect=AssertionError("mutation")),
+              patch.object(m, "migrate", side_effect=AssertionError("mutation")), contextlib.redirect_stdout(output)):
+            self.assertEqual(0, m.main())
+        report = json.loads(output.getvalue())
+        self.assertEqual(("a" * 40, "123", "2"), (report["sourceCommit"], report["runId"], report["attempt"]))
+        baseline.c.held_lock.assert_not_called()
 
 
 if __name__ == "__main__":
