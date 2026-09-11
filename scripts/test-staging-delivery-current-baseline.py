@@ -297,11 +297,13 @@ class ProvenanceTests(unittest.TestCase):
         raise AssertionError('Unexpected API path')
 
     def test_exact_attempt_and_immutable_artifact_match(self):
-        self.assertEqual(p.verify(self.value, self.fetch), 'a'*64)
+        # Artifact-only fixtures must not consult the real archived deployment.
+        self.assertEqual(p.verify(self.value, self.fetch, archive_reader=lambda: None), 'a'*64)
         self.assertEqual(self.calls[0], 'repos/'+p.REPOSITORY+'/actions/runs/3/attempts/1')
+        self.assertEqual(self.calls[-1], 'repos/'+p.REPOSITORY+'/actions/artifacts/7/zip')
 
     def test_absent_and_complete_paths_do_not_fetch_or_require_a_seal(self):
-        self.assertEqual(p.verify({'schema_version': 1, 'state': 'not-required'}, self.fetch), 'none')
+        self.assertEqual(p.verify({'schema_version': 1, 'state': 'not-required'}, self.fetch, archive_reader=lambda: None), 'none')
         self.assertEqual(self.calls, [])
 
     def test_failed_pending_wrong_workflow_source_attempt_and_actor_are_rejected(self):
@@ -312,7 +314,8 @@ class ProvenanceTests(unittest.TestCase):
                    'repository': {'full_name': 'other/repo'}, 'head_repository': {'full_name': 'other/repo'}}
         for field, value in changes.items():
             self.run = {**original, field: value}
-            with self.subTest(field=field), self.assertRaises(ValueError): p.verify(self.value, self.fetch)
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                p.verify(self.value, self.fetch, archive_reader=lambda: None)
 
     def test_wrong_hash_attempt_missing_duplicate_or_unsafe_artifact_fails(self):
         for field in ('hash', 'attempt', 'missing', 'duplicate', 'filename', 'extra', 'oversize'):
@@ -324,7 +327,9 @@ class ProvenanceTests(unittest.TestCase):
             elif field == 'filename': self.names = ['../'+p.FILENAME]
             elif field == 'extra': self.names.append('private.json')
             else: self.recorded['private'] = f.SENTINEL*10000
-            with self.subTest(field=field), self.assertRaises(ValueError): p.verify(self.value, self.fetch)
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                p.verify(self.value, self.fetch, archive_reader=lambda: None)
+            self.assertIn('repos/'+p.REPOSITORY+'/actions/runs/3/artifacts?per_page=100', self.calls)
 
     def test_duplicate_keys_unknown_private_fields_and_redacted_failures(self):
         with self.assertRaises(ValueError): json.loads('{"a":1,"a":2}', object_pairs_hook=p.unique_object)
@@ -343,7 +348,7 @@ class ProvenanceTests(unittest.TestCase):
                         {'size_in_bytes': 32769}, {'id': False}):
             self.artifact_changes = changes
             with self.subTest(changes=changes), self.assertRaises(ValueError):
-                p.verify(self.value, self.fetch)
+                p.verify(self.value, self.fetch, archive_reader=lambda: None)
 
     def archive_repo(self, raw=None):
         temporary = tempfile.TemporaryDirectory(prefix='baseline-public-archive-')
