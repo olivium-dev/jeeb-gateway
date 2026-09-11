@@ -66,3 +66,18 @@ guards, one-use journal, and activation prohibition remain unchanged.
 The diagnostic can exit `0` while individual `checks` fail or `snapshotStable`
 is `false`; inspect those fields and the journal state. Every report includes its
 exact reviewed `sourceCommit`, run, and attempt so guard line numbers are traceable.
+
+Migration failures also retain exit `1` and the existing stop warning, with a
+sanitized failure location and validated source/run/attempt identifiers. This
+report never includes exception text or authorizes a retry; a service update may
+already have taken effect even when its submission returned an error.
+
+For interrupted run `34605416479`, attempt `1`, source
+`a333ff9b96116aa4833bf0fdeec0a9720e041ce1`, the recorded gateway submission must
+not be replayed. Read-only recorded-candidate reconciliation compares the fixed
+prepared/submission prefix, approved baseline and build, recorded identities and
+candidate hashes, gateway current/previous Specs, and unchanged original chat.
+It proves only the current checkpoint, not the lost submission response or the
+original rollout's completion. Even a matching, stable checkpoint grants no
+continuation or identity-activation authority. A forward continuation requires
+separate source review and live evidence; it must never reset or delete claims.

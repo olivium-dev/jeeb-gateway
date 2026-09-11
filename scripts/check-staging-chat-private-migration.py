@@ -40,9 +40,10 @@ def check_source(source):
     # authority, including custody primitives that create directories/claims.
     forbidden = {'submit', 'advance', 'begin', 'migrate', 'Journal', 'Runtime',
                  'held_lock', 'custody_root', 'write_exclusive', 'mkdir', 'makedirs',
-                 'unlink', 'remove', 'rename', 'replace', 'write', 'system', 'execv',
+                 'unlink', 'remove', 'rename', 'replace', 'write', 'write_text', 'write_bytes', 'system', 'execv',
                  'request', 'http_probe', 'wait_chat_readiness'}
-    for name in ('diagnose', 'diagnostic_lock', 'diagnostic_journal', 'diagnostic_failure'):
+    for name in ('diagnose', 'diagnostic_lock', 'diagnostic_journal', 'diagnostic_failure',
+                 'recorded_candidate_reconciliation'):
         fragment = ast.parse(functions[name])
         for node in ast.walk(fragment):
             if not isinstance(node, ast.Call):
