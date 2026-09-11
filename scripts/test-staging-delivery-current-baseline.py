@@ -345,6 +345,60 @@ class ProvenanceTests(unittest.TestCase):
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 p.verify(self.value, self.fetch)
 
+    def archive_repo(self, raw=None):
+        temporary = tempfile.TemporaryDirectory(prefix='baseline-public-archive-')
+        self.addCleanup(temporary.cleanup)
+        repository = Path(temporary.name)
+        def git(*args):
+            return subprocess.run(['git', '-C', str(repository), '-c', 'user.name=Fixture',
+                '-c', 'user.email=fixture@example.invalid', *args], check=True, capture_output=True)
+        git('init')
+        git('commit', '--allow-empty', '-m', 'fixture initial HEAD')
+        path = repository/p.ARCHIVE
+        path.parent.mkdir()
+        if raw is not None:
+            path.write_text(raw)
+            git('add', p.ARCHIVE)
+            git('commit', '-m', 'reviewed archive fixture')
+        return repository, path, git
+
+    def test_expired_artifact_accepts_matching_reviewed_archive_but_still_checks_attempt(self):
+        repository, _, _ = self.archive_repo(json.dumps(self.value))
+        self.artifact_changes = {'expired': True}
+        self.assertEqual(p.verify(self.value, self.fetch, lambda: p.reviewed_archive(repository)), 'a'*64)
+        self.assertEqual(len(self.calls), 1, 'archived seal requires exact attempt proof but no artifact download')
+        self.run['conclusion'] = 'failure'
+        with self.assertRaises(ValueError):
+            p.verify(self.value, self.fetch, lambda: p.reviewed_archive(repository))
+
+    def test_missing_or_untracked_archive_never_bypasses_expired_artifact(self):
+        repository, path, _ = self.archive_repo()
+        self.assertIsNone(p.reviewed_archive(repository))
+        self.artifact_changes = {'expired': True}
+        for untracked in (False, True):
+            if untracked: path.write_text(json.dumps(self.value))
+            self.assertIsNone(p.reviewed_archive(repository))
+            with self.assertRaises(ValueError):
+                p.verify(self.value, self.fetch, lambda: p.reviewed_archive(repository))
+
+    def test_working_tree_and_index_cannot_replace_reviewed_head_archive(self):
+        repository, path, git = self.archive_repo(json.dumps(self.value))
+        path.write_text('not valid JSON and not reviewed')
+        git('add', p.ARCHIVE)
+        self.assertEqual(p.reviewed_archive(repository), self.value)
+
+    def test_malformed_conflicting_or_non_regular_reviewed_archive_fails_closed(self):
+        wrong = {**self.value, 'seal_sha256': '0'*64}
+        for raw in ('malformed', json.dumps(wrong), json.dumps({'schema_version': 1, 'state': 'not-required'})):
+            repository, _, _ = self.archive_repo(raw)
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                p.verify(self.value, self.fetch, lambda: p.reviewed_archive(repository))
+        repository, path, git = self.archive_repo()
+        path.symlink_to('/nonexistent-private-target')
+        git('add', p.ARCHIVE)
+        git('commit', '-m', 'invalid symlink fixture')
+        with self.assertRaises(ValueError): p.reviewed_archive(repository)
+
 
 def sys_executable():
     import sys

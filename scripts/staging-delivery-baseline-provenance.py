@@ -7,6 +7,7 @@ stdout is one approved seal hash (or `none` when no alternative is needed).
 import hashlib
 import io
 import json
+from pathlib import Path
 import re
 import subprocess
 import sys
@@ -15,6 +16,8 @@ import zipfile
 REPOSITORY = 'olivium-dev/jeeb-gateway'
 WORKFLOW = '.github/workflows/jeeb-staging-delivery-current-baseline.yml'
 FILENAME = 'delivery-current-baseline-public-seal.json'
+ARCHIVE = 'deploy/staging-delivery-current-baseline-public-seal.json'
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def require(value):
@@ -62,12 +65,38 @@ def validate(value, run):
     return value['seal_sha256']
 
 
-def verify(value, fetch):
+def reviewed_archive(repository=ROOT):
+    """Read only a fixed blob from captured reviewed HEAD, never working-tree data.
+
+    The caller's protected-source guard owns checkout provenance. Pin the object
+    ID once so even a moving local HEAD cannot mix tree metadata and blob content.
+    """
+    def git(*args):
+        data = subprocess.run(['git', '-C', str(repository), *args], capture_output=True,
+                              check=True, timeout=10).stdout
+        require(len(data) <= 16384)
+        return data
+    head = git('rev-parse', '--verify', 'HEAD').decode().strip()
+    require(re.fullmatch(r'[0-9a-f]{40}', head))
+    entry = git('ls-tree', '-z', head, '--', ARCHIVE)
+    if not entry:
+        return None
+    require(re.fullmatch(rb'100644 blob [0-9a-f]{40}\t'+re.escape(ARCHIVE.encode())+b'\x00', entry))
+    value = json.loads(git('show', head+':'+ARCHIVE), object_pairs_hook=unique_object)
+    require(projection(value) is not None)
+    return value
+
+
+def verify(value, fetch, archive_reader=None):
     p = projection(value)
     if p is None:
         return 'none'
     prefix = 'repos/'+REPOSITORY+'/actions/'
     approved = validate(value, fetch(prefix+'runs/'+p['run']+'/attempts/'+p['attempt']))
+    archived = (archive_reader or reviewed_archive)()
+    if archived is not None:
+        require(projection(archived) is not None and archived == value)
+        return approved
     artifacts = fetch(prefix+'runs/'+p['run']+'/artifacts?per_page=100')
     require(type(artifacts['total_count']) is int and artifacts['total_count'] <= 100
             and artifacts['total_count'] == len(artifacts['artifacts']))

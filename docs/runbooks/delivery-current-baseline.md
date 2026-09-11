@@ -49,10 +49,24 @@ source, workflow, event, repository, both designated-owner identities and succes
 completion. It then compares the host projection with the fixed single-file,
 digest-verified immutable public artifact from that attempt. Only its output hash
 is approved for the next step. Failed/in-progress runs, missing/expired artifacts,
-duplicate artifacts or any hash substitution fail closed. Artifact retention is
-90 days; expiry requires separately reviewed archival authority, not bypassing
-this check or repeating reconciliation. A later rerun's outcome cannot change the
-original attempt's identity, but rerunning reconciliation remains prohibited.
+duplicate artifacts or any hash substitution fail closed. A later rerun's outcome
+cannot change the original attempt's identity, but rerunning reconciliation remains
+prohibited.
+
+Artifact retention is 90 days. To retain deployment authority beyond that period,
+after a successful reconciliation and artifact verification, commit its exact
+nonsecret public JSON at
+`deploy/staging-delivery-current-baseline-public-seal.json` in a separately reviewed
+follow-up. No placeholder or predicted seal is valid. The provenance helper reads
+only that fixed regular blob from the captured Git HEAD of its reviewed source
+checkout, never an ambient, untracked, staged or edited working-tree file. The
+caller must apply its protected-source guard to that checkout as before. A matching
+reviewed archive replaces only the artifact download requirement; exact successful
+GitHub run/attempt/source/workflow/actor verification remains mandatory on every
+use. A malformed or conflicting committed archive fails closed even if an artifact
+would match. With no committed archive, the original exact artifact remains
+required. Commit this follow-up before expiry; never rerun reconciliation to renew
+the proof. Private evidence and credential material must never enter Git.
 
 While holding the existing shared lock, invoke the bundle with:
 
