@@ -9,8 +9,10 @@ namespace JeebGateway.IntegrationTests.Services;
 
 public sealed class DeliveryServiceCredentialHandlerTests
 {
-    [Fact]
-    public async Task Production_reads_mounted_file_and_sets_exact_header()
+    [Theory]
+    [InlineData("Production")]
+    [InlineData("Staging")]
+    public async Task Deployed_environment_reads_mounted_file_and_sets_exact_header(string environment)
     {
         var path = Path.GetTempFileName();
         try
@@ -20,7 +22,7 @@ public sealed class DeliveryServiceCredentialHandlerTests
             var terminal = new CaptureHandler();
             using var client = new HttpClient(new DeliveryServiceCredentialHandler(
                 Configuration(("DELIVERY_SERVICE_TOKEN_FILE", path)),
-                new TestEnvironment("Production"))
+                new TestEnvironment(environment))
             {
                 InnerHandler = terminal,
             });
@@ -37,12 +39,14 @@ public sealed class DeliveryServiceCredentialHandlerTests
         }
     }
 
-    [Fact]
-    public async Task Production_rejects_direct_value_without_mounted_file()
+    [Theory]
+    [InlineData("Production")]
+    [InlineData("Staging")]
+    public async Task Deployed_environment_rejects_direct_value_without_mounted_file(string environment)
     {
         var handler = new DeliveryServiceCredentialHandler(
             Configuration(("DELIVERY_SERVICE_TOKEN", new string('d', 48))),
-            new TestEnvironment("Production"))
+            new TestEnvironment(environment))
         {
             InnerHandler = new CaptureHandler(),
         };

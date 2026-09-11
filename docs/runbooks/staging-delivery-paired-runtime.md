@@ -28,6 +28,10 @@ caller compatibility review, secret provisioning or activation has occurred.
    stable single-replica services on the existing encrypted attachable overlay,
    with expected ports and `FailureAction=pause`. Delivery must already declare
    `SKIP_DB_INIT=true`, as required by the protected publisher's inspector.
+   Gateway accepts the publisher's exact `ASPNETCORE_ENVIRONMENT=Staging` and
+   the existing `Production` posture without changing that environment. Any
+   declared `DOTNET_ENVIRONMENT` must also be exactly `Staging` or `Production`;
+   Development, Testing, unknown values and environment-key aliases are rejected.
 6. If needed, provision only `jeeb-staging-delivery-service-auth-v1`, labeled
    `jeeb.environment=staging`, `jeeb.purpose=delivery-service-auth`, `jeeb.version=1`.
    An exclusive durable intent precedes one private cryptographic secret POST.
@@ -48,6 +52,10 @@ caller compatibility review, secret provisioning or activation has occurred.
    are verified. A CLI intercepted before app/worker startup, running as65532,
    proves the real mounted credential loader. It binds to the actual allowlisted
    configured base `http://192.168.2.20:10055`, not a substitute overlay route.
+   Its invocation accepts exact Staging/Production hosts; the proof itself keeps
+   the Production credential loader, requiring the mounted file and never an
+   inline development/test token. These environment checks do not admit already
+   authenticated incumbents or relax the activation journal and one-use claims.
 10. Immediately before delivery CAS, the same receipt-bound delivery ID/version
     must still be unchanged. The exact staged inspector runs again on the local
     image against its unchanged database URL. Decoding that URL supplies parser

@@ -20,7 +20,8 @@ def baseline(role):
     return {'Name': e.SERVICES[role], 'Mode': {'Replicated': {'Replicas': 1}},
             'UpdateConfig': {'FailureAction': 'pause', 'Order': 'stop-first'},
             'TaskTemplate': {'ContainerSpec': {'Image': 'ghcr.io/olivium-dev/' + e.REPOSITORIES[role] + '@sha256:' + 'b' * 64, 'Env':
-                ['Services__Delivery__BaseUrl=http://192.168.2.20:10055', 'UNRELATED=preserved'] if role == 'gateway'
+                ['Services__Delivery__BaseUrl=http://192.168.2.20:10055',
+                 'ASPNETCORE_ENVIRONMENT=Staging', 'UNRELATED=preserved'] if role == 'gateway'
                 else ['SKIP_DB_INIT=true', 'DATABASE_URL=opaque-fixture', 'DB_PASSWORD=opaque-fixture'],
                 'Secrets': [{'SecretID': 'other', 'SecretName': 'unrelated', 'File': {'Name': 'other'}}]},
                 'Placement': {'Constraints': ['node.role==manager']}},
@@ -28,6 +29,36 @@ def baseline(role):
 
 
 class EngineTests(unittest.TestCase):
+    def test_gateway_deployed_environment_is_preserved(self):
+        image = 'ghcr.io/olivium-dev/jeeb-gateway@sha256:' + 'a' * 64
+        for environment in ('Staging', 'Production', None):
+            with self.subTest(environment=environment):
+                before = baseline('gateway')
+                c = before['TaskTemplate']['ContainerSpec']
+                c['Env'] = [row for row in c['Env'] if not row.startswith('ASPNETCORE_ENVIRONMENT=')]
+                if environment is not None:
+                    c['Env'].append('ASPNETCORE_ENVIRONMENT=' + environment)
+                after = e.candidate('gateway', before, image, 's'*25, 'n'*25)
+                self.assertEqual(c['Env'] + ['DELIVERY_SERVICE_TOKEN_FILE=' + e.TOKEN_PATH],
+                                 after['TaskTemplate']['ContainerSpec']['Env'])
+
+    def test_gateway_development_testing_unknown_and_environment_aliases_rejected(self):
+        image = 'ghcr.io/olivium-dev/jeeb-gateway@sha256:' + 'a' * 64
+        for key in ('ASPNETCORE_ENVIRONMENT', 'DOTNET_ENVIRONMENT'):
+            for environment in ('Development', 'Testing', 'Preview', '', 'staging'):
+                with self.subTest(key=key, environment=environment):
+                    before = baseline('gateway')
+                    c = before['TaskTemplate']['ContainerSpec']
+                    c['Env'] = [row for row in c['Env'] if not row.startswith(key + '=')]
+                    c['Env'].append(key + '=' + environment)
+                    with self.assertRaises(ValueError):
+                        e.candidate('gateway', before, image, 's'*25, 'n'*25)
+        for key in ('aspnetcore_environment', 'dotnet_environment'):
+            before = baseline('gateway')
+            before['TaskTemplate']['ContainerSpec']['Env'].append(key + '=Development')
+            with self.assertRaises(ValueError):
+                e.candidate('gateway', before, image, 's'*25, 'n'*25)
+
     def test_image_auth_only_delta_and_all_unrelated_fields_preserved(self):
         for role in e.SERVICES:
             before = baseline(role)
@@ -43,6 +74,7 @@ class EngineTests(unittest.TestCase):
     def test_alias_duplicate_mount_wrong_base_and_active_state_rejected(self):
         image = 'ghcr.io/olivium-dev/jeeb-gateway@sha256:' + 'a' * 64
         mutations = [lambda c: c['Env'].append('delivery_service_token=forbidden'),
+            lambda c: c['Env'].append('DELIVERY_SERVICE_TOKEN_FILE=' + e.TOKEN_PATH),
             lambda c: c['Env'].append('Services__Delivery__ServiceTokenFile=/other'),
             lambda c: c['Env'].append(c['Env'][0]),
             lambda c: c.update(Mounts=[{'Target': '/run'}]),

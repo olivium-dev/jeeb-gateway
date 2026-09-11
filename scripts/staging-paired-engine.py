@@ -114,7 +114,14 @@ def candidate(role, baseline, image, secret_id, node_id):
     require(not any(m.get('Target') in ('/run', '/run/secrets', TOKEN_PATH) for m in container.get('Mounts', [])))
     if role == 'gateway':
         require(values.get('Services__Delivery__BaseUrl') == 'http://192.168.2.20:10055')
-        require(values.get('ASPNETCORE_ENVIRONMENT', 'Production') == 'Production')
+        # The protected staging publisher declares Staging. Both deployed
+        # environments enforce the same mounted-only delivery credential loader;
+        # Development/Testing must never enter this activation route. Preserve
+        # the incumbent environment, including the legacy Production default.
+        environment_keys = {'ASPNETCORE_ENVIRONMENT', 'DOTNET_ENVIRONMENT'}
+        require(not any(k.upper() in environment_keys and k not in environment_keys for k in values))
+        require(values.get('ASPNETCORE_ENVIRONMENT', 'Production') in ('Staging', 'Production'))
+        require(values.get('DOTNET_ENVIRONMENT', 'Production') in ('Staging', 'Production'))
         require(not any(k.lower().replace('__', ':') == 'services:delivery:baseurl' and k != 'Services__Delivery__BaseUrl' for k in values))
     else:
         require(values.get('SKIP_DB_INIT') == 'true')

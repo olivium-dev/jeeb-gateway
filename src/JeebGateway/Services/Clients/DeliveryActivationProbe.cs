@@ -13,7 +13,7 @@ internal static class DeliveryActivationProbe
     internal static void ValidateInvocation(string[] args, string? environment, string? tokenPath, string? baseUrl)
     {
         if (args.Length != 2 || args[0] != "--staging-delivery-auth-probe" ||
-            !IsSupportedProbeOperation(args[1]) || environment != "Production" ||
+            !IsSupportedProbeOperation(args[1]) || environment is not ("Staging" or "Production") ||
             tokenPath != MountedPath || baseUrl != BaseUrl)
             throw new InvalidOperationException();
     }
@@ -75,6 +75,8 @@ internal static class DeliveryActivationProbe
 
     private sealed class ProbeEnvironment : IHostEnvironment
     {
+        // The CLI accepts the normal Staging host but always executes the
+        // mounted-only loader contract, never the Development/Testing fallback.
         public string EnvironmentName { get; set; } = Environments.Production;
         public string ApplicationName { get; set; } = "JeebGateway";
         public string ContentRootPath { get; set; } = "/app";
