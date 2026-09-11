@@ -675,7 +675,7 @@ def main():
         return 0
     except Exception as error:
         print("Private chat operation stopped. Any submission claim is consumed; reconcile before further action. Identity activation remains unauthorized.", file=sys.stderr)
-        report = {"status": "stopped", "mutationAuthorized": False, "retryAuthorized": False,
+        report = {"status": "stopped", "mutationAuthorized": False, "retryAuthorized": False, "continuationAuthorized": False,
                   "identityActivationAuthorized": False, "failure": diagnostic_failure("operation", error),
                   **validated_source}
         print(json.dumps(report, sort_keys=True))

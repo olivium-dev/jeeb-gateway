@@ -657,7 +657,7 @@ class MainFailureTests(unittest.TestCase):
         self.assertNotIn(SECRET, output.getvalue() + error.getvalue())
         report = json.loads(output.getvalue())
         self.assertEqual("stopped", report["status"])
-        for field in ("mutationAuthorized", "retryAuthorized", "identityActivationAuthorized"):
+        for field in ("mutationAuthorized", "retryAuthorized", "continuationAuthorized", "identityActivationAuthorized"):
             self.assertIs(report[field], False)
         if source:
             self.assertEqual(("a" * 40, "123", "2"), (report["sourceCommit"], report["runId"], report["attempt"]))
