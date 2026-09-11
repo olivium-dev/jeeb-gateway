@@ -1,0 +1,13 @@
+{
+  "schemaVersion": 1,
+  "repository": "olivium-dev/chat-service",
+  "workflowPath": ".github/workflows/jeeb-chat-image-only.yml",
+  "sourceCommit": "ce68f35eaa4b520d14d57af6545fdfe66c9620b8",
+  "sourceTree": "34eae41df28fd56a3b2a32f9818dbdf0f774d0e3",
+  "image": "ghcr.io/olivium-dev/chat-service@sha256:87d39ab929257939962947a74eb4a77ae7a7be9c9935b193e5ac107397dc9521",
+  "runId": "34593792741",
+  "attempt": "1",
+  "artifactId": "10260183092",
+  "artifactDigest": "sha256:196464b10330a59c95b7d1464e06d12d909a7ffd9347e780e0c005ddd64323c4",
+  "receiptFileSha256": "6e7e2f43101beb16f183804078d6767decb76a1637a305020fb549c149c2e5af"
+}

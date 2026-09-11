@@ -83,7 +83,7 @@ def main():
     # It substitutes both SSH and Docker with temporary executables; do not hide
     # the literal through concatenation or exclude every test from this inventory.
     assert inventory == {'scripts/staging-paired-engine.py', 'scripts/test-staging-paired-ssh-argv.py',
-                         'scripts/staging-paired-readonly-audit.py'}
+                         'scripts/staging-paired-readonly-audit.py', 'scripts/staging-chat-private-migration.py'}
     source = (ROOT/'scripts/staging-paired-engine.py').read_text()
     check_engine(source)
     check_readonly_audit((ROOT/'scripts/staging-paired-readonly-audit.py').read_text())
