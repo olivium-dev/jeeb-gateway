@@ -60,6 +60,8 @@ def expected_environment:
     {
       "services__serviceotp__baseurl": "http://jeeb-staging-one-time-password:8080",
       "serviceotpapi__baseurl": "http://jeeb-staging-one-time-password:8080",
+      # Chat identity signing trusts the private fleet network, never a host-published port.
+      "chatserviceapi__baseurl": "http://jeeb-staging-chat-api:5176",
       "featureflags__useupstream__otp": "true",
       # Resolved per deploy, never pinned: a literal here rejected every activated
       # candidate and killed the deploy silently (run 33821087895).

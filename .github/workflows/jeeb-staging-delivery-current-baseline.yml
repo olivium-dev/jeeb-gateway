@@ -1,0 +1,72 @@
+name: Reconcile current delivery baseline (history remains unproven)
+"on":
+  workflow_dispatch:
+    inputs:
+      reviewed_sha:
+        description: Exact reviewed current protected gateway main
+        type: string
+        required: true
+      confirm_reconciliation:
+        description: Type reconcile-current-only-history-unproven
+        type: string
+        required: true
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: jeeb-staging-jeeb-gateway
+  cancel-in-progress: false
+jobs:
+  reconcile:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    environment: staging
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_REF_PROTECTED: ${{ github.ref_protected }}
+      GITHUB_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+    steps:
+      - name: Require exact designated owner before checkout
+        env:
+          CONFIRM_RECONCILIATION: ${{ inputs.confirm_reconciliation }}
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_ACTOR" = oudaykhaled ]
+          [ "$GITHUB_TRIGGERING_ACTOR" = oudaykhaled ]
+          [ "$CONFIRM_RECONCILIATION" = reconcile-current-only-history-unproven ]
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Require reviewed protected source and successful hosted authority audit
+        env:
+          REVIEWED_SHA: ${{ inputs.reviewed_sha }}
+        run: |
+          set -euo pipefail
+          [ "$REVIEWED_SHA" = "$GITHUB_SHA" ]
+          bash scripts/staging-paired-source-guard.sh
+          python3 scripts/test-staging-delivery-current-baseline.py
+      - name: Configure existing strict staging SSH
+        env:
+          SSH_HOST: ${{ secrets.JEEB_STAGING_SSH_HOST }}
+          SSH_USER: ${{ secrets.JEEB_STAGING_DEPLOY_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.JEEB_STAGING_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.JEEB_STAGING_SSH_KNOWN_HOSTS }}
+        run: bash scripts/setup-staging-paired-ssh.sh
+      - name: Verify current posture and preserve evidence without runtime mutation
+        run: |
+          set -euo pipefail
+          bash scripts/staging-paired-source-guard.sh
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ && "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          python3 scripts/staging-delivery-current-baseline.py bundle reconcile \
+            | ssh jeeb-staging python3 -I - reconcile "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
+            > delivery-current-baseline-public-seal.json
+          bash scripts/staging-paired-source-guard.sh
+      - name: Retain only the immutable nonsecret public seal
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: delivery-current-baseline-public-seal-${{ github.run_id }}-${{ github.run_attempt }}
+          path: delivery-current-baseline-public-seal.json
+          if-no-files-found: error
+          retention-days: 90
+      - name: Recheck protected source before successful completion
+        run: bash scripts/staging-paired-source-guard.sh

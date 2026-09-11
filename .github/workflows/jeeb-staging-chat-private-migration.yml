@@ -1,0 +1,74 @@
+name: One-use staging private chat migration (identity stays off)
+"on":
+  workflow_dispatch:
+    inputs:
+      reviewed_sha:
+        description: Exact reviewed current protected gateway main
+        type: string
+        required: true
+      operation:
+        description: Identity activation is blocked pending separate positive ingress proof
+        type: choice
+        options: [migrate-private, activate-identity]
+        required: true
+      current_baseline_seal:
+        description: Exact reviewed current-delivery reconciliation seal SHA256
+        type: string
+        required: true
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: jeeb-staging-jeeb-gateway
+  cancel-in-progress: false
+jobs:
+  migrate:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    environment: staging
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_REF_PROTECTED: ${{ github.ref_protected }}
+      GITHUB_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+      OPERATION: ${{ inputs.operation }}
+      BASELINE_SEAL: ${{ inputs.current_baseline_seal }}
+    steps:
+      - name: Require exact designated owner before checkout
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_ACTOR" = oudaykhaled ]
+          [ "$GITHUB_TRIGGERING_ACTOR" = oudaykhaled ]
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Require reviewed protected source and permitted operation
+        env:
+          REVIEWED_SHA: ${{ inputs.reviewed_sha }}
+        run: |
+          set -euo pipefail
+          [ "$REVIEWED_SHA" = "$GITHUB_SHA" ]
+          [[ "$BASELINE_SEAL" =~ ^[0-9a-f]{64}$ ]]
+          bash scripts/staging-paired-source-guard.sh
+          python3 scripts/staging-chat-private-migration.py validate-operation "$OPERATION"
+          python3 scripts/test-staging-chat-private-migration.py
+      - name: Configure existing strict staging SSH
+        env:
+          SSH_HOST: ${{ secrets.JEEB_STAGING_SSH_HOST }}
+          SSH_USER: ${{ secrets.JEEB_STAGING_DEPLOY_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.JEEB_STAGING_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.JEEB_STAGING_SSH_KNOWN_HOSTS }}
+        run: bash scripts/setup-staging-paired-ssh.sh
+      - name: Claim once and migrate under the canonical host lock
+        run: |
+          set -euo pipefail
+          bash scripts/staging-paired-source-guard.sh
+          public_seal=$(python3 scripts/staging-delivery-current-baseline.py bundle reconcile \
+            | ssh jeeb-staging python3 -I -B - public-seal)
+          approved_seal=$(printf '%s' "$public_seal" | python3 scripts/staging-delivery-baseline-provenance.py)
+          [[ "$approved_seal" =~ ^[0-9a-f]{64}$ ]]
+          [ "$approved_seal" = "$BASELINE_SEAL" ]
+          [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]*$ && "$GITHUB_RUN_ATTEMPT" =~ ^[1-9][0-9]*$ ]]
+          python3 scripts/staging-chat-private-migration.py bundle \
+            | ssh jeeb-staging python3 -I -B - "$OPERATION" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$approved_seal"
+          bash scripts/staging-paired-source-guard.sh

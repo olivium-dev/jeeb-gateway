@@ -49,6 +49,33 @@ def check_readonly_audit(source):
     assert len(requests) == 1 and ast.unparse(requests[0]) == "connection.request('GET', path)"
 
 
+def check_current_baseline(source):
+    """The new evidence writer has no runtime or historical-journal writer."""
+    tree = ast.parse(source)
+    assignments = {node.targets[0].id: node.value for node in tree.body if isinstance(node, ast.Assign)
+                   and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)}
+    assert ast.literal_eval(assignments['NAME']) == 'delivery-current-baseline-v1'
+    assert ast.literal_eval(assignments['MODULES']) == {
+        'baseline_audit': 'staging-paired-readonly-audit.py',
+        'baseline_custody': 'staging-paired-custody.py'}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call): continue
+        call = ast.unparse(node.func)
+        assert call not in {'open', 'exec', 'eval', 'compile', '__import__', 'c.Journal'}
+        if isinstance(node.func, ast.Attribute):
+            assert node.func.attr not in {'request', 'run', 'Popen', 'unlink', 'remove', 'rmdir',
+                                          'rename', 'replace', 'system', 'popen', 'execv', 'execve',
+                                          'write_text', 'write_bytes'}
+        if call == 'os.open':
+            assert 'O_RDONLY' in ast.unparse(node.args[1])
+        if call == 'os.mkdir':
+            assert ast.unparse(node.args[0]) == 'NAME'
+    for name in ('origin', 'load_seal', 'verify_retention'):
+        function = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == name)
+        assert not any(isinstance(node, ast.Call) and ast.unparse(node.func) in
+                       {'c.write_exclusive', 'os.mkdir'} for node in ast.walk(function))
+
+
 def main():
     inventory = {str(path.relative_to(ROOT)) for path in (ROOT/'scripts').glob('*.py')
                  if '/var/run/docker.sock' in path.read_text() and path.name != Path(__file__).name}
@@ -56,10 +83,11 @@ def main():
     # It substitutes both SSH and Docker with temporary executables; do not hide
     # the literal through concatenation or exclude every test from this inventory.
     assert inventory == {'scripts/staging-paired-engine.py', 'scripts/test-staging-paired-ssh-argv.py',
-                         'scripts/staging-paired-readonly-audit.py'}
+                         'scripts/staging-paired-readonly-audit.py', 'scripts/staging-chat-private-migration.py'}
     source = (ROOT/'scripts/staging-paired-engine.py').read_text()
     check_engine(source)
     check_readonly_audit((ROOT/'scripts/staging-paired-readonly-audit.py').read_text())
+    check_current_baseline((ROOT/'scripts/staging-delivery-current-baseline.py').read_text())
     for changed in (source.replace("'gateway': 'jeeb-staging-jeeb-gateway'", "'gateway': 'another-service'"),
                     source + "\nrequest('POST', '/unreviewed', {})\n"):
         try: check_engine(changed)

@@ -49,7 +49,8 @@ cat > "$candidate" <<JSON
         "Firebase__Chat__ServiceAccountKeyPath=/run/secrets/firebase_admin_json",
         "FeatureFlags__NotificationDurableWrite__Enabled=true",
         "FeatureFlags__NotificationOutboxMode=upstream-authority",
-        "FeatureFlags__PushDispatchMode=local"
+        "FeatureFlags__PushDispatchMode=local",
+        "ChatServiceApi__BaseUrl=http://jeeb-staging-chat-api:5176"
       ],
       "Secrets": [{
         "SecretID":"firebaseid",
@@ -111,6 +112,14 @@ accept_mutant() {
 
 validate "$candidate"
 validate "$candidate" devtool-reassert
+reject_mutant 'chat upstream returns to the host-published owner port' \
+  '.TaskTemplate.ContainerSpec.Env |= map(if startswith("ChatServiceApi__BaseUrl=") then "ChatServiceApi__BaseUrl=http://192.168.2.20:10028" else . end)'
+reject_mutant 'chat upstream points outside the private fleet' \
+  '.TaskTemplate.ContainerSpec.Env |= map(if startswith("ChatServiceApi__BaseUrl=") then "ChatServiceApi__BaseUrl=https://example.invalid" else . end)'
+reject_mutant 'chat upstream private binding is missing' \
+  '.TaskTemplate.ContainerSpec.Env |= map(select(startswith("ChatServiceApi__BaseUrl=") | not))'
+reject_mutant 'chat upstream has a conflicting alias' \
+  '.TaskTemplate.ContainerSpec.Env += ["ChatServiceApi:BaseUrl=http://192.168.2.20:10028"]'
 jq '
   .UpdateConfig = {
     Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"start-first"
