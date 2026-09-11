@@ -63,3 +63,6 @@ refuses an active or stale owner marker. Missing/invalid state is reported, not
 repaired. A successful diagnostic means a report was collected, not that preflight
 passed or that another migration attempt is authorized. The original migration
 guards, one-use journal, and activation prohibition remain unchanged.
+The diagnostic can exit `0` while individual `checks` fail or `snapshotStable`
+is `false`; inspect those fields and the journal state. Every report includes its
+exact reviewed `sourceCommit`, run, and attempt so guard line numbers are traceable.
