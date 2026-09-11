@@ -46,3 +46,23 @@ The private migration receipt does not authorize identity signing. Actual nginx 
 structure, Caddy routes, active tunnel configuration and remaining ingress gaps require
 separate positive proof and review before that operation can be implemented. A successful
 read-only inventory with `isolation=unproven` must never be reinterpreted as approval.
+
+## Failed-run read-only checkpoint
+
+After a failed or uncertain migration, select `diagnose-private` in this same
+protected workflow. Supply current reviewed main and the already approved public
+baseline seal. This operation does not rerun reconciliation or migration. It reads
+only the fixed migration journal and current prerequisites, reporting safe phase
+metadata and fixed failure stages. Guard source locations refer to the reviewed
+source; no raw exception, configuration, environment, private journal body, or
+credential value is emitted.
+
+The diagnostic must not create files, claim submissions, advance phases, or make
+Engine updates. It uses a shared lock on the existing canonical lock file and
+refuses an active or stale owner marker. Missing/invalid state is reported, not
+repaired. A successful diagnostic means a report was collected, not that preflight
+passed or that another migration attempt is authorized. The original migration
+guards, one-use journal, and activation prohibition remain unchanged.
+The diagnostic can exit `0` while individual `checks` fail or `snapshotStable`
+is `false`; inspect those fields and the journal state. Every report includes its
+exact reviewed `sourceCommit`, run, and attempt so guard line numbers are traceable.
