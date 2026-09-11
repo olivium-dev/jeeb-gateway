@@ -100,6 +100,16 @@ The runtime accepts only this exact observed release/package tuple, requires the
 local digest/image identity before each POST and pins scheduling to that node.
 This is the native successful no-pull path, not failed-pull/cache fallback.
 
+API1.52 also omits empty image `Config` fields, including `Entrypoint`. Delivery
+uses `CMD ["./main"]` without an entrypoint, so its missing image field and the
+container's null/empty entrypoint represent the same process contract. The
+verifier normalizes those empty arrays, then compares the exact entrypoint,
+command, working directory and effective container `Path`/`Args`. A command or
+entrypoint change still fails. This follows the same reviewed upstream
+[image-inspect compatibility table](https://github.com/moby/moby/blob/fbf3ed25f893e6ce21336f1101590e40a13934f4/daemon/server/router/image/inspect_response.go),
+which backfills empty fields only through API1.51. Verification changes do not
+authorize another service submission or alteration of existing activation history.
+
 ## Explicit outstanding readiness checks
 
 - Recheck the exact daemon/build, node and local cache identity at runtime;

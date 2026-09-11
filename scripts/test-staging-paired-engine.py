@@ -29,6 +29,80 @@ def baseline(role):
 
 
 class EngineTests(unittest.TestCase):
+    def verify_delivery_runtime(self, image_change=None, container_change=None, wait=False):
+        # API1.52 image response for the real delivery Dockerfile: CMD ./main,
+        # WORKDIR /root/, no ENTRYPOINT or USER. Container inspect retains null
+        # Entrypoint and empty User. Every other runtime predicate must still pass.
+        sid, tid, nid, secret, cid = 's'*25, 't'*25, 'n'*25, 'x'*25, 'c'*64
+        ref = 'ghcr.io/olivium-dev/delivery-service@sha256:' + 'a'*64
+        before = baseline('delivery')
+        proposed = e.candidate('delivery', before, ref, secret, nid)
+        cs = proposed['TaskTemplate']['ContainerSpec']
+        image = {'Id':'sha256:'+'b'*64, 'Config':{'Env':['PATH=/usr/bin'],
+                 'Cmd':['./main'], 'WorkingDir':'/root/'}}
+        current = {'ID':sid, 'Version':{'Index':2}, 'Spec':proposed,
+                   'UpdateStatus':{'State':'completed'}}
+        task = {'ServiceID':sid, 'Status':{'State':'running','ContainerStatus':{'ContainerID':cid}},
+                'DesiredState':'running', 'Spec':{'ContainerSpec':cs}, 'NodeID':nid}
+        container = {'Id':cid, 'Image':image['Id'], 'State':{'Running':True},
+            'Path':'./main', 'Args':[], 'Config':{'Labels':{'com.docker.swarm.service.id':sid,
+                'com.docker.swarm.task.id':tid}, 'Env':['PATH=/usr/bin']+cs['Env'],
+                'Entrypoint':None, 'Cmd':['./main'], 'WorkingDir':'/root/', 'User':''}}
+        if image_change: image_change(image)
+        if container_change: container_change(container)
+        runtime = object.__new__(e.Runtime)
+        runtime.state = {'delivery':{'image':ref}, 'nodeId':nid, 'secretId':secret}
+        calls = []
+        def docker(*args, **kwargs):
+            calls.append(args)
+            if args[:2] == ('service','ps'): return tid
+            if args[0] == 'inspect': return json.dumps([task])
+            if args[:2] == ('container','inspect'): return json.dumps([container])
+            if args[:2] == ('container','exec'):
+                if 'stat' in args: return '0:0:400'
+                self.assertEqual(('container','exec',cid,'wget','-q','-T','5','-O','/dev/null',
+                                  'http://127.0.0.1:8080/health'), args)
+                return ''
+            raise AssertionError(args)
+        with patch.object(runtime,'lock'), patch.object(runtime,'network'), \
+             patch.object(runtime,'baseline',return_value={'ID':sid,'Version':{'Index':1}}), \
+             patch.object(runtime,'captured',return_value=current), \
+             patch.object(runtime,'candidate',return_value=proposed), \
+             patch.object(runtime,'image',return_value=image), patch.object(e,'docker',side_effect=docker), \
+             patch.object(e.time,'sleep',side_effect=AssertionError('healthy delivery must not enter retry loop')):
+            if wait:
+                runtime.wait_ready('delivery')
+                self.assertTrue(any('wget' in call for call in calls))
+            else:
+                self.assertEqual(cid, runtime.verify('delivery'))
+
+    def test_api152_command_only_delivery_passes_full_runtime_readiness(self):
+        self.verify_delivery_runtime(wait=True)
+        for entrypoint in (None, []):
+            with self.subTest(entrypoint=entrypoint):
+                self.verify_delivery_runtime(
+                    image_change=lambda image: image['Config'].update(Entrypoint=entrypoint))
+
+    def test_command_only_delivery_rejects_changed_process_or_working_directory(self):
+        for key, value in (('Cmd',['/bin/sh']), ('Entrypoint',['/bin/sh']),
+                           ('Entrypoint',''), ('Cmd',False), ('WorkingDir','/tmp')):
+            with self.subTest(key=key, value=value), self.assertRaises(ValueError):
+                self.verify_delivery_runtime(container_change=lambda c: c['Config'].update({key:value}))
+        for key, value in (('Path','/bin/sh'), ('Args',['--unexpected'])):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                self.verify_delivery_runtime(container_change=lambda c: c.update({key:value}))
+
+    def test_gateway_explicit_entrypoint_keeps_exact_process_identity(self):
+        image = {'Entrypoint':['dotnet','JeebGateway.dll'], 'WorkingDir':'/app'}
+        container = {'Config':{**image,'Cmd':None}, 'Path':'dotnet', 'Args':['JeebGateway.dll']}
+        e.verify_container_process(image, container)
+        for mutate in (lambda c: c['Config'].update(Entrypoint=['dotnet','other.dll']),
+                       lambda c: c['Config'].update(Cmd=['--unexpected']),
+                       lambda c: c.update(Args=['other.dll'])):
+            changed = copy.deepcopy(container)
+            mutate(changed)
+            with self.assertRaises(ValueError): e.verify_container_process(image, changed)
+
     def test_gateway_deployed_environment_is_preserved(self):
         image = 'ghcr.io/olivium-dev/jeeb-gateway@sha256:' + 'a' * 64
         for environment in ('Staging', 'Production', None):
