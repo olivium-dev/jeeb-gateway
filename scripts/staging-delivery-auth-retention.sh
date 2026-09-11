@@ -92,6 +92,11 @@ try:
         info = os.fstat(directory)
         guard(stat.S_ISDIR(info.st_mode) and info.st_uid == os.getuid() and stat.S_IMODE(info.st_mode) == 0o700)
     phases = ('prepared', 'gateway-submission-pending', 'gateway-verified', 'delivery-submission-pending', 'delivery-verified', 'complete')
+    # A new CURRENT baseline may acknowledge this exact incomplete prefix only.
+    # The independently bundled verifier validates every original byte, consumed
+    # claim, sealed snapshot and current peer posture. Never invent old phases.
+    if set(os.listdir(directory)) == {f'{i:02d}-{phase}.json' for i, phase in enumerate(phases[:4])}:
+        sys.exit(42)
     guard(set(os.listdir(directory)) == {f'{i:02d}-{phase}.json' for i, phase in enumerate(phases)})
     baseline = None
     for i, phase in enumerate(phases):
@@ -125,7 +130,17 @@ PY
 }
 staging_delivery_auth_snapshot() {
   local role=$1 spec=$2 history projection peer_service peer_spec peer_projection
-  history=$(staging_delivery_auth_history_secret_id) || return 1
+  if history=$(staging_delivery_auth_history_secret_id); then
+    :
+  else
+    [ "$?" -eq 42 ] || return 1
+    declare -F staging_delivery_current_baseline_secret_id >/dev/null || {
+      echo 'Reviewed current-baseline verifier is required for incomplete activation history.' >&2
+      return 1
+    }
+    history=$(staging_delivery_current_baseline_secret_id) || return 1
+    [[ "$history" =~ ^[a-z0-9]{25}$ ]] || return 1
+  fi
   projection=$(staging_delivery_auth_snapshot_unjournaled "$role" "$spec") || return 1
   if [ "$history" != absent ]; then
     jq -e --arg id "$history" '.active == true and .mount.SecretID == $id' <<< "$projection" >/dev/null || return 1

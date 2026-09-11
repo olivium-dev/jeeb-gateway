@@ -21,6 +21,7 @@ name: jeeb-staging-deploy
 
 permissions:
   contents: read
+  actions: read
   packages: write
 
 concurrency:
@@ -221,6 +222,7 @@ jobs:
 
       - name: Deploy Swarm service
         env:
+          GH_TOKEN: ${{ github.token }}
           IMAGE: ${{ steps.immutable.outputs.image }}
           REPOSITORY: ${{ github.event.repository.name }}
           DEPLOYMENT_MODE: ${{ inputs.deployment_mode }}
@@ -889,6 +891,10 @@ jobs:
           # Forwarded through the generated private remote script below.
           # shellcheck disable=SC2034
           STAGING_GATEWAY_LOCK_OWNER=$(<"$STAGING_GATEWAY_LOCK_OWNER_FILE")
+          baseline_public=$(python3 scripts/staging-delivery-current-baseline.py bundle reconcile \
+            | ssh jeeb-staging python3 -I - public-seal)
+          baseline_seal=$(printf '%s' "$baseline_public" \
+            | python3 scripts/staging-delivery-baseline-provenance.py)
           {
             for variable in IMAGE REMOTE_DOCKER_CONFIG REPOSITORY DEPLOYMENT_MODE \
               EXPECTED_INCUMBENT_IMAGE \
@@ -902,6 +908,7 @@ jobs:
               service_auth_secret_name; do
               printf '%s=%q\n' "$variable" "${!variable}"
             done
+            python3 scripts/staging-delivery-current-baseline.py bundle retention "$baseline_seal"
             cat scripts/staging-delivery-auth-retention.sh
             cat <<'REMOTE'
           set -euo pipefail
