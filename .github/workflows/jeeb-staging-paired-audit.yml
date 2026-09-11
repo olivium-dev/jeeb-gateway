@@ -1,0 +1,55 @@
+name: jeeb-staging-paired-audit
+"on":
+  workflow_dispatch:
+    inputs:
+      reviewed_sha:
+        description: Exact reviewed current protected gateway main
+        type: string
+        required: true
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: jeeb-staging-jeeb-gateway
+  cancel-in-progress: false
+jobs:
+  inspect:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    environment: staging
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GITHUB_REF_PROTECTED: ${{ github.ref_protected }}
+      GITHUB_TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+    steps:
+      - name: Require exact designated owner before checkout
+        run: |
+          set -euo pipefail
+          [ "$GITHUB_ACTOR" = oudaykhaled ]
+          [ "$GITHUB_TRIGGERING_ACTOR" = oudaykhaled ]
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Require reviewed protected current source and hosted audit
+        env:
+          REVIEWED_SHA: ${{ inputs.reviewed_sha }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          [ "$DEFAULT_BRANCH" = main ]
+          [ "$REVIEWED_SHA" = "$GITHUB_SHA" ]
+          bash scripts/staging-paired-source-guard.sh
+          python3 scripts/test-staging-paired-readonly-audit.py
+      - name: Configure existing strict staging SSH
+        env:
+          SSH_HOST: ${{ secrets.JEEB_STAGING_SSH_HOST }}
+          SSH_USER: ${{ secrets.JEEB_STAGING_DEPLOY_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.JEEB_STAGING_SSH_PRIVATE_KEY }}
+          SSH_KNOWN_HOSTS: ${{ secrets.JEEB_STAGING_SSH_KNOWN_HOSTS }}
+        run: bash scripts/setup-staging-paired-ssh.sh
+      - name: Inspect fixed staging resources without remote writes
+        run: |
+          set -euo pipefail
+          bash scripts/staging-paired-source-guard.sh
+          ssh jeeb-staging python3 -I - < scripts/staging-paired-readonly-audit.py
+          bash scripts/staging-paired-source-guard.sh

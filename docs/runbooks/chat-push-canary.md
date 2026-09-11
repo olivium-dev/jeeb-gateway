@@ -189,15 +189,29 @@ up through the Dev Tool's own route chain:
    deleted and carries another run's password, so it must be waited out (5 min),
 4. `POST /v1/partner/auth/login` → partner session,
 5. `POST /v1/admin/partners/{partnerId}/wallet/credits` — cash-credit the partner
-   as admin, under a fixed idempotency key,
+   as admin, under an operation-scoped idempotency key,
 6. `POST /v1/partner/wallet/transfers/predict` — assert `otpRequired == false`,
-7. `POST /v1/partner/wallet/transfers` — partner → canary jeeber, fixed
+7. `POST /v1/partner/wallet/transfers` — partner → canary jeeber, operation-scoped
    idempotency key,
 8. delete the partner credential, then re-read the balance and assert it clears.
 
-**The idempotency that matters is the balance pre-check**: if the wallet already
-clears `JEEB_CANARY_WALLET_MIN`, the whole chain is skipped. Re-running the script
-any number of times never stacks credits.
+If the wallet already clears `JEEB_CANARY_WALLET_MIN`, the whole chain is skipped.
+When funding is needed, both money requests include `GITHUB_RUN_ID`, the current
+wallet currency, and the relevant holder IDs in their idempotency keys.
+`GITHUB_RUN_ATTEMPT` is deliberately excluded: rerunning the same workflow run
+reuses its prior operation, including after an uncertain response. A new run can
+fund a depleted wallet without replaying an old CREDIT receipt into a USD check.
+The final balance and currency checks remain mandatory; a successful receipt alone
+does not prove the current wallet was funded.
+
+Outside GitHub Actions, set a non-secret `JEEB_CANARY_FUNDING_OPERATION_ID`, such as
+`manual-20260911-usd-1`, before running the ensure script. It must contain 1-24
+letters, digits, dots, underscores or hyphens and start with a letter or digit.
+Reuse exactly the same value for retries of that operation; choose a new value
+only for a new funding operation after checking the previous outcome. This explicit
+override also takes precedence inside Actions. It is never generated randomly.
+The script refuses funding without an operation ID or a known wallet currency;
+already-funded checks and `--plan` need no manual ID.
 
 **That is why the scheduled workflow runs it on every run**, as a step before
 `run.sh --execute`. It is cheap when funded (one wallet read) and it is the only

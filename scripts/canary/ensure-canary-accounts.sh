@@ -102,10 +102,12 @@ FUNDED=skipped
 if [ "$SKIP_FUNDING" = "true" ]; then
   canary_note "funding disabled by JEEB_CANARY_SKIP_FUNDING"
 elif [ "$CANARY_MODE" = "execute" ] && canary_wallet_sufficient "$WALLET_MIN" <"$WALLET_FILE"; then
-  # This early return IS the idempotency: re-running never stacks credits.
+  # A funded wallet needs no new operation, even on a later workflow run.
   canary_note "wallet already clears the guard — nothing to fund"
   FUNDED=already
 else
+  FUNDING_SCOPE="$(canary_funding_scope)" || canary_fail accounts \
+    "funding needs a valid GITHUB_RUN_ID or JEEB_CANARY_FUNDING_OPERATION_ID (1-24 letters, digits, dots, underscores or hyphens; starts with a letter or digit). Reuse the same operation ID for retries."
   canary_log ""
   canary_log "  funding — the Dev Tool 'Fund Jeeber wallet' chain, amount $WALLET_TOPUP"
   [ -n "$PARTNER_PASSWORD" ] || PARTNER_PASSWORD="$(canary_partner_password "$PARTNER_IDENTIFIER" "$PARTNER_HOLDER_ID")"
@@ -123,6 +125,27 @@ else
     esac
   fi
   canary_expect accounts "200 204" "canary jeeber wallet-holder provisioning"
+
+  # The initial empty projection has no currency when the holder is absent.
+  # Resolve its authoritative currency after zero-balance provisioning, before
+  # any partner credential or money operation is created.
+  canary_http GET "$BASE_URL/v1/jeeb/wallet" --bearer-var JEEBER_TOKEN --out "$WALLET_FILE"
+  canary_expect accounts "200" "provisioned canary jeeber wallet read"
+  if [ "$CANARY_MODE" = execute ]; then
+    FUNDING_CURRENCY="$(canary_wallet_currency <"$WALLET_FILE")" || canary_fail accounts \
+      "wallet currency is missing or invalid — funding cannot select a safe idempotency scope"
+  else
+    FUNDING_CURRENCY=USD
+  fi
+  # A lifetime holder-only key replays an old receipt after a wallet is drained
+  # or changes currency (the original canary credit was CREDIT, now USD).
+  # The run scope changes only for a new operation, never a retry attempt.
+  PARTNER_FUNDING_HOLDER="$(printf '%s' "$PARTNER_HOLDER_ID" | tr -d '-' | tr '[:upper:]' '[:lower:]')"
+  JEEBER_FUNDING_HOLDER="$(printf '%s' "$JEEBER_ID" | tr -d '-' | tr '[:upper:]' '[:lower:]')"
+  PARTNER_CREDIT_KEY="jeeb-canary-credit-$FUNDING_SCOPE-$FUNDING_CURRENCY-$PARTNER_FUNDING_HOLDER"
+  JEEBER_TOPUP_KEY="jeeb-canary-topup-$FUNDING_SCOPE-$FUNDING_CURRENCY-$PARTNER_FUNDING_HOLDER-$JEEBER_FUNDING_HOLDER"
+  [ "${#PARTNER_CREDIT_KEY}" -le 128 ] && [ "${#JEEBER_TOPUP_KEY}" -le 128 ] || \
+    canary_fail accounts "funding idempotency key exceeds the partner API limit"
 
   canary_log "  2/6 provision the demo partner credential (holder-bound, removed at the end)"
   CANARY_PARTNER_PROVISION_BODY="$(jq -nc --arg i "$PARTNER_IDENTIFIER" --arg h "$PARTNER_HOLDER_ID" \
@@ -160,10 +183,10 @@ else
     PARTNER_ID='<partner_id>'
   fi
 
-  canary_log "  4/6 cash-credit the partner as admin (fixed idempotency key)"
+  canary_log "  4/6 cash-credit the partner as admin (operation-scoped idempotency key)"
   canary_http POST "$BASE_URL/v1/admin/partners/$PARTNER_ID/wallet/credits" \
     --bearer-var ADMIN_TOKEN \
-    --json "$(jq -nc --argjson a "$WALLET_TOPUP" --arg k "jeeb-canary-partner-credit-$PARTNER_HOLDER_ID" \
+    --json "$(jq -nc --argjson a "$WALLET_TOPUP" --arg k "$PARTNER_CREDIT_KEY" \
       '{amount: $a, evidenceNote: "Jeeb chat+push canary funding", idempotencyKey: $k}')"
   canary_expect accounts "200 201 409" "partner cash credit"
 
@@ -178,11 +201,11 @@ else
     canary_fail accounts "the top-up of $WALLET_TOPUP is above PartnerWallet__OtpStepUpThreshold and would need a step-up code — lower JEEB_CANARY_WALLET_TOPUP"
   fi
 
-  canary_log "  6/6 transfer to the canary jeeber (fixed idempotency key)"
+  canary_log "  6/6 transfer to the canary jeeber (operation-scoped idempotency key)"
   canary_http POST "$BASE_URL/v1/partner/wallet/transfers" \
     --bearer-var PARTNER_TOKEN \
     --json "$(jq -nc --arg j "$JEEBER_ID" --argjson a "$WALLET_TOPUP" \
-      --arg k "jeeb-canary-topup-$JEEBER_ID" \
+      --arg k "$JEEBER_TOPUP_KEY" \
       '{jeeberId: $j, amount: $a, idempotencyKey: $k, note: "Jeeb chat+push canary funding"}')"
   canary_expect accounts "200 201 409" "partner to jeeber transfer"
 
@@ -193,6 +216,10 @@ else
   canary_log "  re-read the balance"
   canary_http GET "$BASE_URL/v1/jeeb/wallet" --bearer-var JEEBER_TOKEN --out "$WALLET_FILE"
   canary_expect accounts "200" "canary jeeber wallet re-read"
+  if [ "$CANARY_MODE" = execute ]; then
+    [ "$(canary_wallet_currency <"$WALLET_FILE")" = "$FUNDING_CURRENCY" ] || \
+      canary_fail accounts "wallet currency changed during funding — reconcile this operation before retrying"
+  fi
   [ "$CANARY_MODE" != execute ] || canary_wallet_sufficient "$WALLET_MIN" <"$WALLET_FILE" || \
     canary_fail accounts "the wallet is still below $WALLET_MIN after funding — the transfer did not land"
   canary_note "wallet now clears the offer guard"

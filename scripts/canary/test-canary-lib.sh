@@ -282,6 +282,32 @@ check_exit "a balance below the threshold does not" 1 \
 check_exit "an empty wallet does not" 1 \
   bash -c "printf '%s' '{}' | { . '$SCRIPT_DIR/lib.sh'; canary_wallet_sufficient 0.60; }"
 
+# --- funding scope: a new run funds anew, a rerun replays exactly once --------
+check "a workflow run defines the funding operation" "run-12345" \
+  "$(JEEB_CANARY_FUNDING_OPERATION_ID='' GITHUB_RUN_ID=12345 GITHUB_RUN_ATTEMPT=1 canary_funding_scope)"
+check "a GitHub rerun keeps the same funding operation" "run-12345" \
+  "$(JEEB_CANARY_FUNDING_OPERATION_ID='' GITHUB_RUN_ID=12345 GITHUB_RUN_ATTEMPT=2 canary_funding_scope)"
+check "a new workflow run has a new funding operation" "run-12346" \
+  "$(JEEB_CANARY_FUNDING_OPERATION_ID='' GITHUB_RUN_ID=12346 canary_funding_scope)"
+check "manual operation IDs are stable and explicit" "manual-recovery-1" \
+  "$(JEEB_CANARY_FUNDING_OPERATION_ID=recovery-1 GITHUB_RUN_ID=12345 canary_funding_scope)"
+check_exit "funding outside Actions requires an explicit operation" 1 \
+  env CANARY_MODE=execute GITHUB_RUN_ID= JEEB_CANARY_FUNDING_OPERATION_ID= \
+  bash -c ". \"\$1\"; canary_funding_scope" test "$SCRIPT_DIR/lib.sh"
+check_exit "invalid manual operation IDs fail closed" 1 \
+  env CANARY_MODE=execute JEEB_CANARY_FUNDING_OPERATION_ID='invalid id' \
+  bash -c ". \"\$1\"; canary_funding_scope" test "$SCRIPT_DIR/lib.sh"
+check_exit "a malformed Actions run ID fails closed" 1 \
+  env CANARY_MODE=execute GITHUB_RUN_ID=invalid JEEB_CANARY_FUNDING_OPERATION_ID= \
+  bash -c ". \"\$1\"; canary_funding_scope" test "$SCRIPT_DIR/lib.sh"
+check "wallet currency is read from the balance response" "USD" \
+  "$(printf '%s' '{"currency":"USD"}' | canary_wallet_currency)"
+# shellcheck disable=SC2016 # $1 belongs to the child shell.
+check_exit "unknown currency cannot identify funding" 4 \
+  bash -c 'printf "%s" "{\"currency\":null}" | { . "$1"; canary_wallet_currency; }' test "$SCRIPT_DIR/lib.sh"
+check_exit "the complete funding script preserves retries and rejects stale receipts" 0 \
+  bash "$SCRIPT_DIR/test-canary-funding.sh"
+
 # --- the canary identities must be well-formed UUIDs: ban-service rejects
 # --- anything else and [RequireActiveUser] then fails closed with 503.
 UUID_RE='[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'

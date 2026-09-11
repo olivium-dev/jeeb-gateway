@@ -154,6 +154,25 @@ def exact_spec(spec):
     return result
 
 
+def verify_container_process(image_config, container):
+    # Engine API 1.52 omits empty image-config fields. In particular delivery is
+    # CMD-only, so its image has no Entrypoint key while container inspect has
+    # Entrypoint:null. Normalize only the equivalent absent/null/empty arrays;
+    # never turn an invalid scalar or a changed command into a successful proof.
+    def argv(config, key):
+        value = config.get(key)
+        require(value is None or (isinstance(value, list) and all(isinstance(v, str) for v in value)))
+        return [] if value is None else value
+
+    config = container['Config']
+    entrypoint, command = argv(image_config, 'Entrypoint'), argv(image_config, 'Cmd')
+    require(argv(config, 'Entrypoint') == entrypoint and argv(config, 'Cmd') == command)
+    directory = image_config.get('WorkingDir', '')
+    require(isinstance(directory, str) and config.get('WorkingDir', '') == directory)
+    process = entrypoint + command
+    require(process and container['Path'] == process[0] and container['Args'] == process[1:])
+
+
 class Runtime:
     def __init__(self, root):
         self.root = custody.directory(Path(root))
@@ -353,7 +372,7 @@ class Runtime:
         expected_env = env_map(image['Config'].get('Env', []))
         expected_env.update(env_map(self.candidate(role)['TaskTemplate']['ContainerSpec'].get('Env', [])))
         require(env_map(container['Config'].get('Env', [])) == expected_env)
-        require(container['Config']['Entrypoint'] == image['Config']['Entrypoint'])
+        verify_container_process(image['Config'], container)
         expected_user = self.candidate(role)['TaskTemplate']['ContainerSpec'].get('User') or image['Config'].get('User', '')
         require(expected_user in (('appuser', '65532', '65532:65532') if role == 'gateway' else ('', '0', '0:0', 'root')))
         require(container['Config']['User'] == expected_user)

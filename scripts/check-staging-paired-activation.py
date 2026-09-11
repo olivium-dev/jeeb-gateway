@@ -25,15 +25,41 @@ def check_engine(source):
     assert 'self.authority()' in text and 'self.lock()' in text and 'self.existing_secret()' in text
 
 
+def check_readonly_audit(source):
+    """Keep the separate diagnostic outside all mutation/process authority."""
+    tree = ast.parse(source)
+    imports = {node.module if isinstance(node, ast.ImportFrom) else alias.name
+               for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom))
+               for alias in node.names}
+    assert imports <= {'copy', 'http.client', 'json', 'os', 'pathlib', 're', 'socket', 'stat', 'sys', 'urllib.parse'}
+    requests = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        assert not (isinstance(node.func, ast.Name) and node.func.id in {'open', 'exec', 'eval', 'compile', '__import__'})
+        if isinstance(node.func, ast.Attribute):
+            assert node.func.attr not in {'write', 'write_text', 'write_bytes', 'mkdir', 'makedirs', 'unlink', 'remove',
+                                          'rmdir', 'rename', 'system', 'popen', 'spawn', 'execv', 'execve'}
+            assert ast.unparse(node.func) != 'os.replace'
+            if node.func.attr == 'request': requests.append(node)
+            if ast.unparse(node.func) == 'os.open':
+                flags = ast.unparse(node.args[1])
+                assert 'os.O_RDONLY' in flags
+                assert not any(flag in flags for flag in ('O_WRONLY', 'O_RDWR', 'O_CREAT', 'O_TRUNC', 'O_APPEND'))
+    assert len(requests) == 1 and ast.unparse(requests[0]) == "connection.request('GET', path)"
+
+
 def main():
     inventory = {str(path.relative_to(ROOT)) for path in (ROOT/'scripts').glob('*.py')
                  if '/var/run/docker.sock' in path.read_text() and path.name != Path(__file__).name}
     # Account explicitly for the offline argv fixture's expected socket string.
     # It substitutes both SSH and Docker with temporary executables; do not hide
     # the literal through concatenation or exclude every test from this inventory.
-    assert inventory == {'scripts/staging-paired-engine.py', 'scripts/test-staging-paired-ssh-argv.py'}
+    assert inventory == {'scripts/staging-paired-engine.py', 'scripts/test-staging-paired-ssh-argv.py',
+                         'scripts/staging-paired-readonly-audit.py'}
     source = (ROOT/'scripts/staging-paired-engine.py').read_text()
     check_engine(source)
+    check_readonly_audit((ROOT/'scripts/staging-paired-readonly-audit.py').read_text())
     for changed in (source.replace("'gateway': 'jeeb-staging-jeeb-gateway'", "'gateway': 'another-service'"),
                     source + "\nrequest('POST', '/unreviewed', {})\n"):
         try: check_engine(changed)

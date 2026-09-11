@@ -270,6 +270,33 @@ canary_partner_password() {
   printf 'Jc!%s' "${raw:-CanaryFallback12345678}"
 }
 
+# One funding operation per workflow run, stable across GitHub rerun attempts.
+# Manual callers must retain an explicit non-secret ID across retries; inventing
+# a random ID here could credit twice after an uncertain response.
+canary_funding_scope() {
+  local operation="${JEEB_CANARY_FUNDING_OPERATION_ID:-}"
+  if [ -n "$operation" ]; then
+    # With two dashless holder UUIDs and a currency code, 24 characters keeps
+    # the final top-up key inside the partner API's 128-character limit.
+    [[ "$operation" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,23}$ ]] || return 1
+    printf 'manual-%s' "$operation"
+  elif [ -n "${GITHUB_RUN_ID:-}" ]; then
+    [[ "$GITHUB_RUN_ID" =~ ^[1-9][0-9]{0,19}$ ]] || return 1
+    printf 'run-%s' "$GITHUB_RUN_ID"
+  elif [ "$CANARY_MODE" = plan ]; then
+    printf 'plan-operation'
+  else
+    return 1
+  fi
+}
+
+# The balance BFF resolves this code from wallet-service's currency table.
+# Unknown currency cannot safely select a funding operation's identity.
+canary_wallet_currency() {
+  jq -er '.currency | select(type == "string") | ascii_upcase
+    | select(test("^[A-Z][A-Z0-9]{0,11}$"))'
+}
+
 # 0 when GET /v1/jeeb/wallet reports at least $minimum available.
 canary_wallet_sufficient() {
   local minimum="$1"
