@@ -26,7 +26,7 @@ def check_source(source):
     validation = ast.parse(functions['validate_operation'])
     expressions = [node.args[0] for node in ast.walk(validation) if isinstance(node, ast.Call)
                    and isinstance(node.func, ast.Name) and node.func.id == 'require']
-    expected = ast.parse('operation in ("migrate-private", "diagnose-private")', mode='eval').body
+    expected = ast.parse('operation in ("migrate-private", "diagnose-private", "continue-private")', mode='eval').body
     assert len(expressions) == 1 and ast.dump(expressions[0]) == ast.dump(expected)
     assert 'expected_seal=self.approved_seal' in functions['retention']
     assert functions['submit'].index('self.inspect(role) == original') < functions['submit'].index('connection.request("POST"')
@@ -38,7 +38,7 @@ def check_source(source):
     assert 'body=b"{"' in functions['http_probe']
     # Read-only entrypoint and its dedicated helpers may not reach any mutation
     # authority, including custody primitives that create directories/claims.
-    forbidden = {'submit', 'advance', 'begin', 'migrate', 'Journal', 'Runtime',
+    forbidden = {'submit', 'advance', 'begin', 'migrate', 'continue_private', 'Journal', 'Runtime',
                  'held_lock', 'custody_root', 'write_exclusive', 'mkdir', 'makedirs',
                  'unlink', 'remove', 'rename', 'replace', 'write', 'write_text', 'write_bytes', 'system', 'execv',
                  'request', 'http_probe', 'wait_chat_readiness'}
@@ -61,12 +61,20 @@ def check_source(source):
     branches = [node for node in ast.walk(main_tree) if isinstance(node, ast.If)
                 and ast.dump(node.test) == ast.dump(diagnostic_test)]
     assert len(branches) == 1 and any(isinstance(node, ast.Return) for node in branches[0].body)
+    continuation = ast.parse(functions['continue_private'])
+    calls = [node for node in ast.walk(continuation) if isinstance(node, ast.Call)]
+    submits = [node for node in calls if isinstance(node.func, ast.Attribute) and node.func.attr == 'submit']
+    assert len(submits) == 1 and ast.literal_eval(submits[0].args[0]) == 'chat'
+    assert not any((isinstance(node.func, ast.Name) and node.func.id == 'migrate') or
+                   (isinstance(node.func, ast.Attribute) and node.func.attr in ('begin', 'unlink', 'remove', 'rmdir')) for node in calls)
+    assert functions['continue_private'].count('recorded_candidate_reconciliation(') == 2
+    assert 'baseline.private_raw' in functions['continue_private']
 
 
 def check_workflow(source):
     import yaml
     document = yaml.safe_load(source)
-    assert document['on']['workflow_dispatch']['inputs']['operation']['options'] == ['diagnose-private', 'migrate-private', 'activate-identity']
+    assert document['on']['workflow_dispatch']['inputs']['operation']['options'] == ['diagnose-private', 'migrate-private', 'continue-private', 'activate-identity']
     assert set(document['jobs']) == {'migrate'}
     assert document['permissions'] == {'contents': 'read', 'actions': 'read'}
     assert document['concurrency'] == {'group': 'jeeb-staging-jeeb-gateway', 'cancel-in-progress': False}

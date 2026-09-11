@@ -9,7 +9,7 @@ name: One-use staging private chat migration (identity stays off)
       operation:
         description: Diagnose reads checkpoints only; migration is one-use; identity activation stays blocked
         type: choice
-        options: [diagnose-private, migrate-private, activate-identity]
+        options: [diagnose-private, migrate-private, continue-private, activate-identity]
         required: true
       current_baseline_seal:
         description: Exact reviewed current-delivery reconciliation seal SHA256

@@ -458,7 +458,7 @@ class MigrationTests(unittest.TestCase):
             source.replace('"/api/firebase/token"', '"/api/firebase/other"'),
             source.replace("/update?version={version}", "/remove?version={version}"),
             source.replace("{original['ID']}/update", "{original['Name']}/update"),
-            source.replace('require(operation in ("migrate-private", "diagnose-private"))', 'require(True)'),
+            source.replace('require(operation in ("migrate-private", "diagnose-private", "continue-private"))', 'require(True)'),
             source.replace('def diagnose(baseline, home, approved_seal):',
                            'def diagnose(baseline, home, approved_seal):\n    Journal(home, baseline.c)'),
             source.replace('journal.advance("chat-submission-pending")', 'pass'),

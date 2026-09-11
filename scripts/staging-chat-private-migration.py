@@ -363,11 +363,19 @@ class Runtime:
         require(result["nodeId"] == evidence["snapshot"]["info"]["Swarm"]["NodeID"])
         return result
 
-    def wait(self, role, expected, private):
+    def wait(self, role, expected, private, observe=None):
         for attempt in range(40):
+            if observe is not None:
+                observe()
             current = self.inspect(role)
             require(current["Spec"] == expected)
-            if current.get("UpdateStatus", {}).get("State") != "updating":
+            # Swarm commits the new Spec with UpdateStatus unset, then its
+            # asynchronous updater marks it updating. Neither is completion.
+            status = current.get("UpdateStatus")
+            require(status is None or isinstance(status, dict))
+            state = status.get("State") if status is not None else None
+            require(state in (None, "", "updating", "completed"))
+            if state == "completed":
                 return self.verify(role, expected, private)
             require(attempt < 39)
             time.sleep(2)
@@ -614,6 +622,99 @@ def recorded_candidate_reconciliation(baseline, home, approved_seal, snapshot, j
             "chatMatchesRecordedInitial": True, "runtimeMatches": True}, (sealed, evidence["originals"])
 
 
+def continue_private(runtime, source, run, attempt, seal):
+    """One-use forward completion of the exact recorded gateway-only submission."""
+    baseline, home = runtime.baseline, runtime.home
+    require(source != "a333ff9b96116aa4833bf0fdeec0a9720e041ce1" and run != "34605416479" and attempt == "1")
+    runtime.retention(seal=seal)
+    before = baseline.a.collect(home)
+    projection, fingerprints = diagnostic_journal(home, baseline.c, seal)
+    services = {role: runtime.inspect(role) for role in SERVICES}
+    runtimes = {role: runtime.verify(role, services[role]["Spec"], role == "gateway") for role in SERVICES}
+    matched, witness = recorded_candidate_reconciliation(
+        baseline, home, seal, before, projection, fingerprints, services, runtimes)
+    require(matched["status"] == "matched")
+    path = Path(home) / ".jeeb-deploy/paired-releases" / JOURNAL_NAME
+    # Actual bytes, not reserialized JSON, remain immutable throughout continuation.
+    phases = {f"{index:02d}-{phase}.json": baseline.private_raw(path / f"{index:02d}-{phase}.json")
+              for index, phase in enumerate(PHASES[:2])}
+    require([digest(json.loads(raw)) for raw in phases.values()] == fingerprints)
+    gateway, chat = services["gateway"], services["chat"]
+    candidate = chat_candidate(chat["Spec"])
+    completed_chat = None
+    original_hashes = {name: hashlib.sha256(raw).hexdigest() for name, raw in phases.items()}
+
+    def check_chain():
+        baseline.c.assert_shared_lock(home, runtime.owner)
+        report, _ = diagnostic_journal(home, baseline.c, seal)
+        require(report["state"] in ("prefix", "complete") and report["phases"] == list(PHASES[:len(phases)]))
+        require(all(baseline.private_raw(path / name) == raw for name, raw in phases.items()))
+        baseline.c.assert_shared_lock(home, runtime.owner)
+
+    def verify_current(expected_chat, chat_private):
+        check_chain()
+        runtime.retention(seal=seal)
+        require(runtime.inspect("gateway") == gateway)
+        if not chat_private:
+            require(runtime.inspect("chat") == chat)
+        current = {"gateway": runtime.verify("gateway", gateway["Spec"], True),
+                   "chat": runtime.verify("chat", expected_chat, chat_private)}
+        require(current["gateway"] == runtimes["gateway"])
+        require(current["chat"] == (completed_chat if chat_private else runtimes["chat"]))
+        require(runtime.inspect("gateway") == gateway)
+        require(baseline.load_seal(home)[0] == witness[0])
+        check_chain()
+        return current
+
+    wait_chat_readiness(lambda: verify_current(chat["Spec"], False))
+    current = verify_current(chat["Spec"], False)
+    after = baseline.a.collect(home)
+    require(baseline.stable_runtime(before) == baseline.stable_runtime(after))
+    require(baseline.origin(home, after["metadata"]) == witness[1])
+    # Reuse the exact reconciliation once more before consuming any new phase.
+    report, hashes = diagnostic_journal(home, baseline.c, seal)
+    recorded_candidate_reconciliation(baseline, home, seal, after, report, hashes, services, current)
+    check_chain()
+    journal = Journal(home, baseline.c)  # Existing path has already passed private custody.
+
+    def advance(phase, proof):
+        check_chain()
+        provenance = {"sourceCommit": source, "runId": run, "attempt": attempt,
+                      "observedAtUnix": int(time.time()), "originalRunId": "34605416479",
+                      "originalPhaseSha256": original_hashes, "identityActivationAuthorized": False}
+        baseline.c.assert_shared_lock(home, runtime.owner)
+        result = journal.advance(phase, {"continuation": provenance, "proof": proof})
+        baseline.c.assert_shared_lock(home, runtime.owner)
+        name = f"{PHASES.index(phase):02d}-{phase}.json"
+        raw = baseline.private_raw(path / name)
+        require(json.loads(raw) == result)
+        phases[name] = raw
+        check_chain()
+        return result
+
+    advance("gateway-verified", {"gateway": current["gateway"], "recordedCandidate": matched})
+    current = verify_current(chat["Spec"], False)
+    advance("chat-submission-pending", {"chatServiceId": chat["ID"], "chatVersion": chat["Version"]["Index"],
+                                        "candidateSpecSha256": digest(candidate)})
+    verify_current(chat["Spec"], False)
+    runtime.submit("chat", chat, candidate)
+    def observe_rollout():
+        check_chain()
+        runtime.retention(seal=seal)
+        require(runtime.inspect("gateway") == gateway)
+        require(runtime.verify("gateway", gateway["Spec"], True) == runtimes["gateway"])
+    changed = runtime.wait("chat", candidate, True, observe=observe_rollout)
+    require(changed["version"] > runtimes["chat"]["version"])
+    completed_chat = changed
+    wait_chat_readiness(lambda: verify_current(candidate, True))
+    current = verify_current(candidate, True)
+    advance("chat-verified", current)
+    current = verify_current(candidate, True)
+    final = advance("complete", {**current, "identityEnabled": False})
+    return {"migration": "complete", "continuedOriginalRun": "34605416479", "sourceCommit": source,
+            "runId": run, "attempt": attempt, "receiptSha256": digest(final), "identityActivationAuthorized": False}
+
+
 def diagnose(baseline, home, approved_seal):
     """GET-only diagnosis. Evidence does not grant mutation or retry authority."""
     report = {"readOnly": True, "mutationAuthorized": False, "retryAuthorized": False, "continuationAuthorized": False,
@@ -708,7 +809,7 @@ def diagnose(baseline, home, approved_seal):
 def validate_operation(operation):
     # Inventory remains unproven; neither its successful run nor a migrated
     # topology is a substitute for the still-required positive ingress proof.
-    require(operation in ("migrate-private", "diagnose-private"))
+    require(operation in ("migrate-private", "diagnose-private", "continue-private"))
 
 
 def bundle():
@@ -752,7 +853,10 @@ def main():
         owner, home = secrets.token_hex(32), Path.home()
         with baseline.c.held_lock(home, owner):
             runtime = Runtime(baseline, manifest(), owner, home, seal)
-            result = migrate(runtime, Journal(home, baseline.c), source, run, attempt, seal)
+            if operation == "continue-private":
+                result = continue_private(runtime, source, run, attempt, seal)
+            else:
+                result = migrate(runtime, Journal(home, baseline.c), source, run, attempt, seal)
         print(json.dumps(result, sort_keys=True))
         return 0
     except Exception as error:

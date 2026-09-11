@@ -81,3 +81,30 @@ It proves only the current checkpoint, not the lost submission response or the
 original rollout's completion. Even a matching, stable checkpoint grants no
 continuation or identity-activation authority. A forward continuation requires
 separate source review and live evidence; it must never reset or delete claims.
+
+## Reviewed gateway-only forward continuation
+
+`continue-private` is a separate, one-use operation in the same protected pipeline.
+It is restricted to the exact interrupted run and two-phase prefix above. Before
+dispatch, independently review the current source and a stable live diagnostic
+whose recorded-candidate checks all match. The original exact-baseline comparison
+remains a failure because the gateway changed; do not mistake it for an unchanged
+baseline or treat the diagnostic itself as continuation authorization.
+
+Under the existing exclusive lock, continuation repeats the recorded-candidate,
+runtime, retention, stable-evidence, and gateway chat-readiness checks. It preserves
+the original phase files byte-for-byte. New phase evidence records verification
+under the current source, run, attempt, and observation time; it does not claim
+that verification completed in the interrupted run. The already-applied gateway
+is never submitted again. Only the exact remaining chat candidate can receive a
+single CAS submission, after its durable claim is appended.
+
+Only a fresh workflow dispatch (attempt `1`) is permitted. Any new phase makes
+this continuation entrypoint ineligible for another invocation. Failure or an
+uncertain result still requires separate read-only review, never a GitHub rerun,
+claim reset, rollback, or automatic resubmission. Bounded rollout polling waits
+for an explicit completed state, including the interval before an update status
+appears; unexpected states or strict verification failures stop immediately.
+Gateway identity and expected configuration remain checked during chat rollout.
+Completion requires fresh private runtime proofs and chat readiness. Identity
+signing remains disabled and requires its own positive isolation review.
