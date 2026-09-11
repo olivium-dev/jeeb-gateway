@@ -53,7 +53,7 @@ def runtime_fixture(role, private=False):
     declaration = original["Spec"]["TaskTemplate"]["ContainerSpec"]
     image = declaration["Image"]
     image_id, cid = "sha256:" + "b" * 64, "c" * 64
-    config = {"Entrypoint": ["dotnet"], "Cmd": ["service.dll"], "WorkingDir": "/app", "User": "1654", "Env": [],
+    config = {"Entrypoint": ["dotnet"], "Cmd": ["service.dll"], "WorkingDir": "/app", "User": "1654" if role == "chat" else "appuser", "Env": [],
               "Labels": {"org.opencontainers.image.revision": m.manifest()["sourceCommit"],
                          "jeeb.source.tree": m.manifest()["sourceTree"],
                          "org.opencontainers.image.source": "https://github.com/olivium-dev/chat-service"}}
@@ -163,6 +163,60 @@ class MigrationTests(unittest.TestCase):
                 result = m.verified_runtime(role, original, lambda kind, key: values[(kind, key)], m.manifest(), private)
                 self.assertEqual(NETWORK, result["overlayId"])
                 self.assertNotIn(SECRET, json.dumps(result))
+
+    def test_exact_signing_targets_with_absent_service_users_preserve_spec(self):
+        for private in (False, True):
+            for name in ("jeeb-firebase-adminsdk.json", "/run/secrets/jeeb-firebase-adminsdk.json"):
+                for role in m.SERVICES:
+                    original, values = runtime_fixture(role, private)
+                    declaration = original["Spec"]["TaskTemplate"]["ContainerSpec"]
+                    self.assertNotIn("User", declaration)
+                    if role == "chat": declaration["Secrets"][0]["File"]["Name"] = name
+                    values[("tasks", original["ID"])][0]["Spec"]["ContainerSpec"] = copy.deepcopy(declaration)
+                    self.assertEqual("1654" if role == "chat" else "appuser", values[("container", "c" * 64)]["Config"]["User"])
+                    captured = copy.deepcopy(values)
+                    with self.subTest(role=role, private=private, name=name):
+                        result = m.verified_runtime(role, original, lambda kind, key: values[(kind, key)], m.manifest(), private)
+                        self.assertEqual(m.digest(original["Spec"]), result["specSha256"])
+                        self.assertEqual(captured, values, "verification must not normalize the captured Spec")
+
+    def test_signing_target_equivalence_keeps_existing_user_guard(self):
+        for role in m.SERVICES:
+            for user in ("", None, "root", "wrong-user"):
+                original, values = runtime_fixture(role, True)
+                declaration = original["Spec"]["TaskTemplate"]["ContainerSpec"]
+                declaration["User"] = user
+                values[("tasks", original["ID"])][0]["Spec"]["ContainerSpec"] = copy.deepcopy(declaration)
+                with self.subTest(role=role, user=user), self.assertRaises(ValueError):
+                    m.verified_runtime(role, original, lambda kind, key: values[(kind, key)], m.manifest(), True)
+
+    def test_signing_target_equivalence_rejects_other_paths_and_metadata(self):
+        cases = [("Name", name) for name in ("/run/secrets/./jeeb-firebase-adminsdk.json", "./jeeb-firebase-adminsdk.json",
+                 "/run/secrets//jeeb-firebase-adminsdk.json", "/run/secrets/../secrets/jeeb-firebase-adminsdk.json",
+                 "/tmp/jeeb-firebase-adminsdk.json", "/run/secrets/jeeb-firebase-adminsdk.json/", "JEEB-firebase-adminsdk.json")]
+        cases += [("UID", "0"), ("UID", "app"), ("GID", "0"), ("GID", "app"), ("Mode", 0o444),
+                  ("Mode", "256"), ("Extra", "unreviewed")]
+        for field, value in cases:
+            original, values = runtime_fixture("chat", True)
+            declaration = original["Spec"]["TaskTemplate"]["ContainerSpec"]
+            declaration["Secrets"][0]["File"]["Name"] = "/run/secrets/jeeb-firebase-adminsdk.json"
+            declaration["Secrets"][0]["File"][field] = value
+            values[("tasks", original["ID"])][0]["Spec"]["ContainerSpec"] = copy.deepcopy(declaration)
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                m.verified_runtime("chat", original, lambda kind, key: values[(kind, key)], m.manifest(), True)
+        for failure in ("duplicate", "task-spelling", "secret-id", "secret-name"):
+            original, values = runtime_fixture("chat", True)
+            declaration = original["Spec"]["TaskTemplate"]["ContainerSpec"]
+            if failure == "duplicate":
+                declaration["Secrets"].append(copy.deepcopy(declaration["Secrets"][0]))
+                declaration["Secrets"][1]["File"]["Name"] = "/run/secrets/jeeb-firebase-adminsdk.json"
+            task = values[("tasks", original["ID"])][0]
+            task["Spec"]["ContainerSpec"] = copy.deepcopy(declaration)
+            if failure == "task-spelling": task["Spec"]["ContainerSpec"]["Secrets"][0]["File"]["Name"] = "/run/secrets/jeeb-firebase-adminsdk.json"
+            if failure == "secret-id": values[("secret", "s" * 25)]["ID"] = "x" * 25
+            if failure == "secret-name": values[("secret", "s" * 25)]["Spec"]["Name"] = "different"
+            with self.subTest(failure=failure), self.assertRaises(ValueError):
+                m.verified_runtime("chat", original, lambda kind, key: values[(kind, key)], m.manifest(), True)
 
     def test_private_runtime_rejects_every_publication_or_process_mount_drift(self):
         for failure in ("spec-port", "endpoint-port", "binding", "host-network", "publish-all", "network", "encryption",
@@ -529,14 +583,15 @@ class DiagnosticTests(unittest.TestCase):
             baseline.verify_retention.assert_not_called()
 
     def test_guard_details_are_reviewed_source_only_and_checkpoint_detects_drift(self):
-        for failure in ("empty-user", "absolute-secret", "both-formats", "host", "checkpoint"):
+        for failure in ("empty-user", "absolute-secret-bad-mode", "both-formats", "host", "checkpoint"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
                 home, _ = self.make_home(temporary)
                 baseline, values = self.fixture()
                 chat = values[("service", m.SERVICES["chat"])]
                 declaration = chat["Spec"]["TaskTemplate"]["ContainerSpec"]
                 if failure in ("empty-user", "both-formats"): declaration["User"] = ""
-                if failure in ("absolute-secret", "both-formats"): declaration["Secrets"][0]["File"]["Name"] = "/run/secrets/jeeb-firebase-adminsdk.json"
+                if failure in ("absolute-secret-bad-mode", "both-formats"): declaration["Secrets"][0]["File"]["Name"] = "/run/secrets/jeeb-firebase-adminsdk.json"
+                if failure == "absolute-secret-bad-mode": declaration["Secrets"][0]["File"]["Mode"] = 0o444
                 values[("tasks", chat["ID"])][0]["Spec"]["ContainerSpec"] = copy.deepcopy(declaration)
                 if failure == "host": baseline.a.collect.side_effect = ValueError(SECRET)
                 if failure == "checkpoint": baseline.stable_runtime.side_effect = ["before", "after"]
@@ -546,17 +601,37 @@ class DiagnosticTests(unittest.TestCase):
                 self.assertTrue(failed)
                 self.assertNotIn(SECRET, json.dumps(report))
                 self.assertFalse(report["mutationAuthorized"] or report["retryAuthorized"])
-                if failure in ("empty-user", "absolute-secret", "both-formats"):
+                if failure in ("empty-user", "absolute-secret-bad-mode", "both-formats"):
                     self.assertEqual("verified_runtime", failed[0]["function"])
                     self.assertEqual("staging-chat-private-migration.py", failed[0]["helper"])
                     self.assertIsInstance(failed[0]["line"], int)
                     formats = report["runtimeFormats"]["chat"]
                     self.assertEqual(failure in ("empty-user", "both-formats"), formats["serviceUserExplicitEmpty"])
-                    self.assertEqual(failure in ("absolute-secret", "both-formats"), formats["signingTargetAbsolute"])
+                    self.assertEqual(failure in ("absolute-secret-bad-mode", "both-formats"), formats["signingTargetAbsolute"])
                 if failure == "host":
                     baseline.load_seal.assert_not_called()
                     self.assertNotIn("journal", report)
                 if failure == "checkpoint": self.assertFalse(report["snapshotStable"])
+
+    def test_diagnostic_accepts_exact_absolute_secret_with_safe_metadata_and_absent_user(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home, _ = self.make_home(temporary)
+            baseline, values = self.fixture()
+            chat = values[("service", m.SERVICES["chat"])]
+            declaration = chat["Spec"]["TaskTemplate"]["ContainerSpec"]
+            self.assertNotIn("User", declaration)
+            declaration["Secrets"][0]["File"]["Name"] = "/run/secrets/jeeb-firebase-adminsdk.json"
+            values[("tasks", chat["ID"])][0]["Spec"]["ContainerSpec"] = copy.deepcopy(declaration)
+            captured = copy.deepcopy(values)
+            with patch.object(m, "engine_get", side_effect=lambda kind, value: copy.deepcopy(values[(kind, value)])):
+                report = m.diagnose(baseline, home, "b" * 64)
+            self.assertTrue(all(check["passed"] for check in report["checks"]), report)
+            self.assertTrue(report["snapshotStable"] and report["readOnly"])
+            self.assertTrue(report["runtimeFormats"]["chat"]["signingTargetAbsolute"])
+            self.assertFalse(report["runtimeFormats"]["chat"]["serviceUserExplicitEmpty"])
+            self.assertFalse(report["mutationAuthorized"] or report["retryAuthorized"])
+            self.assertNotIn(SECRET, json.dumps(report))
+            self.assertEqual(captured, values)
 
     def test_main_diagnostic_reports_validated_run_without_constructing_mutation_authority(self):
         baseline = Mock()

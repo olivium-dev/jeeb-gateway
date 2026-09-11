@@ -317,7 +317,9 @@ def verified_runtime(role, service, get, manifest, private=False):
         mounts = [binding for binding in declaration.get("Secrets", []) if binding.get("File", {}).get("Name") in
                   ("jeeb-firebase-adminsdk.json", "/run/secrets/jeeb-firebase-adminsdk.json")]
         require(len(mounts) == 1)
-        require(mounts[0]["File"] == {"Name": "jeeb-firebase-adminsdk.json", "UID": uid, "GID": gid, "Mode": 0o400})
+        # Discovery above admits only the exact basename or exact /run/secrets
+        # target. Preserve that spelling and every other File metadata guard.
+        require(mounts[0]["File"] == {"Name": mounts[0]["File"]["Name"], "UID": uid, "GID": gid, "Mode": 0o400})
         secret = get("secret", identifier(mounts[0]["SecretID"]))
         require(secret["ID"] == mounts[0]["SecretID"] and secret["Spec"]["Name"] == mounts[0]["SecretName"])
         require(task["Spec"]["ContainerSpec"]["Secrets"] == declaration["Secrets"])
