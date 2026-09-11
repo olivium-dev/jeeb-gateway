@@ -367,7 +367,13 @@ class Runtime:
         for attempt in range(40):
             current = self.inspect(role)
             require(current["Spec"] == expected)
-            if current.get("UpdateStatus", {}).get("State") != "updating":
+            # Swarm commits the new Spec with UpdateStatus unset, then its
+            # asynchronous updater marks it updating. Neither is completion.
+            status = current.get("UpdateStatus")
+            require(status is None or isinstance(status, dict))
+            state = status.get("State") if status is not None else None
+            require(state in (None, "", "updating", "completed"))
+            if state == "completed":
                 return self.verify(role, expected, private)
             require(attempt < 39)
             time.sleep(2)
