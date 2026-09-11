@@ -1122,7 +1122,7 @@ jobs:
               add_env WalletServiceApi__BaseUrl http://jeeb-staging-wallet-service:8080/
               add_env Services__ServiceOTP__BaseUrl http://jeeb-staging-one-time-password:8080
               add_env ServiceOTPApi__BaseUrl http://jeeb-staging-one-time-password:8080
-              add_env ChatServiceApi__BaseUrl http://192.168.2.20:10028
+              add_env ChatServiceApi__BaseUrl http://jeeb-staging-chat-api:5176
               add_env ServiceNotificationClient__BaseUrl http://jeeb-staging-notification:8000/
               add_env PushNotificationServiceApi__BaseUrl http://jeeb-staging-push-notification:8080
               ;;
