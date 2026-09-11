@@ -465,7 +465,21 @@ jobs:
                 "$candidate_spec" "$candidate_version" "$candidate_id"
             }
             verify_candidate_readiness() {
-              ssh jeeb-staging bash -s -- "$published" "$health" \
+              local spec=${1:-$candidate_spec} delivery_probe
+              # Use the verified Spec, including a surgical devtool candidate or
+              # restored incumbent. Only Delivery=true makes /tiers an uncached
+              # owner call; a URL alone still requires healthy credential rows.
+              delivery_probe=$(jq -er '
+                [.TaskTemplate.ContainerSpec.Env[]?
+                  | capture("^(?<key>[^=]+)=(?<value>.*)$")
+                  | .key |= (ascii_downcase | gsub("__"; ":"))] as $env
+                | if any($env[]; .key == "featureflags:useupstream:delivery"
+                    and (.value | ascii_downcase) == "true") then "catalog"
+                  elif any($env[]; .key == "services:delivery:baseurl"
+                    and (.value | test("\\S"))) then "credential"
+                  else "none" end
+              ' "$spec") || return 1
+              ssh jeeb-staging bash -s -- "$published" "$health" "$delivery_probe" \
                 < scripts/staging-gateway-readiness-backoff.sh
             }
             # Degraded is HTTP 200, so the curl-based readiness gate cannot see a
@@ -684,7 +698,7 @@ jobs:
               [ "$(jq -er '.TaskTemplate.ContainerSpec.Image' "$observed_spec")" = "$incumbent_image" ] || return 1
               ssh jeeb-staging bash -s -- "$service" "$incumbent_image" \
                 < scripts/verify-swarm-service-image.sh || return 1
-              verify_candidate_readiness || return 1
+              verify_candidate_readiness "$observed_spec" || return 1
               IFS=$'\t' read -r open_mode demo_users dev_endpoints swagger token_mint < <(
                 jq -er -f scripts/staging-gateway-incumbent-devtool-posture.jq \
                   "$incumbent_spec"
@@ -1290,6 +1304,7 @@ jobs:
           fi
           jq -e 'type == "object"' "$candidate" >/dev/null
           staging_delivery_auth_assert_retained "$delivery_auth_before" gateway "$candidate"
+          staging_delivery_auth_assert_gateway_candidate "$delivery_auth_before" "$candidate"
           cat "$candidate"
           trap - EXIT
           rm -rf -- "$build_root"
