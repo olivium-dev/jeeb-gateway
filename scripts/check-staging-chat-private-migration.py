@@ -10,7 +10,7 @@ def check_source(source):
     tree = ast.parse(source)
     imports = {node.module if isinstance(node, ast.ImportFrom) else alias.name
                for node in ast.walk(tree) if isinstance(node, (ast.Import, ast.ImportFrom)) for alias in node.names}
-    assert imports <= {'copy', 'hashlib', 'http.client', 'json', 'os', 'pathlib', 're', 'secrets', 'socket', 'stat', 'sys', 'time', 'urllib.parse'}
+    assert imports <= {'contextlib', 'fcntl', 'copy', 'hashlib', 'http.client', 'json', 'os', 'pathlib', 're', 'secrets', 'socket', 'stat', 'sys', 'time', 'urllib.parse'}
     requests = [node for node in ast.walk(tree) if isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute) and node.func.attr == 'request']
     assert len(requests) == 4
@@ -23,7 +23,11 @@ def check_source(source):
         ast.dump(ast.parse(expression, mode='eval').body, include_attributes=False)
         for expression in expected_targets}
     functions = {node.name: ast.get_source_segment(source, node) for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
-    assert 'require(operation == "migrate-private")' in functions['validate_operation']
+    validation = ast.parse(functions['validate_operation'])
+    expressions = [node.args[0] for node in ast.walk(validation) if isinstance(node, ast.Call)
+                   and isinstance(node.func, ast.Name) and node.func.id == 'require']
+    expected = ast.parse('operation in ("migrate-private", "diagnose-private")', mode='eval').body
+    assert len(expressions) == 1 and ast.dump(expressions[0]) == ast.dump(expected)
     assert 'expected_seal=self.approved_seal' in functions['retention']
     assert functions['submit'].index('self.inspect(role) == original') < functions['submit'].index('connection.request("POST"')
     migration = functions['migrate']
@@ -32,11 +36,36 @@ def check_source(source):
     assert migration.rindex('runtime.verify("gateway"') < migration.rindex('runtime.verify("chat"') < migration.index('journal.advance("complete"')
     assert 'with baseline.c.held_lock(home, owner):' in functions['main']
     assert 'body=b"{"' in functions['http_probe']
+    # Read-only entrypoint and its dedicated helpers may not reach any mutation
+    # authority, including custody primitives that create directories/claims.
+    forbidden = {'submit', 'advance', 'begin', 'migrate', 'Journal', 'Runtime',
+                 'held_lock', 'custody_root', 'write_exclusive', 'mkdir', 'makedirs',
+                 'unlink', 'remove', 'rename', 'replace', 'write', 'system', 'execv',
+                 'request', 'http_probe', 'wait_chat_readiness'}
+    for name in ('diagnose', 'diagnostic_lock', 'diagnostic_journal', 'diagnostic_failure'):
+        fragment = ast.parse(functions[name])
+        for node in ast.walk(fragment):
+            if not isinstance(node, ast.Call):
+                continue
+            called = node.func.id if isinstance(node.func, ast.Name) else node.func.attr if isinstance(node.func, ast.Attribute) else None
+            assert called not in forbidden
+            assert not any(keyword.arg == 'create' for keyword in node.keywords)
+            if called == 'open':
+                assert any(isinstance(item, ast.Attribute) and item.attr == 'O_RDONLY' for item in ast.walk(node))
+                assert not any(isinstance(item, ast.Attribute) and item.attr in ('O_CREAT', 'O_WRONLY', 'O_RDWR', 'O_TRUNC') for item in ast.walk(node))
+    assert 'LOCK_SH' in functions['diagnostic_lock'] and 'LOCK_NB' in functions['diagnostic_lock']
+    assert 'LOCK_EX' not in functions['diagnostic_lock']
+    main_tree = ast.parse(functions['main'])
+    diagnostic_test = ast.parse('operation == "diagnose-private"', mode='eval').body
+    branches = [node for node in ast.walk(main_tree) if isinstance(node, ast.If)
+                and ast.dump(node.test) == ast.dump(diagnostic_test)]
+    assert len(branches) == 1 and any(isinstance(node, ast.Return) for node in branches[0].body)
 
 
 def check_workflow(source):
     import yaml
     document = yaml.safe_load(source)
+    assert document['on']['workflow_dispatch']['inputs']['operation']['options'] == ['diagnose-private', 'migrate-private', 'activate-identity']
     assert set(document['jobs']) == {'migrate'}
     assert document['permissions'] == {'contents': 'read', 'actions': 'read'}
     assert document['concurrency'] == {'group': 'jeeb-staging-jeeb-gateway', 'cancel-in-progress': False}

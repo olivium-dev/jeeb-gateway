@@ -7,9 +7,9 @@ name: One-use staging private chat migration (identity stays off)
         type: string
         required: true
       operation:
-        description: Identity activation is blocked pending separate positive ingress proof
+        description: Diagnose reads checkpoints only; migration is one-use; identity activation stays blocked
         type: choice
-        options: [migrate-private, activate-identity]
+        options: [diagnose-private, migrate-private, activate-identity]
         required: true
       current_baseline_seal:
         description: Exact reviewed current-delivery reconciliation seal SHA256
@@ -59,7 +59,7 @@ jobs:
           SSH_PRIVATE_KEY: ${{ secrets.JEEB_STAGING_SSH_PRIVATE_KEY }}
           SSH_KNOWN_HOSTS: ${{ secrets.JEEB_STAGING_SSH_KNOWN_HOSTS }}
         run: bash scripts/setup-staging-paired-ssh.sh
-      - name: Claim once and migrate under the canonical host lock
+      - name: Inspect read-only checkpoint or run the one-use migration
         run: |
           set -euo pipefail
           bash scripts/staging-paired-source-guard.sh
