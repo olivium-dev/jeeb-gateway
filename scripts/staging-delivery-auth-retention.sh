@@ -152,3 +152,25 @@ staging_delivery_auth_assert_retained() {
     return 1
   }
 }
+
+# Retention alone permits the pre-activation posture. A normal gateway candidate
+# that dials delivery cannot run in that posture: its credential handler requires
+# a mounted token even while the delivery service is still in expand mode.
+# Keep activation in the paired transaction; never infer authority to add a secret.
+staging_delivery_auth_assert_gateway_candidate() {
+  local projection=$1 spec=$2
+  jq -e --argjson auth "$projection" '
+    [(.TaskTemplate.ContainerSpec.Env // [])[]
+      | capture("^(?<key>[^=]+)=(?<value>.*)$")
+      | .key |= (ascii_downcase | gsub("__"; ":"))] as $env
+    | any($env[];
+        (.key == "featureflags:useupstream:delivery"
+          and (.value | ascii_downcase) == "true")
+        or (.key == "services:delivery:baseurl"
+          and (.value | test("\\S")))) as $armed
+    | ($armed | not) or $auth.active == true
+  ' "$spec" >/dev/null || {
+    echo 'Gateway candidate enables delivery without its mounted credential; complete or reconcile the protected paired delivery activation first.' >&2
+    return 1
+  }
+}

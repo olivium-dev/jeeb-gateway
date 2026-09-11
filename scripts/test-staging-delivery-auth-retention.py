@@ -24,6 +24,49 @@ def specimen(role):
     }]}}}
 
 class Retention(unittest.TestCase):
+    def run_candidate_policy(self, projection, env):
+        result = subprocess.run(["bash", "-euc", """
+source "$1"
+staging_delivery_auth_assert_gateway_candidate "$2" /dev/stdin
+""", "test", str(SCRIPT), json.dumps(projection)],
+            input=json.dumps({"TaskTemplate": {"ContainerSpec": {"Env": env}}}),
+            capture_output=True, text=True)
+        return result.returncode
+
+    def test_armed_candidate_requires_active_auth(self):
+        for env in (["FeatureFlags__UseUpstream__Delivery=true"],
+                    ["FEATUREFLAGS__USEUPSTREAM__DELIVERY=TRUE"],
+                    ["Services__Delivery__BaseUrl=http://delivery:8080"],
+                    ["Services:Delivery:BaseUrl=http://delivery:8080"],
+                    ["FeatureFlags__UseUpstream__Delivery=false",
+                     "Services__Delivery__BaseUrl=http://delivery:8080"]):
+            with self.subTest(env=env):
+                self.assertNotEqual(self.run_candidate_policy({"active": False}, env), 0)
+                self.assertEqual(self.run_candidate_policy({"active": True}, env), 0)
+
+    def test_unarmed_candidate_keeps_pre_activation_posture(self):
+        for env in ([], ["FeatureFlags__UseUpstream__Delivery=false"],
+                    ["Services__Delivery__BaseUrl=   "]):
+            self.assertEqual(self.run_candidate_policy({"active": False}, env), 0)
+
+    def test_workflow_readiness_uses_verified_delivery_configuration(self):
+        workflow = (ROOT / ".github/workflows/jeeb-staging-deploy.yml").read_text()
+        query = workflow.split("delivery_probe=$(jq -er '", 1)[1].split("' \"$spec\")", 1)[0]
+        cases = [([], "none"),
+                 (["FeatureFlags__UseUpstream__Delivery=true"], "catalog"),
+                 (["FEATUREFLAGS__USEUPSTREAM__DELIVERY=TRUE"], "catalog"),
+                 (["Services__Delivery__BaseUrl=http://delivery:8080"], "credential"),
+                 (["FeatureFlags__UseUpstream__Delivery=false",
+                   "Services__Delivery__BaseUrl=http://delivery:8080"], "credential"),
+                 (["FeatureFlags__UseUpstream__Delivery=false",
+                   "Services__Delivery__BaseUrl=   "], "none")]
+        for env, expected in cases:
+            with self.subTest(env=env):
+                result = subprocess.run(["jq", "-er", query],
+                    input=json.dumps({"TaskTemplate": {"ContainerSpec": {"Env": env}}}),
+                    text=True, capture_output=True, check=True)
+                self.assertEqual(result.stdout.strip(), expected)
+
     def run_policy(self, role, before, after=None, metadata=None):
         if metadata is None:
             metadata = [{"ID": "dedicatedid", "Spec": {"Name": NAME, "Labels": {
@@ -137,6 +180,11 @@ staging_delivery_auth_assert_retained "$before" "$2" "$AUTH_FIXTURE/after"
         self.assertIn("cat scripts/staging-delivery-auth-retention.sh", workflow)
         self.assertIn("delivery_auth_before=$(staging_delivery_auth_snapshot", workflow)
         self.assertIn('staging_delivery_auth_assert_retained "$delivery_auth_before"', workflow)
+        candidate_gate = 'staging_delivery_auth_assert_gateway_candidate "$delivery_auth_before" "$candidate"'
+        self.assertIn(candidate_gate, workflow)
+        self.assertLess(workflow.index(candidate_gate), workflow.index('cat "$candidate"'))
+        self.assertIn('"$published" "$health" "$delivery_probe"', workflow)
+        self.assertIn('verify_candidate_readiness "$observed_spec"', workflow)
         self.assertNotIn("remove_secret_target delivery_service_token", workflow)
         self.assertNotIn("for stale_env in DELIVERY_SERVICE_TOKEN_FILE", workflow)
         if 'cat "$candidate"' in workflow:

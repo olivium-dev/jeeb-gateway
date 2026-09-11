@@ -9,6 +9,16 @@ namespace JeebGateway.IntegrationTests.Services;
 public sealed class DeliveryActivationProbeTests
 {
     [Theory]
+    [InlineData("Staging")]
+    [InlineData("Production")]
+    public void ExactDeployedEnvironmentsSupportEveryProofOperation(string environment)
+    {
+        foreach (var mode in new[] { "credential", "wire", "missing", "invalid", "duplicate" })
+            DeliveryActivationProbe.ValidateInvocation(["--staging-delivery-auth-probe", mode],
+                environment, DeliveryActivationProbe.MountedPath, DeliveryActivationProbe.BaseUrl);
+    }
+
+    [Theory]
     [InlineData("credential", 0)]
     [InlineData("wire", 1)]
     public async Task ProofUsesMountedCredentialAndOnlyFixedReadiness(string mode, int requests)
@@ -41,9 +51,16 @@ public sealed class DeliveryActivationProbeTests
     [Theory]
     [InlineData("bad", "Production", "/run/secrets/delivery_service_token", "http://192.168.2.20:10055")]
     [InlineData("wire", "Development", "/run/secrets/delivery_service_token", "http://192.168.2.20:10055")]
+    [InlineData("wire", "Testing", "/run/secrets/delivery_service_token", "http://192.168.2.20:10055")]
+    [InlineData("wire", "Preview", "/run/secrets/delivery_service_token", "http://192.168.2.20:10055")]
+    [InlineData("wire", "staging", "/run/secrets/delivery_service_token", "http://192.168.2.20:10055")]
+    [InlineData("wire", "", "/run/secrets/delivery_service_token", "http://192.168.2.20:10055")]
+    [InlineData("wire", null, "/run/secrets/delivery_service_token", "http://192.168.2.20:10055")]
     [InlineData("wire", "Production", "/tmp/other", "http://192.168.2.20:10055")]
     [InlineData("wire", "Production", "/run/secrets/delivery_service_token", "http://elsewhere")]
-    public void InvalidInvocationIsRejected(string mode, string environment, string path, string url)
+    [InlineData("wire", "Staging", "/tmp/other", "http://192.168.2.20:10055")]
+    [InlineData("wire", "Staging", "/run/secrets/delivery_service_token", "http://elsewhere")]
+    public void InvalidInvocationIsRejected(string mode, string? environment, string path, string url)
     {
         Assert.Throws<InvalidOperationException>(() => DeliveryActivationProbe.ValidateInvocation(
             ["--staging-delivery-auth-probe", mode], environment, path, url));
