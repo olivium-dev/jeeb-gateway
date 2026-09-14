@@ -113,6 +113,35 @@ public sealed class FirebaseTokenDiagnosticsSourceContractTests
         Assert.DoesNotContain("Auth__FirebaseTokenDiagnostics__Enabled=true", production, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void Manual_msi_activation_is_development_only_and_cannot_target_user_management()
+    {
+        var repositoryRoot = FindRepositoryRoot();
+        var workflow = File.ReadAllText(Path.Combine(
+            repositoryRoot,
+            ".github",
+            "workflows",
+            "jeeb-msi-gateway-firebase-diagnostics-activate.yml"));
+        var helper = File.ReadAllText(Path.Combine(
+            repositoryRoot,
+            "scripts",
+            "jeeb-msi-gateway-firebase-diagnostics-admin.py"));
+
+        Assert.Contains("workflow_dispatch:", workflow, StringComparison.Ordinal);
+        Assert.Contains("environment: development-msi-gateway-signing", workflow, StringComparison.Ordinal);
+        Assert.Contains("github.ref == 'refs/heads/main'", workflow, StringComparison.Ordinal);
+        Assert.Contains("github.ref_protected", workflow, StringComparison.Ordinal);
+        Assert.Contains("JEEB-MSI-GATEWAY-ARTIFACT-V1-RSA3072-SHA256-", workflow, StringComparison.Ordinal);
+        Assert.Contains("Auth__FirebaseTokenDiagnostics__Enabled=true", helper, StringComparison.Ordinal);
+        Assert.Contains("Auth__FirebaseTokenDiagnostics__Environment=development", helper, StringComparison.Ordinal);
+        Assert.Contains("Auth__FirebaseTokenDiagnostics__ProjectId=jeeb-development-msi", helper, StringComparison.Ordinal);
+        Assert.DoesNotContain("repository_dispatch", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("schedule:", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("environment: production", workflow, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("jeeb-user-management.service", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("jeeb-user-management.service", helper, StringComparison.Ordinal);
+    }
+
     private static string FindRepositoryRoot()
     {
         var current = new DirectoryInfo(AppContext.BaseDirectory);

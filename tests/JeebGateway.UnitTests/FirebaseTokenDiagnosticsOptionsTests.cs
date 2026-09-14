@@ -8,17 +8,20 @@ namespace JeebGateway.UnitTests;
 public sealed class FirebaseTokenDiagnosticsOptionsTests
 {
     [Theory]
-    [InlineData("Development", "development", "jeeb-development-msi", true)]
-    [InlineData("Staging", "staging", "jeeb-5a293", true)]
-    [InlineData("Production", "staging", "jeeb-5a293", false)]
-    [InlineData("Development", "development", "jeeb-5a293", false)]
-    [InlineData("Staging", "staging", "jeeb-development-msi", false)]
-    [InlineData("Development", "staging", "jeeb-5a293", false)]
-    [InlineData("Testing", "development", "jeeb-development-msi", false)]
+    [InlineData("Development", "development", "jeeb-development-msi", "workstation", true)]
+    [InlineData("Staging", "staging", "jeeb-5a293", "staging-01", true)]
+    [InlineData("Production", "staging", "jeeb-5a293", "ouday-GT70-2OC-2OD", false)]
+    [InlineData("Production", "development", "jeeb-development-msi", "production-01", false)]
+    [InlineData("Production", "development", "jeeb-development-msi", "ouday-GT70-2OC-2OD", true)]
+    [InlineData("Development", "development", "jeeb-5a293", "workstation", false)]
+    [InlineData("Staging", "staging", "jeeb-development-msi", "staging-01", false)]
+    [InlineData("Development", "staging", "jeeb-5a293", "workstation", false)]
+    [InlineData("Testing", "development", "jeeb-development-msi", "test-host", false)]
     public void Allowlist_requires_exact_host_environment_profile_and_project(
         string hostEnvironment,
         string configuredEnvironment,
         string projectId,
+        string machineName,
         bool expected)
     {
         var options = new FirebaseTokenDiagnosticsOptions
@@ -30,7 +33,10 @@ public sealed class FirebaseTokenDiagnosticsOptionsTests
 
         Assert.Equal(
             expected,
-            FirebaseTokenDiagnosticsOptions.IsAllowed(new TestHostEnvironment(hostEnvironment), options));
+            FirebaseTokenDiagnosticsOptions.IsAllowed(
+                new TestHostEnvironment(hostEnvironment),
+                options,
+                machineName));
     }
 
     [Fact]

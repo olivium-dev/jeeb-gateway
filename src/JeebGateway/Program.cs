@@ -1079,7 +1079,7 @@ builder.Services
             || JeebGateway.Auth.FirebaseDiagnostics.FirebaseTokenDiagnosticsOptions.IsAllowed(
                 builder.Environment,
                 options),
-        "Auth:FirebaseTokenDiagnostics may be enabled only for the exact development or staging environment/project pair.")
+        "Auth:FirebaseTokenDiagnostics may be enabled only for the exact development MSI identity or staging environment/project pair.")
     .Validate(
         options => !options.Enabled
             || Uri.TryCreate(
