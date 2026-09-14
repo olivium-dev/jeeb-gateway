@@ -28,6 +28,7 @@ jobs:
           bash scripts/test-validate-firebase-service-account.sh
           python3 scripts/test-smoke-jeeb-firebase-token-exchange.py
           python3 -I -B scripts/test_mint_development_firebase_diagnostic_probe.py
+          python3 -I -B scripts/test_provision_development_auth_probe.py
           bash scripts/test-chat-b-activation-preflight.sh
           bash scripts/test-staging-chat-flag-resolution.sh
           bash scripts/check-remote-heredoc-variable-forwarding.sh
