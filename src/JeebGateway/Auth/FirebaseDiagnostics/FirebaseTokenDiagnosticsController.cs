@@ -66,7 +66,7 @@ public sealed class FirebaseTokenDiagnosticsController(
         {
             return StatusCode(StatusCodes.Status503ServiceUnavailable, new { verified = false });
         }
-        catch (TaskCanceledException)
+        catch (OperationCanceledException)
         {
             return StatusCode(StatusCodes.Status503ServiceUnavailable, new { verified = false });
         }

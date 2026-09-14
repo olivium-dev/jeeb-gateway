@@ -147,7 +147,7 @@ public sealed class FirebaseTokenDiagnosticsControllerTests
         var controller = CreateController(
             new StubClient(new(FirebaseTokenDiagnosticOutcome.Verified))
             {
-                Exception = new TaskCanceledException("deadline detail"),
+                Exception = new OperationCanceledException("deadline detail"),
             },
             Environments.Staging,
             "staging",
