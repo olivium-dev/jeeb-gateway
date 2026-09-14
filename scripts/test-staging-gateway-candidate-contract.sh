@@ -7,13 +7,16 @@ workflow="$repository_root/.github/workflows/jeeb-staging-deploy.yml"
 test_root=$(mktemp -d)
 trap 'rm -rf -- "$test_root"' EXIT
 workflow_devtool_builder="$test_root/workflow-devtool-builder.jq"
+workflow_devtool_validator="$test_root/workflow-devtool-validator.sh"
 
 # The devtool path constructs its candidate with a surgical inline patch instead
 # of the normal desired_env list. Keep that builder aligned with this contract;
 # run 34842595114 proved add_env alone does not reach this branch.
-python3 - "$workflow" "$workflow_devtool_builder" <<'PY'
+python3 - "$workflow" "$workflow_devtool_builder" "$workflow_devtool_validator" <<'PY'
 from pathlib import Path
+import re
 import sys
+import textwrap
 
 source = Path(sys.argv[1]).read_text()
 start = source.index("# This mode is a surgical incumbent patch.")
@@ -35,6 +38,33 @@ for normalized, row in expected.items():
 filter_start = source.index("              def env_key:", start)
 filter_end = source.index("\n            ' \"$current_spec\" > \"$candidate\"", filter_start)
 Path(sys.argv[2]).write_text(source[filter_start:filter_end] + "\n")
+
+# Execute the exact runner-side devtool validation branch below. Keep its inputs
+# constrained to variables that the deploy step initializes in runner scope;
+# run 34844520549 failed because it referenced a remote-only temp-file variable.
+runner_start = source.index(
+    '          if [ "$DEPLOYMENT_MODE" = devtool-reassert ]; then',
+    source.index("          candidate_contract()"),
+)
+runner_end = source.index(
+    '          if [ "$DEPLOYMENT_MODE" = security-cutover ]; then', runner_start
+)
+runner_block = textwrap.dedent(source[runner_start:runner_end])
+references = set(re.findall(r'\$(?:\{)?([A-Za-z_][A-Za-z0-9_]*)', runner_block))
+expected_references = {"DEPLOYMENT_MODE", "IMAGE", "incumbent_spec", "candidate_spec"}
+if references != expected_references:
+    raise SystemExit(
+        f"unexpected devtool runner validator inputs: {sorted(references)}"
+    )
+deploy_step_start = source.index("      - name: Deploy Swarm service")
+runner_prefix = source[deploy_step_start:runner_start]
+for variable in ("DEPLOYMENT_MODE", "IMAGE"):
+    if not re.search(rf"^          {variable}: .+$", runner_prefix, re.MULTILINE):
+        raise SystemExit(f"devtool runner input is not initialized by step env: {variable}")
+for variable in ("incumbent_spec", "candidate_spec"):
+    if not re.search(rf'^            {variable}="\$secret_stage/[^\"]+"$', runner_prefix, re.MULTILINE):
+        raise SystemExit(f"devtool runner input is not initialized locally: {variable}")
+Path(sys.argv[3]).write_text("set -euo pipefail\n" + runner_block)
 PY
 candidate="$test_root/candidate.json"
 mutant="$test_root/mutant.json"
@@ -341,7 +371,7 @@ jq '
       "ServiceAuth__Enabled=false",
       "ServiceAuth__Caller=incumbent-caller"
     ]
-  | .TaskTemplate.ContainerSpec.Secrets = [{
+  | .TaskTemplate.ContainerSpec.Secrets += [{
       SecretID:"incumbent-secret",SecretName:"incumbent-service-auth",
       File:{Name:"jeeb_gateway_service_auth",UID:"65532",GID:"65532",Mode:256}
     }]
@@ -378,7 +408,6 @@ for workflow_incumbent in "$workflow_missing_incumbent" "$devtool_incumbent"; do
   ' "$workflow_candidate" >/dev/null
   validate "$workflow_candidate" devtool-reassert "$workflow_incumbent"
   jq -e --arg image "$image" --slurpfile incumbent "$workflow_incumbent" \
-    --slurpfile firebase_secret "$firebase_secret" \
     -f "$repository_root/scripts/staging-gateway-devtool-reassert-candidate.jq" \
     "$workflow_candidate" >/dev/null
 done
@@ -430,9 +459,33 @@ jq --arg image "$image" --slurpfile firebase_secret "$firebase_secret" '
 ' "$devtool_incumbent" > "$devtool_candidate"
 validate "$devtool_candidate" devtool-reassert "$devtool_incumbent"
 jq -e --arg image "$image" --slurpfile incumbent "$devtool_incumbent" \
-  --slurpfile firebase_secret "$firebase_secret" \
   -f "$repository_root/scripts/staging-gateway-devtool-reassert-candidate.jq" \
   "$devtool_candidate" >/dev/null
+(
+  cd "$repository_root"
+  DEPLOYMENT_MODE=devtool-reassert IMAGE="$image" \
+    incumbent_spec="$devtool_incumbent" candidate_spec="$devtool_candidate" \
+    bash "$workflow_devtool_validator"
+)
+
+jq '(.TaskTemplate.ContainerSpec.Secrets[] | select(.File.Name == "firebase_admin_json")
+  | .SecretID) = "replacementid"' "$devtool_candidate" > "$mutant"
+if jq -e --arg image "$image" --slurpfile incumbent "$devtool_incumbent" \
+  -f "$repository_root/scripts/staging-gateway-devtool-reassert-candidate.jq" \
+  "$mutant" >/dev/null; then
+  echo 'devtool-reassert accepted replacement of the incumbent Firebase secret' >&2
+  exit 1
+fi
+jq '.TaskTemplate.ContainerSpec.Secrets |=
+  map(select(.File.Name != "firebase_admin_json"))' \
+  "$devtool_incumbent" > "$test_root/devtool-incumbent-without-firebase.json"
+if jq -e --arg image "$image" \
+  --slurpfile incumbent "$test_root/devtool-incumbent-without-firebase.json" \
+  -f "$repository_root/scripts/staging-gateway-devtool-reassert-candidate.jq" \
+  "$devtool_candidate" >/dev/null; then
+  echo 'devtool-reassert accepted an incumbent without exactly one Firebase secret' >&2
+  exit 1
+fi
 
 jq '.TaskTemplate.ContainerSpec.Env += ["ForwardedHeaders__KnownProxies__0=10.0.0.2"]' \
   "$devtool_incumbent" > "$test_root/devtool-unsafe-incumbent.json"
@@ -460,7 +513,6 @@ for unsafe_filter in \
   '.RollbackConfig.MaxFailureRatio = 0.75'; do
   jq "$unsafe_filter" "$devtool_candidate" > "$mutant"
   if jq -e --arg image "$image" --slurpfile incumbent "$devtool_incumbent" \
-    --slurpfile firebase_secret "$firebase_secret" \
     -f "$repository_root/scripts/staging-gateway-devtool-reassert-candidate.jq" \
     "$mutant" >/dev/null; then
     echo "devtool-reassert accepted unrelated incumbent drift: $unsafe_filter" >&2
@@ -471,7 +523,6 @@ done
 jq '.TaskTemplate.ContainerSpec.Env += ["SUPERLOGIN__OpenMode=true"]' \
   "$devtool_incumbent" > "$mutant"
 if jq -e --arg image "$image" --slurpfile incumbent "$mutant" \
-  --slurpfile firebase_secret "$firebase_secret" \
   -f "$repository_root/scripts/staging-gateway-devtool-reassert-candidate.jq" \
   "$devtool_candidate" >/dev/null; then
   echo 'devtool-reassert accepted duplicate target rows in the incumbent' >&2
@@ -529,4 +580,4 @@ case "$(explain "$mutant")" in
   *) echo 'explain did not fall back to the structural-clause message' >&2; exit 1 ;;
 esac
 
-echo 'staging gateway candidate semantic contract tests: PASS (mode flags preserved; resolved chat state asserted in both directions; explain names the failing expectation; exact Dev Tool delta with 19 negative controls)'
+echo 'staging gateway candidate semantic contract tests: PASS (mode flags preserved; resolved chat state asserted in both directions; explain names the failing expectation; exact Dev Tool delta with 21 negative controls)'
