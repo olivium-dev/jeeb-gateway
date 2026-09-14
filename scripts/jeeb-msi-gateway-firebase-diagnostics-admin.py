@@ -520,10 +520,61 @@ def wait_readiness(baseline, attempts=30):
     raise Rejected("readiness_failed")
 
 
-def diagnostic_probe():
+def corrupt_token_signature(id_token):
+    parts = id_token.split(".")
+    require(
+        len(parts) == 3
+        and all(re.fullmatch(r"[A-Za-z0-9_-]+", part) for part in parts),
+        "probe_token_shape_invalid",
+    )
+    try:
+        signature = bytearray(
+            base64.urlsafe_b64decode(parts[2] + "=" * (-len(parts[2]) % 4))
+        )
+    except Exception:
+        raise Rejected("probe_token_shape_invalid") from None
+    require(signature, "probe_token_shape_invalid")
+    signature[0] ^= 1
+    corrupted = base64.urlsafe_b64encode(bytes(signature)).rstrip(b"=").decode()
+    require(corrupted != parts[2], "probe_token_signature_unchanged")
+    return ".".join((parts[0], parts[1], corrupted))
+
+
+def structured_invalid_signature_token():
+    def encode(value):
+        raw = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+        return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+    subject = "gateway-msi-diagnostic-probe"
+    return ".".join(
+        (
+            encode({"alg": "RS256", "kid": "0" * 40, "typ": "JWT"}),
+            encode(
+                {
+                    "aud": PROJECT,
+                    "auth_time": 0,
+                    "exp": 4102444800,
+                    "firebase": {"identities": {}, "sign_in_provider": "custom"},
+                    "iat": 0,
+                    "iss": f"https://securetoken.google.com/{PROJECT}",
+                    "sub": subject,
+                    "user_id": subject,
+                }
+            ),
+            base64.urlsafe_b64encode(bytes(256)).rstrip(b"=").decode(),
+        )
+    )
+
+
+def diagnostic_probe(id_token=None):
+    invalid_token = (
+        corrupt_token_signature(id_token)
+        if id_token is not None
+        else structured_invalid_signature_token()
+    )
     raw = json.dumps(
         {
-            "idToken": "invalid.jwt.diagnostic-probe",
+            "idToken": invalid_token,
             "expectedProjectId": PROJECT,
             "expectedSubject": "gateway-msi-diagnostic-probe",
         },
@@ -1524,7 +1575,7 @@ def activate(probe_raw):
         verify_rollback_snapshot()
         host_preflight(target, receipt["readinessBaseline"])
         successful_diagnostic_probe(probe)
-        diagnostic_probe()
+        diagnostic_probe(probe["idToken"])
         return activated_result(receipt)
     if rollback_runtime:
         receipt, target = load_receipt()
@@ -1552,7 +1603,7 @@ def activate(probe_raw):
         wait_readiness(receipt["readinessBaseline"])
         host_preflight(target, receipt["readinessBaseline"])
         successful_diagnostic_probe(probe)
-        diagnostic_probe()
+        diagnostic_probe(probe["idToken"])
         return activated_result(receipt)
     except Exception:
         rollback_ok = False

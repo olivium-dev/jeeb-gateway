@@ -21,7 +21,7 @@ spec.loader.exec_module(subject)
 
 def probe(**changes):
     value = {
-        "idToken": "header.payload.signature",
+        "idToken": "aGVhZGVy.cGF5bG9hZA.c2lnbmF0dXJl",
         "expectedSubject": "firebase-uid",
         "expectedProvider": "google.com",
     }
@@ -158,6 +158,7 @@ class MsiGatewayFirebaseDiagnosticsActivationTests(unittest.TestCase):
             "provider": "google.com",
             "subjectSha256": hashlib.sha256(b"firebase-uid").hexdigest(),
         }
+        valid_token = subject.validate_probe(probe())["idToken"]
         with patch.object(
             subject,
             "health_request",
@@ -183,13 +184,43 @@ class MsiGatewayFirebaseDiagnosticsActivationTests(unittest.TestCase):
                 (401, b'{"verified":false}'),
             ],
         ) as requested:
-            subject.diagnostic_probe()
+            subject.diagnostic_probe(valid_token)
         self.assertEqual(
             [item.args[0] for item in requested.call_args_list],
             [
                 "/v1/auth/diagnostics/firebase-token",
                 "/auth/diagnostics/firebase-token",
             ],
+        )
+        for item in requested.call_args_list:
+            sent = json.loads(item.args[2])["idToken"]
+            valid_parts = valid_token.split(".")
+            sent_parts = sent.split(".")
+            self.assertEqual(sent_parts[:2], valid_parts[:2])
+            self.assertNotEqual(sent_parts[2], valid_parts[2])
+            self.assertEqual(
+                len(base64.urlsafe_b64decode(sent_parts[2] + "=" * (-len(sent_parts[2]) % 4))),
+                len(base64.urlsafe_b64decode(valid_parts[2] + "=" * (-len(valid_parts[2]) % 4))),
+            )
+
+    def test_reconciliation_probe_is_structurally_valid_with_invalid_signature(self):
+        token = subject.structured_invalid_signature_token()
+        header, claims, signature = token.split(".")
+        decoded_header = json.loads(
+            base64.urlsafe_b64decode(header + "=" * (-len(header) % 4))
+        )
+        decoded_claims = json.loads(
+            base64.urlsafe_b64decode(claims + "=" * (-len(claims) % 4))
+        )
+        self.assertEqual(decoded_header["alg"], "RS256")
+        self.assertEqual(decoded_claims["aud"], subject.PROJECT)
+        self.assertEqual(
+            decoded_claims["iss"],
+            f"https://securetoken.google.com/{subject.PROJECT}",
+        )
+        self.assertEqual(
+            base64.urlsafe_b64decode(signature + "=" * (-len(signature) % 4)),
+            bytes(256),
         )
 
     def test_dropin_changes_only_runtime_and_exact_diagnostic_configuration(self):
