@@ -154,6 +154,9 @@ AdminOidc:RoleMappings                               setting -
 AdminOidc:Scopes                                     setting -
 AdminOidc:StateProtectionKey                         setting -
 AdminOidc:TokenEndpoint                              setting -
+Auth:FirebaseTokenDiagnostics:Enabled                setting - # non-production verifier route; exact environment/project/host allowlist is enforced at startup and request time
+Auth:FirebaseTokenDiagnostics:Environment            setting - # non-secret exact diagnostics environment identity
+Auth:FirebaseTokenDiagnostics:ProjectId              setting - # non-secret exact Firebase project identity
 Auth:Otp:ApplicationId                               setting -
 Auth:Otp:Phone:AllowedRegion                         setting -
 Auth:Otp:Phone:EnforceRegion                         setting -

@@ -85,6 +85,9 @@ def expected_environment:
       else {} end)
   end)
   + {
+    "auth__firebasetokendiagnostics__enabled": "true",
+    "auth__firebasetokendiagnostics__environment": "staging",
+    "auth__firebasetokendiagnostics__projectid": "jeeb-5a293",
     "jeebfirebasecontract__schemaversion": "1",
     "jeebfirebasecontract__projectid": "jeeb-5a293",
     "jeebfirebasecontract__projectnumber": "1051234312170",

@@ -1,0 +1,287 @@
+name: Activate MSI gateway Firebase diagnostics
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: jeeb-msi-service-deploy
+  cancel-in-progress: false
+
+jobs:
+  activate:
+    if: github.event_name == 'workflow_dispatch' && github.repository == 'olivium-dev/jeeb-gateway' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment: development-msi-gateway-signing
+    env:
+      MSI_SSH_HOST: ssh-msi.olivium.space
+      MSI_SSH_USER: msi-access
+      CLOUDFLARED_SHA256: fcfb02b575a52ca1af2e3267af4e1517bcdeb30ac48c8340c69abaed3c0576ad2
+    steps:
+      - name: Require designated owner and protected main
+        env:
+          REQUESTING_ACTOR: ${{ github.actor }}
+          TRIGGERING_ACTOR: ${{ github.triggering_actor }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REF_PROTECTED: ${{ github.ref_protected }}
+        run: |
+          set -euo pipefail
+          [ "$REQUESTING_ACTOR" = oudaykhaled ]
+          [ "$TRIGGERING_ACTOR" = oudaykhaled ]
+          [ "$GITHUB_REPOSITORY" = olivium-dev/jeeb-gateway ]
+          [ "$DEFAULT_BRANCH" = main ]
+          [ "$GITHUB_REF" = refs/heads/main ]
+          [ "$REF_PROTECTED" = true ]
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup exact .NET SDK
+        uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9 # v4
+        with:
+          dotnet-version: "8.0.404"
+
+      - name: Require current protected source and local contracts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [ "$(gh api repos/olivium-dev/jeeb-gateway/branches/main --jq '.protected')" = true ]
+          [ "$(gh api repos/olivium-dev/jeeb-gateway/branches/main --jq '.commit.sha')" = "$GITHUB_SHA" ]
+          [ "$GITHUB_SHA" = "$(git rev-parse HEAD)" ]
+          python3 -I -B -m unittest discover -s scripts \
+            -p 'test_msi_gateway_firebase_diagnostics_activation.py' -q
+          dotnet restore tests/JeebGateway.UnitTests/JeebGateway.UnitTests.csproj
+          dotnet test tests/JeebGateway.UnitTests/JeebGateway.UnitTests.csproj \
+            -c Release --no-restore --filter 'FullyQualifiedName~FirebaseTokenDiagnostics'
+          git diff --exit-code
+
+      - name: Build immutable merged-source runtime archive
+        id: artifact
+        run: |
+          set -euo pipefail
+          publish="$RUNNER_TEMP/msi-gateway-publish"
+          package="$RUNNER_TEMP/msi-gateway-package"
+          archive="$RUNNER_TEMP/jeeb-msi-gateway-firebase-diagnostics.tar.gz"
+          rm -rf "$publish" "$package" "$archive"
+          dotnet restore src/JeebGateway/JeebGateway.csproj --locked-mode --runtime linux-x64
+          dotnet publish src/JeebGateway/JeebGateway.csproj -c Release \
+            --runtime linux-x64 --self-contained true --no-restore \
+            -p:UseAppHost=true --output "$publish"
+          test -x "$publish/JeebGateway"
+          test -f "$publish/JeebGateway.dll"
+          test -f "$publish/JeebGateway.runtimeconfig.json"
+          mkdir -p "$package/payload"
+          cp -a "$publish/." "$package/payload/"
+          printf '%s\n' "$GITHUB_SHA" > "$package/payload/.source-sha"
+          cp src/JeebGateway/packages.lock.json "$package/payload/packages.lock.json"
+          source_tree="$(git rev-parse 'HEAD^{tree}')"
+          python3 - "$package/manifest.json" "$GITHUB_SHA" "$source_tree" <<'PY'
+          import json, pathlib, sys
+          path, commit, tree = sys.argv[1:]
+          value = {
+              "schema": 1,
+              "repository": "olivium-dev/jeeb-gateway",
+              "commitSha": commit,
+              "sourceTree": tree,
+              "runtime": "linux-x64",
+          }
+          pathlib.Path(path).write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+          PY
+          tar --create --gzip --file "$archive" --directory "$package" \
+            --sort=name --format=posix --pax-option=delete=atime,delete=ctime \
+            --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
+            manifest.json payload
+          archive_sha="$(sha256sum "$archive" | awk '{print $1}')"
+          printf 'archive=%s\narchive_sha=%s\nsource_tree=%s\n' \
+            "$archive" "$archive_sha" "$source_tree" >> "$GITHUB_OUTPUT"
+
+      - name: Require protected MSI transport
+        env:
+          MSI_SSH_PASSWORD: ${{ secrets.MSI_SSH_PASSWORD }}
+          MSI_SSH_KNOWN_HOSTS: ${{ secrets.MSI_SSH_KNOWN_HOSTS }}
+          DIAGNOSTIC_PROBE: ${{ secrets.JEEB_DEVELOPMENT_FIREBASE_DIAGNOSTIC_PROBE_JSON }}
+          ARTIFACT_SIGNING_KEY: ${{ secrets.JEEB_MSI_GATEWAY_ARTIFACT_SIGNING_KEY_PEM }}
+        run: |
+          set -euo pipefail
+          : "${MSI_SSH_PASSWORD:?MSI_SSH_PASSWORD is required}"
+          : "${MSI_SSH_KNOWN_HOSTS:?MSI_SSH_KNOWN_HOSTS is required}"
+          : "${DIAGNOSTIC_PROBE:?fresh Firebase diagnostic probe JSON is required}"
+          : "${ARTIFACT_SIGNING_KEY:?MSI gateway artifact signing key is required}"
+
+      - name: Install pinned cloudflared and strict password SSH
+        env:
+          MSI_SSH_PASSWORD: ${{ secrets.MSI_SSH_PASSWORD }}
+          MSI_SSH_KNOWN_HOSTS: ${{ secrets.MSI_SSH_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          cloudflared_path="$RUNNER_TEMP/cloudflared"
+          bin_dir="$RUNNER_TEMP/bin"
+          curl --proto '=https' --tlsv1.2 --fail --silent --show-error --location \
+            --output "$cloudflared_path" \
+            "https://github.com/cloudflare/cloudflared/releases/download/2026.8.2/cloudflared-linux-amd64"
+          printf '%s  %s\n' "$CLOUDFLARED_SHA256" "$cloudflared_path" |
+            sha256sum --check --strict
+          install -d -m 0755 "$bin_dir"
+          install -m 0755 "$cloudflared_path" "$bin_dir/cloudflared"
+          printf '%s\n' "$bin_dir" >> "$GITHUB_PATH"
+
+          install -d -m 0700 "$HOME/.ssh"
+          printf '%s\n' "$MSI_SSH_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          chmod 0600 "$HOME/.ssh/known_hosts"
+          ssh-keygen -F "$MSI_SSH_HOST" -f "$HOME/.ssh/known_hosts" >/dev/null
+          {
+            printf '%s\n' 'Host msi-gateway-firebase-diagnostics'
+            printf '%s\n' "  HostName $MSI_SSH_HOST"
+            printf '%s\n' "  User $MSI_SSH_USER"
+            printf '%s\n' '  PreferredAuthentications password'
+            printf '%s\n' '  PubkeyAuthentication no'
+            printf '%s\n' '  KbdInteractiveAuthentication no'
+            printf '%s\n' '  StrictHostKeyChecking yes'
+            printf '%s\n' '  UserKnownHostsFile ~/.ssh/known_hosts'
+            printf '%s\n' '  ProxyCommand cloudflared access ssh --hostname %h'
+            printf '%s\n' '  ConnectTimeout 20'
+            printf '%s\n' '  ServerAliveInterval 15'
+            printf '%s\n' '  ServerAliveCountMax 2'
+          } > "$HOME/.ssh/config"
+          chmod 0600 "$HOME/.ssh/config"
+
+          askpass_path="$RUNNER_TEMP/msi-ssh-askpass"
+          # shellcheck disable=SC2016
+          printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$MSI_SSH_PASSWORD"' > "$askpass_path"
+          chmod 0700 "$askpass_path"
+          printf 'SSH_ASKPASS=%s\n' "$askpass_path" >> "$GITHUB_ENV"
+          printf '%s\n' 'SSH_ASKPASS_REQUIRE=force' 'DISPLAY=:0' >> "$GITHUB_ENV"
+
+      - name: Require exact installed helper and reconcile predecessor state
+        id: preflight
+        env:
+          MSI_SSH_PASSWORD: ${{ secrets.MSI_SSH_PASSWORD }}
+          EXPECTED_COMMIT: ${{ github.sha }}
+          EXPECTED_ARCHIVE_SHA: ${{ steps.artifact.outputs.archive_sha }}
+        run: |
+          set -euo pipefail
+          expected_sha="$(sha256sum scripts/jeeb-msi-gateway-firebase-diagnostics-admin.py | awk '{print $1}')"
+          preflight="$(setsid --wait ssh msi-gateway-firebase-diagnostics \
+            '/usr/bin/sudo -n /usr/local/sbin/jeeb-msi-gateway-firebase-diagnostics-admin preflight')"
+          PREFLIGHT="$preflight" EXPECTED_HELPER_SHA="$expected_sha" python3 - <<'PY'
+          import json, os, re, time
+          value = json.loads(os.environ["PREFLIGHT"])
+          assert value.get("status") == "preflight_pass"
+          assert value.get("unit") == "jeeb-gateway.service"
+          assert value.get("sha256") == os.environ["EXPECTED_HELPER_SHA"]
+          assert value.get("state") in {"clean", "staged", "active"}
+          if value["state"] == "clean":
+              assert value["runtime"] in {"predecessor", "rollback"}
+              assert set(value) == {"status", "unit", "runtime", "state", "nonce", "binding", "expiresAt", "sha256"}
+              assert re.fullmatch(r"[0-9a-f]{64}", value["nonce"])
+              assert re.fullmatch(r"predecessor-v1:(?:[0-9a-f]{64}:){3}[0-9a-f]{64}", value["binding"])
+              assert int(time.time()) < value["expiresAt"] <= int(time.time()) + 600
+              outputs = {"state": "clean", "nonce": value["nonce"], "binding": value["binding"]}
+          else:
+              assert set(value) == {"status", "unit", "runtime", "state", "commitSha", "archiveSha256", "sha256"}
+              if value["state"] == "active":
+                  assert value["runtime"] == "candidate"
+              else:
+                  assert value["runtime"] in {"predecessor", "rollback"}
+              assert value["commitSha"] == os.environ["EXPECTED_COMMIT"]
+              assert value["archiveSha256"] == os.environ["EXPECTED_ARCHIVE_SHA"]
+              outputs = {"state": value["state"], "nonce": "", "binding": ""}
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+              for key, item in outputs.items():
+                  output.write(f"{key}={item}\n")
+          PY
+
+      - name: Stage exact immutable runtime
+        if: steps.preflight.outputs.state == 'clean'
+        env:
+          MSI_SSH_PASSWORD: ${{ secrets.MSI_SSH_PASSWORD }}
+          ARTIFACT_SIGNING_KEY: ${{ secrets.JEEB_MSI_GATEWAY_ARTIFACT_SIGNING_KEY_PEM }}
+          ARCHIVE: ${{ steps.artifact.outputs.archive }}
+          ARCHIVE_SHA: ${{ steps.artifact.outputs.archive_sha }}
+          SOURCE_TREE: ${{ steps.artifact.outputs.source_tree }}
+          NONCE: ${{ steps.preflight.outputs.nonce }}
+          PREDECESSOR_BINDING: ${{ steps.preflight.outputs.binding }}
+        run: |
+          set -euo pipefail
+          signing_key="$RUNNER_TEMP/msi-gateway-artifact-signing-key.pem"
+          signature="$RUNNER_TEMP/msi-gateway-artifact.sig"
+          signed_payload="$RUNNER_TEMP/msi-gateway-artifact.signed-payload"
+          trap 'rm -f "$signing_key" "$signature" "$signed_payload"' EXIT
+          umask 077
+          printf '%s' "$ARTIFACT_SIGNING_KEY" > "$signing_key"
+          unset ARTIFACT_SIGNING_KEY
+          {
+            printf '%s\n' 'JEEB-MSI-GATEWAY-ARTIFACT-V1-RSA3072-SHA256-0d88071bfe63915f1c428cc8899b6b56bb78eb8b9bb01fcf61a7910339193247'
+            printf '%s\n' "$NONCE"
+            printf '%s\n' "$PREDECESSOR_BINDING"
+            cat "$ARCHIVE"
+          } > "$signed_payload"
+          openssl dgst -sha256 -sign "$signing_key" -out "$signature" "$signed_payload"
+          result="$({
+            printf '%s\n' 'JEEB-MSI-GATEWAY-ARTIFACT-V1-RSA3072-SHA256-0d88071bfe63915f1c428cc8899b6b56bb78eb8b9bb01fcf61a7910339193247'
+            printf '%s\n' "$NONCE"
+            printf '%s\n' "$PREDECESSOR_BINDING"
+            base64 -w0 "$signature"
+            printf '\n'
+            cat "$ARCHIVE"
+          } | setsid --wait ssh msi-gateway-firebase-diagnostics \
+            '/usr/bin/sudo -n /usr/local/sbin/jeeb-msi-gateway-firebase-diagnostics-admin stage')"
+          RESULT="$result" python3 - "$GITHUB_SHA" "$ARCHIVE_SHA" "$SOURCE_TREE" <<'PY'
+          import json, os, sys
+          commit, archive_sha, tree = sys.argv[1:]
+          value = json.loads(os.environ["RESULT"])
+          assert value == {
+              "status": "staged",
+              "unit": "jeeb-gateway.service",
+              "commitSha": commit,
+              "sourceTree": tree,
+              "archiveSha256": archive_sha,
+              "releasePath": f"/opt/jeeb-gateway-releases/firebase-diagnostics/jeeb-gateway-{commit}-linux-x64",
+          }
+          PY
+
+      - name: Activate gateway diagnostics with rollback on failure
+        env:
+          MSI_SSH_PASSWORD: ${{ secrets.MSI_SSH_PASSWORD }}
+          DIAGNOSTIC_PROBE: ${{ secrets.JEEB_DEVELOPMENT_FIREBASE_DIAGNOSTIC_PROBE_JSON }}
+          ARCHIVE_SHA: ${{ steps.artifact.outputs.archive_sha }}
+        run: |
+          set -euo pipefail
+          probe_file="$RUNNER_TEMP/msi-gateway-firebase-diagnostic-probe.json"
+          trap 'rm -f "$probe_file"' EXIT
+          umask 077
+          printf '%s' "$DIAGNOSTIC_PROBE" > "$probe_file"
+          unset DIAGNOSTIC_PROBE
+          result="$(cat "$probe_file" | setsid --wait ssh \
+            msi-gateway-firebase-diagnostics \
+            '/usr/bin/sudo -n /usr/local/sbin/jeeb-msi-gateway-firebase-diagnostics-admin activate')"
+          RESULT="$result" python3 - "$GITHUB_SHA" "$ARCHIVE_SHA" <<'PY'
+          import json, os, sys
+          commit, archive_sha = sys.argv[1:]
+          value = json.loads(os.environ["RESULT"])
+          assert value == {
+              "status": "activated",
+              "unit": "jeeb-gateway.service",
+              "commitSha": commit,
+              "archiveSha256": archive_sha,
+              "project": "jeeb-development-msi",
+              "predecessorRetained": True,
+          }
+          PY
+
+      - name: Publish non-secret result
+        run: |
+          {
+            printf '%s\n' '## MSI gateway Firebase diagnostics'
+            printf '%s\n' ''
+            printf '%s\n' '- Environment: development/MSI (Production host hardening retained)'
+            printf '%s\n' '- Firebase project: jeeb-development-msi'
+            printf '%s\n' '- Unit: jeeb-gateway.service only'
+            printf '%s\n' "- Source commit: $GITHUB_SHA"
+            printf '%s\n' '- Runtime: immutable root-owned linux-x64 release'
+            printf '%s\n' '- Readiness: no new regression; both diagnostic routes verified'
+            printf '%s\n' '- Predecessor: retained for automatic rollback'
+          } >> "$GITHUB_STEP_SUMMARY"

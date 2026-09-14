@@ -274,6 +274,11 @@ gateway-DB extraction flags. `FeatureFlags:UseUpstream:Chat` remains the
 separate activation control, and ADR-0013 permanently pins
 `FeatureFlags:PushDispatchMode` to the notification-service hand-over rung.
 
+**2026-09-14 Firebase token diagnostics reconciliation.** The three scalar
+fields under `Auth:FirebaseTokenDiagnostics` are `setting -` entries. They
+enable the verifier-only route only for its exact non-production identity and
+do not select a gateway-DB extraction owner.
+
 `FRAMEWORK_MODE_TYPES` is now only `BoundedChannelFullMode`, `FullMode` (both `System.Threading.Channels`),
 `FileMode` (`System.IO`), `SameSiteMode` (ASP.NET cookie enum) and `PushDeliveryMode` (a local enum in
 `Notifications/PushSilencePolicy.cs`, never bound to configuration). **Re-verify against the binding sites before

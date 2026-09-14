@@ -1071,6 +1071,47 @@ builder.Services.AddHttpClient("ServiceUserManagementClient", client =>
         client.BaseAddress = new Uri(apiUrl);
     }
 });
+builder.Services
+    .AddOptions<JeebGateway.Auth.FirebaseDiagnostics.FirebaseTokenDiagnosticsOptions>()
+    .BindConfiguration(JeebGateway.Auth.FirebaseDiagnostics.FirebaseTokenDiagnosticsOptions.SectionName)
+    .Validate(
+        options => !options.Enabled
+            || JeebGateway.Auth.FirebaseDiagnostics.FirebaseTokenDiagnosticsOptions.IsAllowed(
+                builder.Environment,
+                options),
+        "Auth:FirebaseTokenDiagnostics may be enabled only for the exact development MSI identity or staging environment/project pair.")
+    .Validate(
+        options => !options.Enabled
+            || Uri.TryCreate(
+                builder.Configuration["UserManagementServiceApi:BaseUrl"],
+                UriKind.Absolute,
+                out _),
+        "UserManagementServiceApi:BaseUrl must be absolute when Firebase token diagnostics are enabled.")
+    .ValidateOnStart();
+builder.Services.AddHttpClient(
+    JeebGateway.Auth.FirebaseDiagnostics.UserManagementFirebaseTokenDiagnosticClient.HttpClientName,
+    client =>
+    {
+        var apiUrl = builder.Configuration["UserManagementServiceApi:BaseUrl"];
+        if (!string.IsNullOrWhiteSpace(apiUrl))
+        {
+            client.BaseAddress = new Uri(apiUrl);
+        }
+        client.Timeout = JeebGateway.Auth.FirebaseDiagnostics
+            .UserManagementFirebaseTokenDiagnosticClient.OperationTimeout;
+    })
+    .ConfigurePrimaryHttpMessageHandler(() => new SocketsHttpHandler
+    {
+        AllowAutoRedirect = false,
+    });
+builder.Services.AddScoped<
+    JeebGateway.Auth.FirebaseDiagnostics.IUserManagementFirebaseTokenDiagnosticClient>(sp =>
+{
+    var factory = sp.GetRequiredService<IHttpClientFactory>();
+    return new JeebGateway.Auth.FirebaseDiagnostics.UserManagementFirebaseTokenDiagnosticClient(
+        factory.CreateClient(
+            JeebGateway.Auth.FirebaseDiagnostics.UserManagementFirebaseTokenDiagnosticClient.HttpClientName));
+});
 builder.Services.AddScoped<JeebGateway.service.ServiceUserManagement.ServiceUserManagementClient>(sp =>
 {
     var factory = sp.GetRequiredService<IHttpClientFactory>();
