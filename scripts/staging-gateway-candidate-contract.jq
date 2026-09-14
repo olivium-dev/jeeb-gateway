@@ -66,8 +66,8 @@ def expected_environment:
       # Resolved per deploy, never pinned: a literal here rejected every activated
       # candidate and killed the deploy silently (run 33821087895).
       "featureflags__useupstream__chat": $chat_upstream_enabled,
-      "featureflags__useupstream__realtime": "false",
-      "features__realtimewebsocketproxy__enabled": "false",
+      "featureflags__useupstream__realtime": "true",
+      "features__realtimewebsocketproxy__enabled": "true",
       "auth__otp__applicationid": "0d51afe1-499f-4a29-a55a-36d2dd223b05",
       "auth__otp__phone__allowedregion": "LB",
       "auth__otp__phone__enforceregion": "false",
