@@ -3,8 +3,39 @@ set -euo pipefail
 
 repository_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 contract="$repository_root/scripts/staging-gateway-candidate-contract.jq"
+workflow="$repository_root/.github/workflows/jeeb-staging-deploy.yml"
 test_root=$(mktemp -d)
 trap 'rm -rf -- "$test_root"' EXIT
+workflow_devtool_builder="$test_root/workflow-devtool-builder.jq"
+
+# The devtool path constructs its candidate with a surgical inline patch instead
+# of the normal desired_env list. Keep that builder aligned with this contract;
+# run 34842595114 proved add_env alone does not reach this branch.
+python3 - "$workflow" "$workflow_devtool_builder" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1]).read_text()
+start = source.index("# This mode is a surgical incumbent patch.")
+end = source.index("# jq variables intentionally remain literal", start)
+builder = source[start:end]
+expected = {
+    "auth__firebasetokendiagnostics__enabled":
+        "Auth__FirebaseTokenDiagnostics__Enabled=true",
+    "auth__firebasetokendiagnostics__environment":
+        "Auth__FirebaseTokenDiagnostics__Environment=staging",
+    "auth__firebasetokendiagnostics__projectid":
+        "Auth__FirebaseTokenDiagnostics__ProjectId=jeeb-5a293",
+}
+for normalized, row in expected.items():
+    if builder.count(f'"{normalized}",') != 1:
+        raise SystemExit(f"devtool builder does not replace exactly one {normalized}")
+    if builder.count(f'"{row}",') != 1:
+        raise SystemExit(f"devtool builder does not add exactly one {row}")
+filter_start = source.index("              def env_key:", start)
+filter_end = source.index("\n            ' \"$current_spec\" > \"$candidate\"", filter_start)
+Path(sys.argv[2]).write_text(source[filter_start:filter_end] + "\n")
+PY
 candidate="$test_root/candidate.json"
 mutant="$test_root/mutant.json"
 cutover="$test_root/cutover.json"
@@ -320,6 +351,38 @@ jq '
   | .UpdateConfig = {Parallelism:3,Monitor:1,FailureAction:"pause",Order:"stop-first",MaxFailureRatio:0.25}
   | .RollbackConfig = {Parallelism:2,Monitor:2,FailureAction:"continue",Order:"stop-first",MaxFailureRatio:0.5}
 ' "$candidate" > "$devtool_incumbent"
+
+# Execute the jq program extracted from the workflow itself. Cover the failed
+# first reassert (incumbent has no diagnostic rows) and an idempotent later run.
+workflow_missing_incumbent="$test_root/workflow-missing-incumbent.json"
+jq '
+  .TaskTemplate.ContainerSpec.Env |= map(
+    select((split("=")[0] | ascii_downcase | gsub(":"; "__")
+      | startswith("auth__firebasetokendiagnostics__")) | not)
+  )
+' "$devtool_incumbent" > "$workflow_missing_incumbent"
+for workflow_incumbent in "$workflow_missing_incumbent" "$devtool_incumbent"; do
+  workflow_candidate="$test_root/workflow-candidate-$(basename "$workflow_incumbent")"
+  jq -e -S -c --arg image "$image" \
+    --slurpfile secret_additions "$firebase_secret" \
+    -f "$workflow_devtool_builder" "$workflow_incumbent" > "$workflow_candidate"
+  jq -e '
+    def normalized_key: split("=")[0] | ascii_downcase | gsub(":"; "__");
+    def rows($key): [.TaskTemplate.ContainerSpec.Env[] | select((normalized_key) == $key)];
+    rows("auth__firebasetokendiagnostics__enabled")
+      == ["Auth__FirebaseTokenDiagnostics__Enabled=true"]
+    and rows("auth__firebasetokendiagnostics__environment")
+      == ["Auth__FirebaseTokenDiagnostics__Environment=staging"]
+    and rows("auth__firebasetokendiagnostics__projectid")
+      == ["Auth__FirebaseTokenDiagnostics__ProjectId=jeeb-5a293"]
+  ' "$workflow_candidate" >/dev/null
+  validate "$workflow_candidate" devtool-reassert "$workflow_incumbent"
+  jq -e --arg image "$image" --slurpfile incumbent "$workflow_incumbent" \
+    --slurpfile firebase_secret "$firebase_secret" \
+    -f "$repository_root/scripts/staging-gateway-devtool-reassert-candidate.jq" \
+    "$workflow_candidate" >/dev/null
+done
+
 jq --arg image "$image" --slurpfile firebase_secret "$firebase_secret" '
   def env_key: (split("=")[0] | ascii_downcase | gsub(":"; "__"));
   def target: env_key as $key | [
