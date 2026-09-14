@@ -126,10 +126,11 @@ gh workflow run jeeb-msi-gateway-firebase-diagnostics-activate.yml \
   --repo olivium-dev/jeeb-gateway --ref main
 ```
 
-With `pipefail`, a rejected mint fails the pipeline before `gh secret set`
-completes. Confirm `{"status":"probe_minted",...}` on standard error before
-dispatching; if the mint was rejected, run the delete command below before
-retrying so no partial or stale value remains.
+With `pipefail`, a rejected mint fails the pipeline, so `set -e` stops the
+sequence before the workflow dispatch; `gh secret set` runs concurrently and
+may already have stored an empty value. Confirm `{"status":"probe_minted",...}`
+on standard error before dispatching; if the mint was rejected, run the delete
+command below before retrying so no empty or stale value remains.
 
 The script refuses to run unless Python isolated mode is active (`-I`, so no
 `SSLKEYLOGFILE`, `PYTHONPATH`, or user-site influence), standard input is an

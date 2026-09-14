@@ -108,7 +108,9 @@ def https_post(path, headers, body):
     # Direct HTTPS: no proxy variables, no redirects, bounded read, closed connection.
     context = ssl.create_default_context()
     # Isolated mode already ignores SSLKEYLOGFILE; never let TLS keys reach a file.
-    context.keylog_filename = None
+    # LibreSSL builds lack the attribute, so guard it the way the stdlib does.
+    if hasattr(context, "keylog_filename"):
+        context.keylog_filename = None
     connection = http.client.HTTPSConnection(IDENTITY_TOOLKIT_HOST, timeout=15, context=context)
     try:
         connection.request("POST", path, body, headers)
