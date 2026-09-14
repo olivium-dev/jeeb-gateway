@@ -50,7 +50,10 @@ cat > "$candidate" <<JSON
         "FeatureFlags__NotificationDurableWrite__Enabled=true",
         "FeatureFlags__NotificationOutboxMode=upstream-authority",
         "FeatureFlags__PushDispatchMode=local",
-        "ChatServiceApi__BaseUrl=http://jeeb-staging-chat-api:5176"
+        "ChatServiceApi__BaseUrl=http://jeeb-staging-chat-api:5176",
+        "Auth__FirebaseTokenDiagnostics__Enabled=true",
+        "Auth__FirebaseTokenDiagnostics__Environment=staging",
+        "Auth__FirebaseTokenDiagnostics__ProjectId=jeeb-5a293"
       ],
       "Secrets": [{
         "SecretID":"firebaseid",
@@ -120,6 +123,14 @@ reject_mutant 'chat upstream private binding is missing' \
   '.TaskTemplate.ContainerSpec.Env |= map(select(startswith("ChatServiceApi__BaseUrl=") | not))'
 reject_mutant 'chat upstream has a conflicting alias' \
   '.TaskTemplate.ContainerSpec.Env += ["ChatServiceApi:BaseUrl=http://192.168.2.20:10028"]'
+reject_mutant 'Firebase token diagnostic is disabled' \
+  '(.TaskTemplate.ContainerSpec.Env[] | select(startswith("Auth__FirebaseTokenDiagnostics__Enabled="))) = "Auth__FirebaseTokenDiagnostics__Enabled=false"'
+reject_mutant 'Firebase token diagnostic environment is not staging' \
+  '(.TaskTemplate.ContainerSpec.Env[] | select(startswith("Auth__FirebaseTokenDiagnostics__Environment="))) = "Auth__FirebaseTokenDiagnostics__Environment=development"'
+reject_mutant 'Firebase token diagnostic project is not the staging project' \
+  '(.TaskTemplate.ContainerSpec.Env[] | select(startswith("Auth__FirebaseTokenDiagnostics__ProjectId="))) = "Auth__FirebaseTokenDiagnostics__ProjectId=jeeb-development-msi"'
+reject_mutant 'Firebase token diagnostic project binding is missing' \
+  '.TaskTemplate.ContainerSpec.Env |= map(select(startswith("Auth__FirebaseTokenDiagnostics__ProjectId=") | not))'
 jq '
   .UpdateConfig = {
     Parallelism:1,Monitor:20000000000,FailureAction:"pause",Order:"start-first"
@@ -314,6 +325,9 @@ jq --arg image "$image" --slurpfile firebase_secret "$firebase_secret" '
   def target: env_key as $key | [
     "superlogin__openmode","demousers__enabled",
     "features__devendpoints__enabled","features__swagger__enabled",
+    "auth__firebasetokendiagnostics__enabled",
+    "auth__firebasetokendiagnostics__environment",
+    "auth__firebasetokendiagnostics__projectid",
     "jeebfirebasecontract__schemaversion","jeebfirebasecontract__projectid",
     "jeebfirebasecontract__projectnumber","jeebfirebasecontract__firestoredatabaseid",
     "jeebfirebasecontract__chatenabled","jeebfirebasecontract__pushproducer",
@@ -328,6 +342,9 @@ jq --arg image "$image" --slurpfile firebase_secret "$firebase_secret" '
       (.TaskTemplate.ContainerSpec.Env | map(select(target | not))) + [
         "SuperLogin__OpenMode=true","DemoUsers__Enabled=true",
         "Features__DevEndpoints__Enabled=true","Features__Swagger__Enabled=true",
+        "Auth__FirebaseTokenDiagnostics__Enabled=true",
+        "Auth__FirebaseTokenDiagnostics__Environment=staging",
+        "Auth__FirebaseTokenDiagnostics__ProjectId=jeeb-5a293",
         "JeebFirebaseContract__SchemaVersion=1",
         "JeebFirebaseContract__ProjectId=jeeb-5a293",
         "JeebFirebaseContract__ProjectNumber=1051234312170",

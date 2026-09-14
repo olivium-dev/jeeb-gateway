@@ -528,6 +528,11 @@ jobs:
                     ASPNETCORE_ENVIRONMENT=Staging
                   )
                 fi
+                expected_contract+=(
+                  Auth__FirebaseTokenDiagnostics__Enabled=true
+                  Auth__FirebaseTokenDiagnostics__Environment=staging
+                  Auth__FirebaseTokenDiagnostics__ProjectId=jeeb-5a293
+                )
                 if [ "$deployment_mode" = otp-cutover ]; then
                   expected_contract+=(
                     ServiceAuth__Enabled=true
@@ -965,6 +970,11 @@ jobs:
               fi
               add_env ASPNETCORE_ENVIRONMENT Staging
               add_env ASPNETCORE_URLS http://+:8080
+              # Verifier-only Firebase canary. The application independently
+              # rejects this configuration outside the exact Staging/jeeb-5a293 pair.
+              add_env Auth__FirebaseTokenDiagnostics__Enabled true
+              add_env Auth__FirebaseTokenDiagnostics__Environment staging
+              add_env Auth__FirebaseTokenDiagnostics__ProjectId jeeb-5a293
               add_env JeebFirebaseContract__SchemaVersion 1
               add_env JeebFirebaseContract__ProjectId jeeb-5a293
               add_env JeebFirebaseContract__ProjectNumber 1051234312170
