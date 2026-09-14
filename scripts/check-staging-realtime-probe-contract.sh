@@ -168,7 +168,7 @@ require(
         '"auth__otp__phone__allowedregion": "LB"',
         '"auth__otp__phone__enforceregion": "false"',
         '"featureflags__useupstream__voice": "false"',
-        '"features__realtimewebsocketproxy__enabled": "false"',
+        '"features__realtimewebsocketproxy__enabled": "true"',
         '"featureflags__useupstream__chat": $chat_upstream_enabled,',
         'def environment_mismatches($environment):',
         'def canonical_configuration_key: ascii_downcase | gsub("__"; ":")',
@@ -206,8 +206,8 @@ def validate_bootstrap_workflow(text):
         '[ "$(hostname -s)" = "olivium-ephemerals" ]',
         'grep -Fxc "192.168.2.20"',
         'add_env FeatureFlags__UseUpstream__Chat "$chat_upstream_enabled"',
-        "add_env FeatureFlags__UseUpstream__Realtime false",
-        "add_env Features__RealtimeWebSocketProxy__Enabled false",
+        "add_env FeatureFlags__UseUpstream__Realtime true",
+        "add_env Features__RealtimeWebSocketProxy__Enabled true",
         "add_env FeatureFlags__UseUpstream__Voice false",
         "add_env FeatureFlags__UseUpstream__Otp true",
         "add_env Services__ServiceOTP__BaseUrl http://jeeb-staging-one-time-password:8080",
@@ -394,11 +394,12 @@ def validate_bootstrap_workflow(text):
     exact_delta = text.index('-f scripts/staging-gateway-devtool-reassert-candidate.jq', generic_builder)
     if not exact_devtool_builder < generic_builder < exact_delta:
         raise ValueError("Dev Tool candidate is not split from and checked after the generic builder")
-    for authority in ("Realtime", "Voice"):
-        false_lock = f"add_env FeatureFlags__UseUpstream__{authority} false"
-        true_lock = f"add_env FeatureFlags__UseUpstream__{authority} true"
-        if text.count(false_lock) != 1 or true_lock in text:
-            raise ValueError(f"staging bootstrap authority drifted: {authority}")
+    realtime_lock = "add_env FeatureFlags__UseUpstream__Realtime true"
+    if text.count(realtime_lock) != 1 or "add_env FeatureFlags__UseUpstream__Realtime false" in text:
+        raise ValueError("staging realtime B authority drifted")
+    voice_lock = "add_env FeatureFlags__UseUpstream__Voice false"
+    if text.count(voice_lock) != 1 or "add_env FeatureFlags__UseUpstream__Voice true" in text:
+        raise ValueError("staging voice campaign lock drifted")
     # Chat is resolved, never literal: a hardcoded false reverted every completed
     # B activation on the next deploy.
     chat_binding = 'add_env FeatureFlags__UseUpstream__Chat "$chat_upstream_enabled"'
@@ -540,18 +541,18 @@ negative_controls = (
         ),
     ),
     (
-        "realtime bootstrap activated",
+        "realtime B activation disabled",
         workflow.replace(
-            "add_env FeatureFlags__UseUpstream__Realtime false",
             "add_env FeatureFlags__UseUpstream__Realtime true",
+            "add_env FeatureFlags__UseUpstream__Realtime false",
             1,
         ),
     ),
     (
-        "WebSocket proxy bootstrap activated",
+        "WebSocket proxy B activation disabled",
         workflow.replace(
-            "add_env Features__RealtimeWebSocketProxy__Enabled false",
             "add_env Features__RealtimeWebSocketProxy__Enabled true",
+            "add_env Features__RealtimeWebSocketProxy__Enabled false",
             1,
         ),
     ),

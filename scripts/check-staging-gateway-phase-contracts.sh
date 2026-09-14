@@ -119,7 +119,7 @@ if input_references != {"deployment_mode", "provider_expand_verified"}:
 # Chat is the one phase flag the deploy must NOT pin to a literal: a hardcoded
 # false reverted every completed Chat B activation on the next deploy.
 CHAT_KEY = "FeatureFlags__UseUpstream__Chat"
-for key, value in expected_a1.items():
+for key, value in expected_b.items():
     if key == CHAT_KEY:
         continue
     markers = (
@@ -130,7 +130,7 @@ for key, value in expected_a1.items():
     count = sum(workflow.count(marker) for marker in markers)
     if count != 1:
         raise SystemExit(
-            f"FAIL: A1 workflow does not bind exactly one {key}={value!r} row"
+            f"FAIL: B workflow does not bind exactly one {key}={value!r} row"
         )
 
 if workflow.count(f'add_env {CHAT_KEY} "$chat_upstream_enabled"') != 1:
@@ -159,8 +159,8 @@ for activated in (
     "FeatureFlags__UseUpstream__Realtime",
     "Features__RealtimeWebSocketProxy__Enabled",
 ):
-    if f"add_env {activated} true" in workflow:
-        raise SystemExit(f"FAIL: B activation leaked into A1 workflow: {activated}")
+    if f"add_env {activated} false" in workflow:
+        raise SystemExit(f"FAIL: inactive A1 flag leaked into B workflow: {activated}")
 
 if set(a1) != set(b):
     raise SystemExit("FAIL: A1 and B configuration key sets differ")
@@ -193,5 +193,5 @@ for marker in (
     if marker not in workflow:
         raise SystemExit(f"FAIL: candidate-contract diagnostic marker missing: {marker}")
 
-print("Staging gateway A1 bootstrap and separate B activation contracts are exact.")
+print("Staging gateway phase documents and active B deployment contract are exact.")
 PY

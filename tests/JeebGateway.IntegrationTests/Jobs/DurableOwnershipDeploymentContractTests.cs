@@ -591,7 +591,7 @@ public sealed class DurableOwnershipDeploymentContractTests
     }
 
     [Fact]
-    public void Jeeb_staging_is_a_protected_non_activating_full_spec_template()
+    public void Jeeb_staging_is_a_protected_realtime_B_full_spec_template()
     {
         var workflow = Workflow("jeeb-staging-deploy.yml");
         workflow.Should().Contain("Require supported protected staging mode");
@@ -609,13 +609,13 @@ public sealed class DurableOwnershipDeploymentContractTests
         // completed Chat B activation on the next staging deploy.
         workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Chat \"$chat_upstream_enabled\"");
         workflow.Should().NotContain("add_env FeatureFlags__UseUpstream__Chat false");
-        workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Realtime false");
-        workflow.Should().Contain("add_env Features__RealtimeWebSocketProxy__Enabled false");
+        workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Realtime true");
+        workflow.Should().Contain("add_env Features__RealtimeWebSocketProxy__Enabled true");
         workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Voice false");
         workflow.Should().Contain("add_env FeatureFlags__UseUpstream__Otp true");
         workflow.Should().NotContain("add_env FeatureFlags__UseUpstream__Chat true");
-        workflow.Should().NotContain("add_env FeatureFlags__UseUpstream__Realtime true");
-        workflow.Should().NotContain("add_env Features__RealtimeWebSocketProxy__Enabled true");
+        workflow.Should().NotContain("add_env FeatureFlags__UseUpstream__Realtime false");
+        workflow.Should().NotContain("add_env Features__RealtimeWebSocketProxy__Enabled false");
         workflow.Should().NotContain("add_env FeatureFlags__UseUpstream__Voice true");
         var dispatch = workflow[..workflow.IndexOf("permissions:", StringComparison.Ordinal)];
         dispatch.Should().Contain("deployment_mode:");

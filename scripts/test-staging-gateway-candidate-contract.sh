@@ -26,7 +26,7 @@ cat > "$candidate" <<JSON
         "ServiceOTPApi__BaseUrl=http://jeeb-staging-one-time-password:8080",
         "FeatureFlags__UseUpstream__Otp=true",
         "FeatureFlags__UseUpstream__Chat=false",
-        "FeatureFlags__UseUpstream__Realtime=false",
+        "FeatureFlags__UseUpstream__Realtime=true",
         "Auth__Otp__ApplicationId=0d51afe1-499f-4a29-a55a-36d2dd223b05",
         "Auth__Otp__Phone__AllowedRegion=LB",
         "Auth__Otp__Phone__EnforceRegion=false",
@@ -38,7 +38,7 @@ cat > "$candidate" <<JSON
         "Features__Swagger__Enabled=true",
         "Jwt__SigningKeyFile=/run/secrets/jeeb_gateway_jwt",
         "ServiceNotificationClient__ServiceTokenFile=/run/secrets/notification_service_token",
-        "Features__RealtimeWebSocketProxy__Enabled=false",
+        "Features__RealtimeWebSocketProxy__Enabled=true",
         "JeebFirebaseContract__SchemaVersion=1",
         "JeebFirebaseContract__ProjectId=jeeb-5a293",
         "JeebFirebaseContract__ProjectNumber=1051234312170",
@@ -214,10 +214,10 @@ reject_mutant 'host-port realtime endpoint' \
 # Run 33821087895 died because a literal "false" here rejected every activated candidate.
 reject_mutant 'chat activated while the deploy resolved false' \
   '(.TaskTemplate.ContainerSpec.Env[3]) = "FeatureFlags__UseUpstream__Chat=true"'
-reject_mutant 'Realtime activated in A1' \
-  '(.TaskTemplate.ContainerSpec.Env[4]) = "FeatureFlags__UseUpstream__Realtime=true"'
-reject_mutant 'WebSocket proxy activated in A1' \
-  '(.TaskTemplate.ContainerSpec.Env[16]) = "Features__RealtimeWebSocketProxy__Enabled=true"'
+reject_mutant 'Realtime disabled in B' \
+  '(.TaskTemplate.ContainerSpec.Env[4]) = "FeatureFlags__UseUpstream__Realtime=false"'
+reject_mutant 'WebSocket proxy disabled in B' \
+  '(.TaskTemplate.ContainerSpec.Env[16]) = "Features__RealtimeWebSocketProxy__Enabled=false"'
 reject_mutant 'wrong b05 application ID' \
   '(.TaskTemplate.ContainerSpec.Env[5]) = "Auth__Otp__ApplicationId=wrong"'
 reject_mutant 'international eligibility disabled' \
