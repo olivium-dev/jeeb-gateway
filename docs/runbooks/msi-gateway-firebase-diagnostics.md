@@ -88,8 +88,10 @@ the probe secret; without it the candidate cannot prove valid-token acceptance
 and is rolled back. The probe is minted by the owner, in process memory, with
 `scripts/mint-development-firebase-diagnostic-probe.py` run from the exact
 merged protected `main` commit, and is piped straight into the environment
-secret. No service-account key, personal access token, or secrets-write
-credential is involved, and no token is written to disk.
+secret. No service-account key is used, no new personal access token or
+secrets-write credential is introduced (the designated owner's existing `gh`
+session performs the environment-secret write), and no token is written to
+disk.
 
 Prerequisites, all owner-provisioned and recorded by name only:
 
@@ -101,17 +103,20 @@ Prerequisites, all owner-provisioned and recorded by name only:
 - The development Web API key from the protected development Firebase client
   configuration. It is passed only in the `x-goog-api-key` header, never in a
   URL or argument.
-- A `gh` session for the designated owner with the `repo` scope, which is
-  sufficient to write and delete environment secrets on this repository.
+- The designated owner's existing `gh` session with the `repo` scope, which is
+  already sufficient to write and delete environment secrets on this
+  repository.
 
 Sequence, from a clean worktree at protected `main`:
 
 ```sh
+set -euo pipefail
 umask 077
 [ "$(gh api repos/olivium-dev/jeeb-gateway/branches/main --jq '.commit.sha')" = "$(git rev-parse HEAD)" ]
 git diff --exit-code --quiet
 python3 -I -B scripts/test_mint_development_firebase_diagnostic_probe.py
-input="$(mktemp)"   # owner-only 0600; fill it in an editor, never with echo or argv
+input="$(mktemp)"   # owner-only 0600 in a private temp dir; fill it in an editor
+                    # with swap/backup files disabled, never with echo or argv
 # {"webApiKey":"...","email":"...","password":"...","expectedUid":"..."}
 python3 -I -B scripts/mint-development-firebase-diagnostic-probe.py < "$input" \
   | gh secret set JEEB_DEVELOPMENT_FIREBASE_DIAGNOSTIC_PROBE_JSON \
@@ -121,15 +126,24 @@ gh workflow run jeeb-msi-gateway-firebase-diagnostics-activate.yml \
   --repo olivium-dev/jeeb-gateway --ref main
 ```
 
-The script refuses to run unless standard input is an owner-only mode-`0600`
-regular file and standard output is a pipe. It performs exactly one
+With `pipefail`, a rejected mint fails the pipeline before `gh secret set`
+completes. Confirm `{"status":"probe_minted",...}` on standard error before
+dispatching; if the mint was rejected, run the delete command below before
+retrying so no partial or stale value remains.
+
+The script refuses to run unless Python isolated mode is active (`-I`, so no
+`SSLKEYLOGFILE`, `PYTHONPATH`, or user-site influence), standard input is an
+owner-only mode-`0600` regular file, and standard output is a pipe. It is not
+executable; always invoke it as `python3 -I -B`. It performs exactly one
 `accounts:signInWithPassword` call, discards the refresh token, binds the
-returned ID token's audience, issuer, subject, `password` provider, and at most
-one-hour lifetime to the fixed project and expected uid, and then emits exactly
+returned ID token's audience, issuer, subject, `password` provider, and
+lifetime (at most one hour, at least thirty minutes remaining) to the fixed
+project and expected uid, and then emits exactly
 `{"idToken":"...","expectedSubject":"<uid>","expectedProvider":"password"}`.
 Standard error carries one evidence document with the project, provider, uid
 and token SHA-256 prefixes, and `expiresAt`; a failure carries only a fixed
-reason such as `sign_in_http_400` or `identity_mismatch`.
+reason such as `sign_in_http_400`, `sign_in_unreachable`, or
+`identity_mismatch`.
 
 Dispatch the activation immediately after setting the secret: the token
 expires at `expiresAt` (at most one hour after minting) and the helper's

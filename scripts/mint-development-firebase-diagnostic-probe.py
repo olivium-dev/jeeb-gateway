@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -I
 """Mint the short-lived development Firebase diagnostic probe in process memory.
 
 The MSI gateway helper activates Firebase token diagnostics only after it has
@@ -51,6 +51,7 @@ MAX_RESPONSE_BYTES = 65536
 MAX_ID_TOKEN_BYTES = 16 * 1024
 MAX_SUBJECT_LENGTH = 128
 MAX_TOKEN_LIFETIME = 3600
+MIN_REMAINING_LIFETIME = 1800
 CLOCK_SKEW = 60
 INPUT_FIELDS = frozenset({"webApiKey", "email", "password", "expectedUid"})
 PROBE_FIELDS = ("idToken", "expectedSubject", "expectedProvider")
@@ -105,9 +106,10 @@ def validate_input(raw):
 
 def https_post(path, headers, body):
     # Direct HTTPS: no proxy variables, no redirects, bounded read, closed connection.
-    connection = http.client.HTTPSConnection(
-        IDENTITY_TOOLKIT_HOST, timeout=15, context=ssl.create_default_context()
-    )
+    context = ssl.create_default_context()
+    # Isolated mode already ignores SSLKEYLOGFILE; never let TLS keys reach a file.
+    context.keylog_filename = None
+    connection = http.client.HTTPSConnection(IDENTITY_TOOLKIT_HOST, timeout=15, context=context)
     try:
         connection.request("POST", path, body, headers)
         response = connection.getresponse()
@@ -126,7 +128,10 @@ def sign_in(value, post):
         "Connection": "close",
         API_KEY_HEADER: value["webApiKey"],
     }
-    status, raw = post(SIGN_IN_PATH, headers, body)
+    try:
+        status, raw = post(SIGN_IN_PATH, headers, body)
+    except (OSError, http.client.HTTPException):
+        raise Rejected("sign_in_unreachable") from None
     require(status == 200, f"sign_in_http_{int(status)}")
     require(len(raw) <= MAX_RESPONSE_BYTES, "response_too_large")
     response = parse_json(raw, "response_json_invalid")
@@ -154,6 +159,7 @@ def b64url_decode(part):
 def bind_claims(token, uid, now):
     parts = token.split(".")
     require(len(parts) == 3, "id_token_shape_invalid")
+    require(re.fullmatch(r"[A-Za-z0-9_-]+", parts[2]), "id_token_shape_invalid")
     header = parse_json(b64url_decode(parts[0]), "id_token_shape_invalid")
     claims = parse_json(b64url_decode(parts[1]), "id_token_shape_invalid")
     require(
@@ -178,6 +184,7 @@ def bind_claims(token, uid, now):
         issued_at <= now + CLOCK_SKEW and now < expires_at <= issued_at + MAX_TOKEN_LIFETIME,
         "lifetime_invalid",
     )
+    require(expires_at - now >= MIN_REMAINING_LIFETIME, "lifetime_too_short")
     return expires_at
 
 
@@ -211,28 +218,33 @@ def require_piped_stdout(info):
     require(stat.S_ISFIFO(info.st_mode), "stdout_must_be_pipe")
 
 
-def main():
+def run(argv, stdin, stdout, stderr, fstat=os.fstat, euid=os.geteuid, isolated=None, minter=mint):
     raw = None
     probe = None
     try:
-        require(len(sys.argv) == 1, "arguments_not_accepted")
-        require_private_stdin(os.fstat(0), os.geteuid())
-        require_piped_stdout(os.fstat(1))
-        raw = bytearray(sys.stdin.buffer.read(MAX_INPUT_BYTES + 1))
-        minted, evidence = mint(bytes(raw))
+        require(sys.flags.isolated if isolated is None else isolated, "isolated_mode_required")
+        require(len(argv) == 1, "arguments_not_accepted")
+        require_private_stdin(fstat(stdin.fileno()), euid())
+        require_piped_stdout(fstat(stdout.fileno()))
+        raw = bytearray(stdin.buffer.read(MAX_INPUT_BYTES + 1))
+        minted, evidence = minter(bytes(raw))
         probe = bytearray(minted)
-        sys.stdout.buffer.write(probe)
-        sys.stdout.buffer.flush()
-        print(json.dumps(evidence, separators=(",", ":")), file=sys.stderr)
+        stdout.buffer.write(probe)
+        stdout.buffer.flush()
+        print(json.dumps(evidence, separators=(",", ":")), file=stderr)
         return 0
     except (Exception, KeyboardInterrupt) as exc:
         reason = exc.args[0] if isinstance(exc, Rejected) and exc.args else "execution_failed"
-        print(json.dumps({"status": "probe_rejected", "reason": reason}, separators=(",", ":")), file=sys.stderr)
+        print(json.dumps({"status": "probe_rejected", "reason": reason}, separators=(",", ":")), file=stderr)
         return 1
     finally:
         for buffer in (raw, probe):
             if buffer is not None:
                 buffer[:] = b"\0" * len(buffer)
+
+
+def main():
+    return run(sys.argv, sys.stdin, sys.stdout, sys.stderr)
 
 
 if __name__ == "__main__":
