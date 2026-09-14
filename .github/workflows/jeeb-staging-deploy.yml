@@ -1381,7 +1381,6 @@ jobs:
           fi
           if [ "$DEPLOYMENT_MODE" = devtool-reassert ]; then
             jq -e --arg image "$IMAGE" --slurpfile incumbent "$incumbent_spec" \
-              --slurpfile firebase_secret "$secret_additions_json" \
               -f scripts/staging-gateway-devtool-reassert-candidate.jq \
               "$candidate_spec" >/dev/null
           fi

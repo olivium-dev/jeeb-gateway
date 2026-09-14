@@ -25,6 +25,11 @@ def is_devtool_flag:
       "firebase__chat__firestoredatabaseid"
     ]
   | index($key) != null;
+def incumbent_firebase_secret:
+  [
+    ($incumbent[0].TaskTemplate.ContainerSpec.Secrets // [])[]
+    | select(.File.Name == "firebase_admin_json")
+  ];
 def patch_devtool($document):
   $document
   | .TaskTemplate.ContainerSpec.Image = $image
@@ -55,7 +60,7 @@ def patch_devtool($document):
   | .TaskTemplate.ContainerSpec.Secrets = (
       ((.TaskTemplate.ContainerSpec.Secrets // [])
         | map(select(.File.Name != "firebase_admin_json")))
-      + $firebase_secret[0]
+      + incumbent_firebase_secret
     )
   | .UpdateConfig = ((.UpdateConfig // {}) + {
       Parallelism:1,
@@ -77,14 +82,13 @@ def incumbent_devtool_keys:
   ];
 
 ($incumbent | length) == 1
-and ($firebase_secret | length) == 1
-and ($firebase_secret[0] | length) == 1
-and $firebase_secret[0][0].File.Name == "firebase_admin_json"
-and $firebase_secret[0][0].File.UID == "65532"
-and $firebase_secret[0][0].File.GID == "65532"
-and $firebase_secret[0][0].File.Mode == 256
-and ($firebase_secret[0][0].SecretID | test("^[a-z0-9]+$"))
-and ($firebase_secret[0][0].SecretName
+and (incumbent_firebase_secret | length) == 1
+and incumbent_firebase_secret[0].File.Name == "firebase_admin_json"
+and incumbent_firebase_secret[0].File.UID == "65532"
+and incumbent_firebase_secret[0].File.GID == "65532"
+and incumbent_firebase_secret[0].File.Mode == 256
+and (incumbent_firebase_secret[0].SecretID | test("^[a-z0-9]+$"))
+and (incumbent_firebase_secret[0].SecretName
   | test("^jeeb_staging_fb_[a-zA-Z0-9_-]{43}$"))
 and (incumbent_devtool_keys | length) == (incumbent_devtool_keys | unique | length)
 and . == patch_devtool($incumbent[0])
