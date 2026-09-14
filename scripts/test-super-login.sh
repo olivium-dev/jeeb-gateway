@@ -44,7 +44,6 @@ access_token_file="$test_root/access-token"
 refresh_body="$test_root/refresh.json"
 refresh_response="$test_root/refresh-response.json"
 refresh_token_file="$test_root/refresh-token"
-rotated_refresh_token_file="$test_root/rotated-refresh-token"
 revoke_body="$test_root/revoke.json"
 swagger_body="$test_root/swagger.json"
 basic_login_body="$test_root/basic-login.json"
@@ -209,19 +208,19 @@ jq -e '
 jq -n --rawfile refresh_token "$refresh_token_file" \
   '{refreshToken:($refresh_token | rtrimstr("\n"))}' > "$refresh_body"
 chmod 600 "$refresh_body"
-expect_status 200 'refresh rotation' "$refresh_response" \
+# The explicit-role Dev Tool mint carries a local-only admin elevation so the
+# admin-gated Swagger surface can be checked. Refresh always re-reads durable UM
+# roles and must refuse to preserve that local-only elevation. The canonical
+# user-id-login session below proves successful rotation with owner-backed roles.
+echo 'staging phase=devtool-seeded-admin-refresh-revalidation result=started (redacted)'
+expect_status 401 'seeded admin refresh owner-role rejection' "$refresh_response" \
   --request POST --header 'Content-Type: application/json' \
   --data-binary "@$refresh_body" "$GATEWAY_ORIGIN/auth/tokens/refresh"
-jq -er '.refreshToken | select(type == "string" and length > 0)' \
-  "$refresh_response" > "$rotated_refresh_token_file"
-if cmp -s "$rotated_refresh_token_file" "$refresh_token_file"; then
-  echo 'FAIL: refresh token did not rotate' >&2
-  exit 1
-fi
-jq -n --rawfile refresh_token "$rotated_refresh_token_file" \
+echo 'staging phase=devtool-seeded-admin-refresh-revalidation result=passed (redacted)'
+jq -n --rawfile refresh_token "$refresh_token_file" \
   '{refreshToken:($refresh_token | rtrimstr("\n"))}' > "$revoke_body"
 chmod 600 "$revoke_body"
-expect_status 204 'current refresh-token revocation' "$response_body" \
+expect_status 204 'rejected seeded-admin refresh-token revocation' "$response_body" \
   --request POST --header 'Content-Type: application/json' \
   --data-binary "@$revoke_body" "$GATEWAY_ORIGIN/auth/tokens/revoke"
 
@@ -265,4 +264,4 @@ expect_status 204 'basic user-id-login rotated refresh-token revocation' "$respo
   --data-binary "@$basic_revoke_body" "$GATEWAY_ORIGIN/auth/tokens/revoke"
 
 echo 'PASS: basic user-id-login returned a gateway-audience session and its exact refresh token rotated and revoked.'
-echo 'PASS: required staging Dev Tool, Super Login Plus, both token lifecycles, and Swagger contracts are exact.'
+echo 'PASS: required staging Dev Tool, Super Login Plus, owner-authoritative refresh lifecycle, and Swagger contracts are exact.'

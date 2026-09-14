@@ -84,7 +84,6 @@ PY
 }
 
 seed_access_token=$(make_token "$seeded_user_id" admin)
-seed_rotated_access_token=$(make_token "$seeded_user_id" admin)
 basic_access_token=$(make_token "$live_user_id" client)
 basic_rotated_access_token=$(make_token "$live_user_id" client)
 
@@ -129,23 +128,24 @@ case "$url" in
     refresh_token=$(jq -er '.refreshToken' "${data_source#@}")
     case "$refresh_token" in
       MINT_INITIAL_REFRESH_CANARY)
-        printf '{"accessToken":"%s","refreshToken":"MINT_ROTATED_REFRESH_CANARY"}\n' \
-          "$SMOKE_SEED_ROTATED_ACCESS_TOKEN" > "$destination"
+        : > "$SMOKE_STATE_DIR/mint-refresh-rejected"
+        : > "$destination"
+        status=401
         ;;
       BASIC_INITIAL_REFRESH_CANARY)
         : > "$SMOKE_STATE_DIR/basic-refresh"
         printf '{"accessToken":"%s","refreshToken":"BASIC_ROTATED_REFRESH_CANARY"}\n' \
           "$SMOKE_BASIC_ROTATED_ACCESS_TOKEN" > "$destination"
+        status=200
         ;;
       *) exit 71 ;;
     esac
-    status=200
     ;;
   */auth/tokens/revoke)
     [ "${data_source#@}" != "$data_source" ]
     refresh_token=$(jq -er '.refreshToken' "${data_source#@}")
     case "$refresh_token" in
-      MINT_ROTATED_REFRESH_CANARY) : > "$SMOKE_STATE_DIR/mint-revoke" ;;
+      MINT_INITIAL_REFRESH_CANARY) : > "$SMOKE_STATE_DIR/mint-revoke" ;;
       BASIC_ROTATED_REFRESH_CANARY) : > "$SMOKE_STATE_DIR/basic-revoke" ;;
       *) exit 70 ;;
     esac
@@ -181,7 +181,6 @@ runtime_log="$test_root/runtime.log"
 SMOKE_LIVE_USER_ID="$live_user_id" \
   SMOKE_SEEDED_USER_ID="$seeded_user_id" \
   SMOKE_SEED_ACCESS_TOKEN="$seed_access_token" \
-  SMOKE_SEED_ROTATED_ACCESS_TOKEN="$seed_rotated_access_token" \
   SMOKE_BASIC_ACCESS_TOKEN="$basic_access_token" \
   SMOKE_BASIC_ROTATED_ACCESS_TOKEN="$basic_rotated_access_token" \
   SMOKE_STATE_DIR="$runtime_state" \
@@ -189,10 +188,12 @@ SMOKE_LIVE_USER_ID="$live_user_id" \
   bash "$subject" https://example.invalid >"$runtime_log" 2>&1
 
 grep -Fq 'PASS: basic user-id-login returned a gateway-audience session and its exact refresh token rotated and revoked.' "$runtime_log"
-grep -Fq 'PASS: required staging Dev Tool, Super Login Plus, both token lifecycles, and Swagger contracts are exact.' "$runtime_log"
+grep -Fq 'staging phase=devtool-seeded-admin-refresh-revalidation result=passed (redacted)' "$runtime_log"
+grep -Fq 'PASS: required staging Dev Tool, Super Login Plus, owner-authoritative refresh lifecycle, and Swagger contracts are exact.' "$runtime_log"
 [ -e "$runtime_state/basic-login" ]
 [ -e "$runtime_state/basic-refresh" ]
 [ -e "$runtime_state/basic-revoke" ]
+[ -e "$runtime_state/mint-refresh-rejected" ]
 [ -e "$runtime_state/mint-revoke" ]
 if grep -Eq 'MINT_(INITIAL|ROTATED)_REFRESH_CANARY|BASIC_(INITIAL|ROTATED)_REFRESH_CANARY|process-environment-canary' "$runtime_log"; then
   echo 'A refresh token or passcode canary reached smoke logs' >&2
@@ -200,7 +201,6 @@ if grep -Eq 'MINT_(INITIAL|ROTATED)_REFRESH_CANARY|BASIC_(INITIAL|ROTATED)_REFRE
 fi
 for access_token in \
   "$seed_access_token" \
-  "$seed_rotated_access_token" \
   "$basic_access_token" \
   "$basic_rotated_access_token"; do
   if grep -Fq -- "$access_token" "$runtime_log"; then
@@ -209,4 +209,4 @@ for access_token in \
   fi
 done
 
-echo 'Super Login smoke redaction contract: PASS (OpenMode omits passcode; pre-existing canonical identity login and exact refresh rotation/revocation verified; credentials redacted)'
+echo 'Super Login smoke redaction contract: PASS (local-only seeded admin refresh rejected; owner-backed identity refresh rotated/revoked; credentials redacted)'
