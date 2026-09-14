@@ -239,8 +239,7 @@ public sealed class AuthEmailFacadeController : ControllerBase
             var (roles, active) = await ResolveRolesAsync(res!.UserId!, email: null, ct);
             var pair = await _tokens.IssueAsync(
                 res.UserId!, roles, active, authentication: null, ct);
-            _log.LogInformation("auth.social facade minted gateway session userId={UserId} recentlyCreated={Rc}",
-                res.UserId, res.RecentlyCreated);
+            _log.LogInformation("auth.social facade minted gateway session");
 
             // Social shape (authToken/refreshToken) PLUS the session-shape aliases so either
             // mobile consumer (social_auth_token.dart or _persistAndBuildSession) reads it.
@@ -269,7 +268,8 @@ public sealed class AuthEmailFacadeController : ControllerBase
         var (roles, active) = await ResolveRolesAsync(userId!, email, ct);
         var pair = await _tokens.IssueAsync(
             userId!, roles, active, authentication: null, ct);
-        _log.LogInformation("auth.facade minted gateway session userId={UserId}", userId);
+        // Session-mint logs contain fixed events only; identity and credentials stay out.
+        _log.LogInformation("auth.facade minted gateway session");
 
         return Ok(new
         {
@@ -294,9 +294,10 @@ public sealed class AuthEmailFacadeController : ControllerBase
                 if (!string.IsNullOrWhiteSpace(persisted.ActiveRole)) active = persisted.ActiveRole!;
             }
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            _log.LogWarning(ex, "auth.facade UM get-roles failed for userId={UserId}; default role", userId);
+            // Upstream exceptions can include identifiers, request bodies, or credentials.
+            _log.LogWarning("auth.facade UM get-roles failed; default role");
         }
 
         // JEBV4-314 — union any DEV-seeded roles (POST /dev/seed/user role=admin) so an
@@ -349,7 +350,7 @@ public sealed class AuthEmailFacadeController : ControllerBase
 
         if (verdict != GwModerationVerdict.Suspended) return null;
 
-        _log.LogWarning("auth.facade refused: account suspended userId={UserId}", userId);
+        _log.LogWarning("auth.facade refused: account suspended");
         return OtpSignInProblems.Problem(this, 403,
             "account_suspended", "Account is suspended.", reason,
             OtpSignInProblems.SuspensionExtensions(reason, reasonCode));
