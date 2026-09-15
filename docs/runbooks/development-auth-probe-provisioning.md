@@ -21,9 +21,13 @@ review and source history; it is not a recovery of the old reviewed bytes.
    pass its source gate. The protected minter remains pinned by exact bytes and
    SHA-256 `e22ab00c5abe1c3ed017b60d38968e7c61bef76bc63680d303720aed6e53fc93`.
 3. The existing gcloud identity must describe only `jeeb-development-msi` and pass
-   target-scoped IAM checks for project/client reads, Auth configuration read and
-   Auth user creation. `roles/firebaseauth.admin` includes these permissions;
-   another existing administrator must grant access when it is absent. The tool
+   target-scoped IAM checks for project/client reads, Auth configuration read,
+   Auth user creation and `serviceusage.services.use`. `roles/firebaseauth.admin`
+   covers the Auth/resource permissions; the additional narrowly scoped standard
+   `roles/serviceusage.serviceUsageConsumer` role covers quota consumption. The
+   direct OAuth REST transport always sends `x-goog-user-project` with the fixed
+   development project; local gcloud quota configuration cannot change this target.
+   An existing administrator must grant access when it is absent. The tool
    does not self-bootstrap or use account count as access evidence.
 4. Exactly one active registered Android app must match `app.jeeb.mobile.dev` in
    that project. The package derives from protected mobile source at
@@ -47,9 +51,9 @@ review and source history; it is not a recovery of the old reviewed bytes.
    health, predecessor, residue and the shared deployment lock, then open the
    serialized window. Minting is deferred until this window so the probe is fresh.
 
-Current denied project access means the tool is not ready to execute, even when
-its source review and offline tests pass. A missing/changed provider resource
-must be investigated in the development scope; never recreate a project based
+Missing target access or Service Usage consumption permission means the tool is
+not ready to execute, even when its source review and offline tests pass. A
+missing/changed provider resource must be investigated in the development scope; never recreate a project based
 on an opaque permission/not-found error.
 
 ## Authorized invocation, after all gates
@@ -115,13 +119,22 @@ python3 -I -B scripts/test_provision_development_auth_probe.py
 python3 -I -B scripts/test_mint_development_firebase_diagnostic_probe.py
 ```
 
-The 41 new tests use synthetic data, fake cloud/credential commands, blocked
+The 46 provisioner tests use synthetic data, fake cloud/credential commands, blocked
 network access, and bounded local child processes. They cover failing gates,
 redaction, source pinning, project/config ambiguity, private descriptor custody,
 restart interlocks, no-retry behavior, mutation ordering and subprocess limits.
+Quota-routing cases also prove the fixed header survives conflicting ambient
+configuration and that missing consumer permission or provider denial stops before
+any marker, identity, sign-in or secret write.
 The existing 10 minter tests remain unchanged. CI runs both suites without
 provisioning credentials.
 
 Reference contracts: [Firebase Android app listing](https://firebase.google.com/docs/reference/firebase-management/rest/v1beta1/projects.androidApps/list),
 [app config retrieval](https://firebase.google.com/docs/reference/firebase-management/rest/v1beta1/projects.androidApps/getConfig),
 [Auth administrative creation](https://docs.cloud.google.com/identity-platform/docs/reference/rest/v1/accounts/signUp).
+
+Quota routing reference: [Authenticate with REST](https://docs.cloud.google.com/docs/authentication/rest#quota-project)
+requires an explicit quota-project header for affected user-credential requests
+and Service Usage consumption permission on that project.
+[Service Usage access control](https://docs.cloud.google.com/service-usage/docs/access-control)
+distinguishes the Consumer role from API enable/disable administration.

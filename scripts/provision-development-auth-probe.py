@@ -31,7 +31,8 @@ ENVIRONMENT = "development-msi-gateway-signing"
 PROBE_SECRET = "JEEB_DEVELOPMENT_FIREBASE_DIAGNOSTIC_PROBE_JSON"
 SIGNING_SECRET = "JEEB_MSI_GATEWAY_ARTIFACT_SIGNING_KEY_PEM"
 REQUIRED_PERMISSIONS = frozenset({"resourcemanager.projects.get", "firebase.projects.get",
-    "firebase.clients.get", "firebase.clients.list", "firebaseauth.configs.get", "firebaseauth.users.create"})
+    "firebase.clients.get", "firebase.clients.list", "firebaseauth.configs.get", "firebaseauth.users.create",
+    "serviceusage.services.use"})
 MINTER_HASH = "e22ab00c5abe1c3ed017b60d38968e7c61bef76bc63680d303720aed6e53fc93"
 MAX_BYTES = 1024 * 1024
 MAX_PAGES = 10
@@ -141,7 +142,10 @@ def https_json(host, method, path, token, body=None):
     if hasattr(context, "keylog_filename"):
         context.keylog_filename = None
     connection = http.client.HTTPSConnection(host, timeout=20, context=context)
-    headers = {"Authorization": "Bearer " + token, "Connection": "close"}
+    # Direct REST calls do not inherit the gcloud CLI quota-project setting.
+    # Bind quota consumption to the same fixed development target as resources.
+    headers = {"Authorization": "Bearer " + token, "Connection": "close",
+               "x-goog-user-project": PROJECT}
     payload = None
     if body is not None:
         payload = json.dumps(body, separators=(",", ":")).encode()
