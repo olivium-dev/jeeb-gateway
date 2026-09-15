@@ -6,6 +6,7 @@ import importlib.util
 import io
 import json
 import os
+import socket
 from pathlib import Path
 import stat
 import sys
@@ -60,6 +61,10 @@ class OfflineCase(unittest.TestCase):
         self.network = patch.object(subject.http.client, "HTTPSConnection", side_effect=AssertionError("network forbidden"))
         self.network.start()
         self.addCleanup(self.network.stop)
+        for name in ("socket", "create_connection"):
+            guard = patch.object(socket, name, side_effect=AssertionError("socket access forbidden"))
+            guard.start()
+            self.addCleanup(guard.stop)
 
     def worker(self, **kwargs):
         kwargs.setdefault("command", Mock(side_effect=AssertionError("unexpected command")))
@@ -71,6 +76,105 @@ class OfflineCase(unittest.TestCase):
     def reject(self, reason, operation):
         with self.assertRaisesRegex(subject.Rejected, "^" + reason + "$"):
             operation()
+
+
+class QuotaRoutingTests(OfflineCase):
+    def connection(self, status=200, value=None):
+        response = Mock()
+        response.status = status
+        response.read.return_value = encoded({"synthetic": True} if value is None else value)
+        connection = Mock()
+        connection.getresponse.return_value = response
+        return connection, response
+
+    def test_direct_oauth_quota_header_is_exact_for_every_allowed_host(self):
+        ambient = {"GOOGLE_CLOUD_QUOTA_PROJECT": "synthetic-wrong-quota",
+                   "CLOUDSDK_BILLING_QUOTA_PROJECT": "synthetic-wrong-billing",
+                   "CLOUDSDK_CORE_PROJECT": "synthetic-wrong-project",
+                   "GCLOUD_PROJECT": "synthetic-wrong-gcloud",
+                   "GOOGLE_CLOUD_PROJECT": "synthetic-wrong-google-project"}
+        body = {"x-goog-user-project": "synthetic-caller-override",
+                "quotaProject": "synthetic-caller-override"}
+        for host in ("firebase.googleapis.com", "identitytoolkit.googleapis.com",
+                     "cloudresourcemanager.googleapis.com"):
+            with self.subTest(host=host):
+                connection, response = self.connection()
+                with patch.dict(os.environ, ambient), patch.object(subject.http.client, "HTTPSConnection", return_value=connection) as factory:
+                    self.assertEqual({"synthetic": True}, subject.https_json(host, "POST", "/synthetic/offline", OAUTH, body))
+                self.assertEqual(host, factory.call_args.args[0])
+                self.assertEqual(20, factory.call_args.kwargs["timeout"])
+                connection.request.assert_called_once_with("POST", "/synthetic/offline",
+                    body=json.dumps(body, separators=(",", ":")).encode(),
+                    headers={"Authorization": "Bearer " + OAUTH, "Connection": "close",
+                             "x-goog-user-project": "jeeb-development-msi", "Content-Type": "application/json"})
+                response.read.assert_called_once_with(subject.MAX_BYTES + 1)
+                connection.close.assert_called_once_with()
+
+    def test_caller_cannot_supply_quota_or_header_overrides(self):
+        for kwargs in ({"headers": {"x-goog-user-project": "staging"}},
+                       {"quota_project": "staging"}, {"project": "staging"}):
+            with self.subTest(kwargs=kwargs), patch.object(subject.http.client, "HTTPSConnection") as factory:
+                with self.assertRaises(TypeError):
+                    subject.https_json("firebase.googleapis.com", "GET", "/synthetic/offline", OAUTH, **kwargs)
+                factory.assert_not_called()
+
+    def test_unknown_host_is_rejected_before_connection(self):
+        with patch.object(subject.http.client, "HTTPSConnection") as factory:
+            self.reject("host_not_allowed", lambda: subject.https_json("synthetic.invalid", "GET", "/", OAUTH))
+            factory.assert_not_called()
+
+    def permission_worker(self):
+        worker = self.worker(request=subject.https_json)
+        worker.source_gate = Mock(return_value=HEAD)
+        worker.secret_gate = Mock()
+        worker.project_gate = Mock(return_value=(NUMBER, OAUTH))
+        worker.app_key = Mock(side_effect=AssertionError("app discovery must not run"))
+        worker.provider_gate = Mock(side_effect=AssertionError("provider discovery must not run"))
+        worker.mint = Mock(side_effect=AssertionError("sign-in must not run"))
+        return worker
+
+    def assert_permission_failure_stops_execute(self, status, value, reason):
+        worker = self.permission_worker()
+        connection, response = self.connection(status, value)
+        output = io.StringIO()
+        with patch.object(subject.http.client, "HTTPSConnection", return_value=connection) as factory, patch.object(subject, "create_interlock") as interlock:
+            self.assertEqual(1, subject.run(["script"] + list(subject.EXECUTION_FLAGS), provisioner=worker,
+                                           stdout=output, isolated=True))
+        self.assertEqual("cloudresourcemanager.googleapis.com", factory.call_args.args[0])
+        self.assertEqual(1, factory.call_count)
+        self.assertEqual(1, connection.request.call_count)
+        request = connection.request.call_args
+        self.assertEqual(("POST", "/v1/projects/jeeb-development-msi:testIamPermissions"), request.args)
+        self.assertEqual("jeeb-development-msi", request.kwargs["headers"]["x-goog-user-project"])
+        self.assertIn("serviceusage.services.use", json.loads(request.kwargs["body"])["permissions"])
+        interlock.assert_not_called()
+        worker.app_key.assert_not_called()
+        worker.provider_gate.assert_not_called()
+        worker.mint.assert_not_called()
+        worker.command.assert_not_called()
+        self.assertFalse(worker.state.exists())
+        self.assertFalse(worker.interlocked)
+        self.assertIsNone(worker.handle)
+        self.assertEqual({"status": "provisioning_stopped", "reason": reason,
+                          "manualReconciliationRequired": False}, json.loads(output.getvalue()))
+        self.assertNotIn(OAUTH, output.getvalue())
+        self.assertNotIn("synthetic-private-provider-message", output.getvalue())
+        self.assertNotIn("USER_PROJECT_DENIED", output.getvalue())
+        response.read.assert_called_once_with(subject.MAX_BYTES + 1)
+        connection.close.assert_called_once_with()
+
+    def test_missing_serviceusage_permission_stops_before_any_mutation(self):
+        # Literal grant list deliberately excludes the newly required permission;
+        # deriving this from REQUIRED_PERMISSIONS would conceal its removal.
+        grants = ["resourcemanager.projects.get", "firebase.projects.get", "firebase.clients.get",
+                  "firebase.clients.list", "firebaseauth.configs.get", "firebaseauth.users.create"]
+        self.assert_permission_failure_stops_execute(200, {"permissions": grants}, "required_permissions_missing")
+
+    def test_user_project_denied_stops_before_any_mutation_without_raw_output(self):
+        self.assert_permission_failure_stops_execute(403,
+            {"error": {"status": "PERMISSION_DENIED", "message": "synthetic-private-provider-message",
+                       "details": [{"reason": "USER_PROJECT_DENIED", "metadata": {"consumer": "synthetic-wrong-project"}}]}},
+            "provider_http_error")
 
 
 class ApprovalTests(OfflineCase):
